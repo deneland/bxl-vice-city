@@ -10,6 +10,7 @@ Works in 256 m blocks so memory does not grow with the region:
             b. per column: ground height (class 2, holes filled from nearest) and building top
             c. buildings and terrain made solid, only the visible shell is kept
             d. wall voxels coloured from nearby facade points; loose facade voxels absorbed
+               (then: parked vehicles from geometry; isolated clusters with < SPECK_POINTS points dropped)
             e. levels L0..L3 (0.5..4 m) built and written as 64x64-column tiles; the
                margin supplies each tile's 1-voxel apron across block seams
   pass 3  levels above L3 (one tile spans several blocks) built from the collected L3 voxels
@@ -269,6 +270,44 @@ def write_tiles(L, v: Vox, tx_range, ty_range):
 
 
 # --- pass 2: one block ---------------------------------------------------------
+SPECK_POINTS = int(os.environ.get("SPECK_POINTS", 10))  # isolated clusters with fewer LiDAR points are dropped (0: off)
+SPECK_DUMP = os.environ.get("SPECK_DUMP")               # dir: save per-cluster stats for analysis
+
+
+def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
+    """26-connected clusters of non-ground voxels; returns a mask of voxels in clusters with < SPECK_POINTS points."""
+    vx, vy, vz = key % GW, (key // GW) % GH, key // (GW * GH)
+    m = cls != C_GROUND
+    if not m.any():
+        return np.zeros(len(key), bool)
+    z0, z1 = vz[m].min(), vz[m].max()
+    occ = np.zeros((z1 - z0 + 1, GH, GW), bool)
+    occ[vz[m] - z0, vy[m], vx[m]] = True
+    lab, n = ndimage.label(occ, structure=np.ones((3, 3, 3), bool))
+    del occ
+    vl = np.zeros(len(key), np.int64)
+    vl[m] = lab[vz[m] - z0, vy[m], vx[m]]
+    del lab
+    pts = np.bincount(vl[m], weights=np.minimum(cnt[m], 1 << 20), minlength=n + 1)
+    if SPECK_DUMP:
+        nvox = np.bincount(vl[m], minlength=n + 1)
+        h = vz - ground[vy, vx]
+        hmin = np.full(n + 1, 1 << 30); np.minimum.at(hmin, vl[m], h[m])
+        hmax = np.full(n + 1, -(1 << 30)); np.maximum.at(hmax, vl[m], h[m])
+        main = np.zeros(n + 1, np.int64)
+        k, c = np.unique(vl[m] * 256 + cls[m], return_counts=True)
+        o = np.lexsort((c, k // 256)); last = np.r_[k[o][1:] // 256 != k[o][:-1] // 256, True]
+        main[(k[o] // 256)[last]] = (k[o] % 256)[last]
+        Path(SPECK_DUMP).mkdir(parents=True, exist_ok=True)
+        np.savez(Path(SPECK_DUMP) / f"{os.getpid()}_{int(key[0])}_{len(key)}.npz",
+                 nvox=nvox[1:], pts=pts[1:], hmin=hmin[1:], hmax=hmax[1:], cls=main[1:])
+    if not SPECK_POINTS:
+        return np.zeros(len(key), bool)
+    drop = m & (pts[vl] < SPECK_POINTS)
+    st["specks"] += int(drop.sum())
+    return drop
+
+
 def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: float, st: dict) -> Vox:
     """Steps a-d on one block (+margin). Returns L0 voxels in global column coords."""
     x, y, z = p["x"].astype(np.float64), p["y"].astype(np.float64), p["z"].astype(np.float64)
@@ -284,7 +323,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     # a. points -> voxels
     vkey, col, vcls, _, cnt = aggregate((iz * GH + iy) * GW + ix, rgb, cls)
     keep = cnt >= 2
-    vkey, col, vcls = vkey[keep], col[keep], vcls[keep]
+    vkey, col, vcls, cnt = vkey[keep], col[keep], vcls[keep], cnt[keep]
     vx, vy, vz = vkey % GW, (vkey // GW) % GH, vkey // (GW * GH)
 
     # b. columns: ground and roofs
@@ -378,7 +417,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
              & (vz > ground[vy, vx] + 1) & (vz < eaves[vy, vx]))
     st["absorbed"] += int((vis & loose).sum())
     vis &= ~loose
-    vkey, col, vcls = vkey[vis], col[vis], vcls[vis]
+    vkey, col, vcls, cnt = vkey[vis], col[vis], vcls[vis], cnt[vis]
 
     # e. parked vehicles (the LiDAR has no class for them): blobs of unclassified voxels standing
     #    0.5-3 m on the ground, car-width (rows of parked cars are long but never wide), nothing tall above
@@ -406,12 +445,17 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     acol = np.concatenate([col, fcol[new]])
     acls = np.concatenate([vcls, fcls[new]])
     aflag = np.concatenate([np.zeros(len(vkey), np.uint8), fflag[new]])
+    acnt = np.concatenate([cnt, np.full(int(new.sum()), 1 << 20)])   # fill voxels: solid by construction
+
+    # f. isolated specks: small clusters (not counting the ground they stand on) backed by few points
+    drop = specks(akey, acls, acnt, ground, GW, GH, st)
+    akey, acol, acls, aflag = akey[~drop], acol[~drop], acls[~drop], aflag[~drop]
     return Vox(akey % GW + gx0, (akey // GW) % GH + gy0, akey // (GW * GH), acol, acls, aflag)
 
 
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0}
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
     f = CACHE / f"b{by * NBX + bx}.bin"
     if not f.exists():
@@ -487,7 +531,7 @@ def main() -> None:
         (DEST / f"L{L}").mkdir(parents=True)
 
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0}
     carry = []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
@@ -518,7 +562,7 @@ def main() -> None:
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
         f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
         f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
-        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; "
+        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = []
     for L, lv in enumerate(levels):

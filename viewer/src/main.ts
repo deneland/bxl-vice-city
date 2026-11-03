@@ -7,6 +7,7 @@ import { Voxels } from './voxels';
 import { Walk } from './walk';
 import { Inspector } from './inspect';
 import { lighting, sunDirection, sunPosition } from './sun';
+import { applyWeather, describe, fetchWeather, Precipitation, presetWeather, type Weather } from './weather';
 import { blurPx, createTiltShift, DEPTH_RATIO, focalLength, focusDistance } from './tiltshift';
 
 telemetry.start();
@@ -125,10 +126,22 @@ async function main() {
   world.updateMatrixWorld();
   sun.target.position.set((L0.size[0] / 2) * VS + world.position.x, 0, -(L0.size[1] / 2) * VS + world.position.z);
 
-  // --- time of day: real sun position over Schaerbeek ----------------------
+  // --- time of day + weather: live over Schaerbeek, or chosen with the slider ---------
   const timeInput = document.getElementById('time') as HTMLInputElement;
   const timeLabel = document.getElementById('time-label')!;
-  const day = params.get('date') ?? new Date().toISOString().slice(0, 10);
+  const liveBtn = document.getElementById('live') as HTMLButtonElement;
+  const brusselsNow = () => {  // [YYYY-MM-DD, fractional hours] on the Brussels clock
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Brussels', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date())
+      .map((x) => [x.type, x.value]));
+    return [`${p.year}-${p.month}-${p.day}`, Number(p.hour) + Number(p.minute) / 60] as const;
+  };
+  let day = params.get('date') ?? brusselsNow()[0];
+  let live = !params.has('time');
+  let weather: Weather | null = null;   // null: unknown (not loaded or service down) -> clear-sky look
+  const precip = new Precipitation();
+  scene.add(precip.mesh);
+  let precipOn = false;
   const brusselsOffset = (d: Date) => {  // minutes ahead of UTC (CET/CEST)
     const tz = new Intl.DateTimeFormat('en', { timeZone: 'Europe/Brussels', timeZoneName: 'shortOffset' })
       .formatToParts(d).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT+1';
@@ -141,6 +154,10 @@ async function main() {
     t = new Date(t.getTime() - brusselsOffset(t) * 60e3);
     const { az, alt } = sunPosition(t, LAT, LON);
     const l = lighting(alt);
+    const fog = applyWeather(weather ?? presetWeather('clear'), l);
+    (scene.fog as THREE.Fog).near = fog.fogNear;
+    (scene.fog as THREE.Fog).far = fog.fogFar;
+    precipOn = weather ? precip.set(weather) : false;
     sunDirection(az, Math.max(alt, 0.02), sun.position).multiplyScalar(2000).add(sun.target.position);
     sun.color.copy(l.sunColor);
     sun.intensity = l.sunIntensity;
@@ -150,12 +167,31 @@ async function main() {
     scene.fog!.color.copy(l.sky);
     document.body.style.background = '#' + l.sky.getHexString();
     const hh = Math.floor(hours), mm = Math.round((hours - hh) * 60);
-    timeLabel.textContent = `${day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` +
-      ` · sun ${(alt * 180 / Math.PI).toFixed(0)}°`;
+    timeLabel.textContent = `${live ? 'live · ' : ''}${day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` +
+      ` · ${weather ? `${describe(weather)}, ${Math.round(weather.temp)}°C` : 'weather unavailable'} · sun ${(alt * 180 / Math.PI).toFixed(0)}°`;
+    liveBtn.style.display = live ? 'none' : '';
     dirty = true;
   };
-  timeInput.value = params.get('time') ?? '15';
-  timeInput.addEventListener('input', () => setTime(Number(timeInput.value)));
+  const tick = () => { // live: follow the clock
+    if (!live) return;
+    const [d, h] = brusselsNow();
+    day = d;
+    timeInput.value = String(h);
+    setTime(h);
+  };
+  timeInput.value = params.get('time') ?? String(brusselsNow()[1]);
+  timeInput.addEventListener('input', () => { live = false; setTime(Number(timeInput.value)); });
+  liveBtn.addEventListener('click', () => { live = true; tick(); });
+  setInterval(tick, 30e3);
+  const wPreset = params.get('weather');
+  const updateWeather = async () => {
+    try {
+      weather = wPreset ? presetWeather(wPreset) : await fetchWeather(LAT, LON);
+      setTime(Number(timeInput.value));
+      telemetry.event('weather', { ...weather! });
+    } catch (e) { console.warn('weather unavailable', e); }
+  };
+  if (!wPreset) setInterval(updateWeather, 10 * 60e3);
 
   // --- level-of-detail tiles ------------------------------------------------
   const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
@@ -267,6 +303,7 @@ async function main() {
   });
   let dirty = true; // something outside camera/tiles changed: draw the next tick
   setTime(Number(timeInput.value));
+  updateWeather();
   setTilt(params.get('tilt') === '1');
   window.addEventListener('resize', () => {
     dirty = true;
@@ -311,7 +348,7 @@ async function main() {
       focalLength.value = d * DEPTH_RATIO;
     }
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
-    if (!(CONTINUOUS || moving || tilesChanged || dirty || snapshotRequested)) {
+    if (!(CONTINUOUS || precipOn || moving || tilesChanged || dirty || snapshotRequested)) {
       // nothing changed: draw nothing, the GPU stays idle
       lastTickRendered = false;
       skipped++;

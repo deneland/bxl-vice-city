@@ -14,6 +14,7 @@
     #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
     #tools { position: fixed; bottom: 36px; left: 8px; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; display: flex; gap: 8px; align-items: center; }
     #tools input { width: 220px; }
+    #tools button { font: inherit; padding: 0 6px; cursor: pointer; }
     #inspect { position: fixed; top: 64px; left: 8px; padding: 6px 8px; background: #000b; color: #fff; border-radius: 4px; display: none; }
     #inspect .sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; border: 1px solid #fff6; }
     #inspect b { display: inline-block; width: 86px; color: #aaa; font-weight: normal; }
@@ -26,7 +27,7 @@
 <body>
   <div id="hud">starting…</div>
   <div id="help">drag/right-drag/wheel: map · click: inspect · double-click: orbit here · V: walk · M: miniature · L: classes · H: home · P: snapshot</div>
-  <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span></div>
+  <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span><button id="live">live</button></div>
   <div id="inspect"></div>
   <div id="crosshair"></div>
   <div id="walk-hint">walking: WASD / arrows · shift: run · mouse: look · click: inspect<br>click to continue · V: back to the map</div>
