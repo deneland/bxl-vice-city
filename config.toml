@@ -1,13 +1,22 @@
-# Region of interest — Lambert 72 (EPSG:31370), metres.
-[roi]
-name = "home"
+# Regions of interest — Lambert 72 (EPSG:31370), metres.
+# Build one with: uv run python voxelize.py [name]   (default below)
+default = "schaerbeek"
+
+[roi.small]         # 500 m, two LiDAR tiles — quick iteration
 xmin = 150361
 ymin = 172790
 xmax = 150861
 ymax = 173290
-
-[lidar]
 tiles = ["150172", "150173"]
+levels = 4
+
+[roi.schaerbeek]    # 1.5 km centred on Place Colignon
+xmin = 149861
+ymin = 172290
+xmax = 151361
+ymax = 173790
+tiles = ["149172", "150172", "151172", "149173", "150173", "151173"]
+levels = 5
 
 # Initial camera target (L72): Place Colignon, Schaerbeek town hall.
 [view]

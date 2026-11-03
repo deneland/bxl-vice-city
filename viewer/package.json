@@ -7,7 +7,8 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "bench": "node bench/bench.mjs",
-    "sessions": "node scripts/sessions.mjs"
+    "sessions": "node scripts/sessions.mjs",
+    "lodsweep": "node bench/lodsweep.mjs"
   },
   "dependencies": {
     "three": "0.186.1"

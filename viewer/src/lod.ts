@@ -19,9 +19,10 @@ interface Node {
   mesh: THREE.Mesh | null; faces: number;
   box: THREE.Box3;      // world space
   prio: number;
+  used: number;         // frame number when last visited
 }
 
-export interface LodStats { perLevel: number[]; faces: number; loading: number; ready: number; total: number }
+export interface LodStats { perLevel: number[]; faces: number; loading: number; ready: number; total: number; residentFaces: number; evicted: number }
 
 export class TileManager {
   private nodes: Node[] = [];
@@ -34,8 +35,15 @@ export class TileManager {
   private materials: THREE.Material[];
   private idleWaiters: (() => void)[] = [];
   private tmp = new THREE.Vector3();
-  stats: LodStats = { perLevel: [], faces: 0, loading: 0, ready: 0, total: 0 };
+  stats: LodStats = { perLevel: [], faces: 0, loading: 0, ready: 0, total: 0, residentFaces: 0, evicted: 0 };
+  private frame = 0;
+  private resident = 0;   // faces held in memory
+  private evicted = 0;
+  /** keep at most this many faces meshed (12 bytes each on the GPU); least recently used go first */
+  budgetFaces = 16_000_000;
   errPx: number;
+  /** appended to tile URLs (build id), so a browser never mixes tiles from two builds */
+  query = '';
 
   constructor(
     private base: string, private tileSize: number, private levels: LevelInfo[],
@@ -54,7 +62,7 @@ export class TileManager {
           new THREE.Vector3((t.tx + 1) * s, (t.zmax + 1) * lv.voxelSize, -t.ty * s),
         ).applyMatrix4(group.matrixWorld);
         const n: Node = { id: this.nodes.length, L: lv.level, info: t, vs: lv.voxelSize, children: [],
-          state: 'idle', mesh: null, faces: 0, box, prio: 0 };
+          state: 'idle', mesh: null, faces: 0, box, prio: 0, used: 0 };
         this.nodes.push(n);
         byKey.set(`${lv.level}/${t.tx}/${t.ty}`, n);
       }
@@ -76,21 +84,35 @@ export class TileManager {
   private maxInflight: number;
 
   /** Resolves once nothing is queued or loading (after the next update). */
-  whenIdle(): Promise<void> { return new Promise((r) => this.idleWaiters.push(r)); }
+  /** tiles still queued or loading */
+  get busy() { return this.inflight > 0 || this.queue.length > 0 || this.roots.some((r) => r.state !== 'ready'); }
+  private meshArrived = false;
+  /** true while tiles load, or when a mesh arrived since the last update (it must be shown) */
+  get needsUpdate() { return this.busy || this.meshArrived || this.idleWaiters.length > 0; }
 
-  update(camera: THREE.PerspectiveCamera, viewportPx: number) {
+  whenIdle(): Promise<void> {
+    if (!this.busy && !this.meshArrived) return Promise.resolve();
+    return new Promise((r) => this.idleWaiters.push(r));
+  }
+
+  /** Picks the tiles to show. Returns true if what is on screen changed (a render is needed). */
+  update(camera: THREE.PerspectiveCamera, viewportPx: number): boolean {
     const focal = viewportPx / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
     const cam = camera.getWorldPosition(this.tmp);
     const show = new Set<Node>();
     const perLevel = this.levels.map(() => 0);
     let faces = 0;
 
+    this.meshArrived = false;
+    const frame = ++this.frame;
     const visit = (n: Node) => {
+      n.used = frame;
       const d = n.box.distanceToPoint(cam);
       const px = d > 0 ? (n.vs * focal) / d : Infinity;
       if (n.L > 0 && px > this.errPx && n.children.length) {
         let allReady = true;
         for (const k of n.children) {
+          k.used = frame; // wanted: never evict it while its siblings load
           if (k.state !== 'ready') {
             allReady = false;
             if (k.state === 'idle' || k.state === 'queued') this.request(k, k.L * 1e6 - k.box.distanceToPoint(cam));
@@ -104,16 +126,34 @@ export class TileManager {
     };
     for (const r of this.roots) if (r.state === 'ready') visit(r);
 
-    for (const n of this.shown) if (!show.has(n) && n.mesh) n.mesh.visible = false;
-    for (const n of show) if (n.mesh) n.mesh.visible = true;
+    let changed = show.size !== this.shown.size;
+    for (const n of this.shown) if (!show.has(n)) { changed = true; if (n.mesh) n.mesh.visible = false; }
+    for (const n of show) if (n.mesh && !n.mesh.visible) { changed = true; n.mesh.visible = true; }
     this.shown = show;
+    this.evict();
     this.pump();
 
     this.stats = { perLevel, faces, loading: this.inflight + this.queue.length,
-      ready: this.nodes.filter((n) => n.state === 'ready').length, total: this.nodes.length };
+      ready: this.nodes.filter((n) => n.state === 'ready').length, total: this.nodes.length,
+      residentFaces: this.resident, evicted: this.evicted };
     if (!this.inflight && !this.queue.length && this.roots.every((r) => r.state === 'ready') && this.idleWaiters.length) {
       const w = this.idleWaiters; this.idleWaiters = [];
       w.forEach((f) => f());
+    }
+    return changed;
+  }
+
+  private evict() {
+    if (this.resident <= this.budgetFaces) return;
+    const cand = this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame)
+      .sort((a, b) => a.used - b.used);
+    for (const n of cand) {
+      if (this.resident <= this.budgetFaces * 0.85) break;
+      if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh = null; }
+      this.resident -= n.faces;
+      n.faces = 0;
+      n.state = 'idle';
+      this.evicted++;
     }
   }
 
@@ -129,7 +169,7 @@ export class TileManager {
       const n = this.queue.shift()!;
       n.state = 'loading';
       this.inflight++;
-      fetch(`${this.base}/${n.info.file}`).then((r) => r.arrayBuffer()).then((buf) => {
+      fetch(`${this.base}/${n.info.file}${this.query}`).then((r) => r.arrayBuffer()).then((buf) => {
         const req: MeshRequest = { id: n.id, buf, ch: this.tileSize, nz: this.levels[n.L].size[2] };
         this.workers[this.nextWorker++ % this.workers.length].postMessage(req, [buf]);
       });
@@ -140,7 +180,9 @@ export class TileManager {
     const n = this.nodes[id];
     this.inflight--;
     n.state = 'ready';
+    this.meshArrived = true;
     n.faces = faces;
+    this.resident += faces;
     if (!faces) return;
     const g = new THREE.InstancedBufferGeometry();
     g.index = voxelGeometryBase.index;

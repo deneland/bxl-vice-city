@@ -68,7 +68,7 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
-const query = ['telemetry=0', 'gpu=1', EXTRA_QUERY].filter(Boolean).join('&');
+const query = ['telemetry=0', 'gpu=1', 'continuous=1', EXTRA_QUERY].filter(Boolean).join('&');
 const tNav = Date.now();
 await page.goto(`${URL_BASE}?${query}`);
 await page.waitForFunction(() => window.__viewer, null, { timeout: 30000 });

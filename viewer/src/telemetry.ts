@@ -39,6 +39,7 @@ class Telemetry {
   private seq = 0;
   private frames: FrameInfo[] = [];
   private gpu: number[] = [];
+  private idle = 0;
   private recent: FrameInfo[] = [];
   private env: Record<string, unknown> = {};
   private state: () => Record<string, unknown> = () => ({});
@@ -88,10 +89,13 @@ class Telemetry {
     if (this.recent.length > KEEP_RECENT) this.recent.shift();
   }
 
+  /** an animation tick where nothing changed and nothing was drawn */
+  idleTick() { if (TELEMETRY) this.idle++; }
+
   gpuTime(ms: number) { if (TELEMETRY && ms > 0) this.gpu.push(ms); }
 
   flush(reason: string, beacon = false) {
-    if (!TELEMETRY || (!this.frames.length && reason === 'interval')) return;
+    if (!TELEMETRY || (!this.frames.length && !this.idle && reason === 'interval')) return;
     const f = this.frames;
     const moving = f.filter((x) => x.moving);
     const intervals = f.map((x) => x.interval);
@@ -99,6 +103,7 @@ class Telemetry {
       type: 'summary', session: this.session, seq: this.seq++, t: this.now(), reason,
       visible: !document.hidden,
       frames: f.length,
+      idleTicks: this.idle,
       movingFrames: moving.length,
       interval: stats(intervals),
       intervalMoving: stats(moving.map((x) => x.interval)),
@@ -113,6 +118,7 @@ class Telemetry {
     }, beacon);
     this.frames = [];
     this.gpu = [];
+    this.idle = 0;
   }
 
   snapshot(canvas: HTMLCanvasElement, note = '') {

@@ -6,15 +6,17 @@ import { TELEMETRY, telemetry } from './telemetry';
 telemetry.start();
 
 interface Manifest {
-  version: number; name: string; origin: [number, number, number]; tileSize: number;
+  version: number; build?: string; name: string; origin: [number, number, number]; tileSize: number;
   home: [number, number]; levels: LevelInfo[]; attribution: string;
 }
 type Vec3 = [number, number, number];
 export interface View { pos: Vec3; target: Vec3 }
 
 const params = new URLSearchParams(location.search);
-const ROI = params.get('roi') ?? 'small';
+const ROI = params.get('roi') ?? 'schaerbeek';
 const SHADOWS = params.get('shadows') === '1';
+// render every animation frame (benchmarks); default: only when something changed
+const CONTINUOUS = params.get('continuous') === '1';
 const GPU_TIMING = params.get('gpu') !== '0' && (TELEMETRY || params.get('gpu') === '1');
 const SKY = new THREE.Color(0xbcd3e6);
 
@@ -34,9 +36,12 @@ async function gpuName(renderer: THREE.WebGPURenderer): Promise<string> {
   return gl ? String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER)) : 'unknown';
 }
 
+const matricesClose = (a: THREE.Matrix4, b: THREE.Matrix4, eps: number) =>
+  a.elements.every((v, i) => Math.abs(v - b.elements[i]) <= eps);
+
 async function main() {
   const tStart = performance.now();
-  const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`)).json();
+  const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`, { cache: 'no-store' })).json();
   const L0 = manifest.levels[0];
   const VS = L0.voxelSize, CH = manifest.tileSize, NZ = L0.size[2];
   document.getElementById('attr')!.textContent = manifest.attribution;
@@ -60,9 +65,9 @@ async function main() {
 
   const scene = new THREE.Scene();
   scene.background = SKY;
-  scene.fog = new THREE.Fog(SKY, 350, 1300);
+  scene.fog = new THREE.Fog(SKY, 700, 2600);
 
-  const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 4000);
+  const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 6000);
   camera.position.set(-110, 120, 150);
 
   const controls = new MapControls(camera, renderer.domElement);
@@ -70,7 +75,7 @@ async function main() {
   controls.dampingFactor = 0.08;
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.minDistance = 4;
-  controls.maxDistance = 900;
+  controls.maxDistance = 2200;
   controls.screenSpacePanning = false;
   controls.listenToKeyEvents(window);
   controls.keyPanSpeed = 25;
@@ -109,8 +114,10 @@ async function main() {
   scene.add(world);
 
   // --- level-of-detail tiles ------------------------------------------------
-  const ERR = Number(params.get('err') ?? 2);           // max on-screen size of one voxel, px
+  const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
   const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR);
+  lod.query = manifest.build ? `?v=${manifest.build}` : '';
+  lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions
   const t0 = performance.now();
   let loadMs = 0;
   const ready = new Promise<void>((resolve) => {
@@ -128,8 +135,11 @@ async function main() {
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'h' || e.key === 'H') setView(home);
     if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
+    dirty = true;
   });
+  let dirty = true; // something outside camera/tiles changed: draw the next tick
   window.addEventListener('resize', () => {
+    dirty = true;
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
@@ -147,24 +157,40 @@ async function main() {
   const lastCam = new THREE.Matrix4();
   let last = performance.now(), hudAt = 0, gpuMs = 0, gpuInFlight = false;
   let flashUntil = 0;
+  let lastTickRendered = false, rendered = 0, skipped = 0;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
     last = now;
-    frameTimes.push(interval);
-    if (frameTimes.length > 240) frameTimes.shift();
 
     controls.update();
     camera.updateMatrixWorld();
-    lod.update(camera, renderer.domElement.height);
-    const moving = !lastCam.equals(camera.matrixWorld);
-    lastCam.copy(camera.matrixWorld);
+    // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
+    const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
+    if (moving) lastCam.copy(camera.matrixWorld);
+    const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
+    if (!(CONTINUOUS || moving || tilesChanged || dirty || snapshotRequested)) {
+      // nothing changed: draw nothing, the GPU stays idle
+      lastTickRendered = false;
+      skipped++;
+      telemetry.idleTick();
+      updateHud(now);
+      return;
+    }
+    dirty = false;
     renderer.render(scene, camera);
+    rendered++;
     const cpu = performance.now() - now;
-    const frame = { interval, cpu, moving, drawCalls: renderer.info.render.drawCalls,
-      triangles: renderer.info.render.triangles };
-    telemetry.frame(frame);
-    for (const h of frameHooks) h(frame);
+    // a frame interval only means something if the previous tick also rendered
+    if (lastTickRendered) {
+      frameTimes.push(interval);
+      if (frameTimes.length > 240) frameTimes.shift();
+      const frame = { interval, cpu, moving, drawCalls: renderer.info.render.drawCalls,
+        triangles: renderer.info.render.triangles };
+      telemetry.frame(frame);
+      for (const h of frameHooks) h(frame);
+    }
+    lastTickRendered = true;
 
     if (GPU_TIMING && !gpuInFlight) {
       gpuInFlight = true;
@@ -183,21 +209,26 @@ async function main() {
       flashUntil = now + 1200;
     }
 
-    if (now - hudAt > 500) {
-      hudAt = now;
-      const sorted = [...frameTimes].sort((x, y) => x - y);
-      const avg = sorted.reduce((s, v) => s + v, 0) / sorted.length;
-      const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0;
-      hud.textContent =
-        `${backend} · ${(1000 / avg).toFixed(0)} fps · avg ${avg.toFixed(1)} ms · p99 ${p99.toFixed(1)} ms` +
-        (GPU_TIMING ? ` · gpu ${gpuMs.toFixed(2)} ms` : '') + '\n' +
-        `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces · ` +
-        `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `loaded ${lod.stats.ready}/${lod.stats.total}`}` +
-        `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
-        ` · shadows ${SHADOWS ? 'on' : 'off'}` +
-        (TELEMETRY ? ' · telemetry on' : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
-    }
+    updateHud(now);
   });
+
+  function updateHud(now: number) {
+    if (now - hudAt < 500) return;
+    hudAt = now;
+    const sorted = [...frameTimes].sort((x, y) => x - y);
+    const avg = sorted.length ? sorted.reduce((s, v) => s + v, 0) / sorted.length : 0;
+    const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0;
+    hud.textContent =
+      (lastTickRendered && avg ? `${backend} · ${(1000 / avg).toFixed(0)} fps · avg ${avg.toFixed(1)} ms · p99 ${p99.toFixed(1)} ms` : `${backend} · idle, nothing to draw`) +
+      ` · ${rendered} frames drawn, ${skipped} skipped` +
+      (GPU_TIMING ? ` · gpu ${gpuMs.toFixed(2)} ms` : '') + '\n' +
+      `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces · ` +
+      `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
+      ` (${(lod.stats.residentFaces / 1e6).toFixed(1)}M faces)` +
+      `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
+      ` · shadows ${SHADOWS ? 'on' : 'off'}` +
+      (TELEMETRY ? ' · telemetry on' : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
+  }
 
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {

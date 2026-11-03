@@ -12,7 +12,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ROI = CFG["roi"]
+ROI_NAME = next((a for a in sys.argv[1:] if not a.startswith("-") and not a.endswith(".las")), CFG["default"])
+ROI = {"name": ROI_NAME, **CFG["roi"][ROI_NAME]}
 
 # ASPRS standard class names (LAS 1.4)
 CLASS_NAMES = {
