@@ -1,0 +1,18 @@
+# Region of interest — Lambert 72 (EPSG:31370), metres.
+[roi]
+name = "home"
+xmin = 150361
+ymin = 172790
+xmax = 150861
+ymax = 173290
+
+[lidar]
+tiles = ["150172", "150173"]
+
+# Initial camera target (L72): Place Colignon, Schaerbeek town hall.
+[view]
+x = 150611
+y = 173040
+
+[voxel]
+size = 0.5

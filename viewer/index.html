@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>bxl vice voxel</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #bcd3e6; font: 12px/1.4 ui-monospace, monospace; }
+    canvas { display: block; }
+    #hud { position: fixed; top: 8px; left: 8px; padding: 6px 8px; background: #0008; color: #fff; border-radius: 4px; white-space: pre; pointer-events: none; }
+    #help { position: fixed; bottom: 8px; left: 8px; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
+    #attr { position: fixed; bottom: 8px; right: 8px; padding: 4px 8px; background: #fffa; color: #222; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="hud">starting…</div>
+  <div id="help">drag: pan · right-drag: rotate · wheel: zoom · arrows: move · H: home · ?shadows=0</div>
+  <div id="attr"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
