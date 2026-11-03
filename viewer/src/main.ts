@@ -1,16 +1,13 @@
 import * as THREE from 'three/webgpu';
 import { MapControls } from 'three/addons/controls/MapControls.js';
-import { createVoxelMaterial, voxelGeometryBase } from './voxelMaterial';
-import type { MeshRequest, MeshResult } from './mesher.worker';
+import { TileManager, type LevelInfo } from './lod';
 import { TELEMETRY, telemetry } from './telemetry';
 
 telemetry.start();
 
-interface ChunkInfo { file: string; cx: number; cy: number; count: number; zmin: number; zmax: number }
 interface Manifest {
-  name: string; origin: [number, number, number]; voxelSize: number;
-  size: [number, number, number]; chunkSize: number; home: [number, number];
-  chunks: ChunkInfo[]; attribution: string;
+  version: number; name: string; origin: [number, number, number]; tileSize: number;
+  home: [number, number]; levels: LevelInfo[]; attribution: string;
 }
 type Vec3 = [number, number, number];
 export interface View { pos: Vec3; target: Vec3 }
@@ -40,7 +37,8 @@ async function gpuName(renderer: THREE.WebGPURenderer): Promise<string> {
 async function main() {
   const tStart = performance.now();
   const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`)).json();
-  const VS = manifest.voxelSize, CH = manifest.chunkSize, NZ = manifest.size[2];
+  const L0 = manifest.levels[0];
+  const VS = L0.voxelSize, CH = manifest.tileSize, NZ = L0.size[2];
   document.getElementById('attr')!.textContent = manifest.attribution;
 
   // scene frame: origin at the home point, ground ≈ y 0
@@ -96,7 +94,7 @@ async function main() {
   sun.position.set(-180, 260, 120); // from the south-west-ish, afternoon
   if (SHADOWS) {
     sun.castShadow = true;
-    const half = (manifest.size[0] * VS) / 2 + 60;
+    const half = (L0.size[0] * VS) / 2 + 60;
     Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, near: 1, far: 1200 });
     sun.shadow.mapSize.set(4096, 4096);
     sun.shadow.bias = -0.0005;
@@ -104,71 +102,25 @@ async function main() {
   }
   scene.add(sun, sun.target);
 
-  const material = createVoxelMaterial(VS);
   const world = new THREE.Group();
-  world.position.set(-homeVX * VS, -groundGuess * VS, homeVY * VS);
+  // put the home tile's lowest surface at y≈0 (known from the manifest, before loading)
+  const homeTile = L0.tiles.find((t) => t.tx === Math.floor(homeVX / CH) && t.ty === Math.floor(homeVY / CH));
+  world.position.set(-homeVX * VS, -(homeTile?.zmin ?? groundGuess) * VS, homeVY * VS);
   scene.add(world);
 
-  // --- worker pool -------------------------------------------------------
-  const nWorkers = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
-  const workers = Array.from({ length: nWorkers }, () =>
-    new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' }));
-  const pending = new Map<number, ChunkInfo>();
-  let totalFaces = 0, loaded = 0, groundSet = false;
+  // --- level-of-detail tiles ------------------------------------------------
+  const ERR = Number(params.get('err') ?? 2);           // max on-screen size of one voxel, px
+  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR);
   const t0 = performance.now();
   let loadMs = 0;
-  let resolveReady!: () => void;
-  const ready = new Promise<void>((r) => (resolveReady = r));
-
-  const onMesh = (ev: MessageEvent<MeshResult>) => {
-    const { id, a, c, faces } = ev.data;
-    const info = pending.get(id)!;
-    pending.delete(id);
-    loaded++;
-    if (loaded === 1) telemetry.event('first-chunk', { ms: Math.round(performance.now() - tStart) });
-    if (loaded === manifest.chunks.length) {
+  const ready = new Promise<void>((resolve) => {
+    // first full, settled view: all tiles the initial camera needs are meshed
+    const check = () => lod.whenIdle().then(() => {
       loadMs = performance.now() - t0;
-      telemetry.event('all-chunks', { ms: Math.round(performance.now() - tStart), chunks: loaded, faces: totalFaces + faces });
-      queueMicrotask(resolveReady);
-    }
-    if (!faces) return;
-    const g = new THREE.InstancedBufferGeometry();
-    g.index = voxelGeometryBase.index;
-    g.setAttribute('position', voxelGeometryBase.getAttribute('position'));
-    g.setAttribute('packed', new THREE.InstancedBufferAttribute(a, 2));
-    g.setAttribute('rgba', new THREE.InstancedBufferAttribute(c, 4, true));
-    g.instanceCount = faces;
-    // bounds in chunk-local three coords (positionNode is invisible to three)
-    const s = CH * VS;
-    g.boundingBox = new THREE.Box3(
-      new THREE.Vector3(0, info.zmin * VS, -s), new THREE.Vector3(s, (info.zmax + 1) * VS, 0));
-    g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
-    const mesh = new THREE.Mesh(g, material);
-    mesh.position.set(info.cx * s, 0, -info.cy * s);
-    mesh.castShadow = mesh.receiveShadow = SHADOWS;
-    mesh.matrixAutoUpdate = false;
-    mesh.updateMatrix();
-    world.add(mesh);
-    totalFaces += faces;
-    if (!groundSet && info.cx === Math.floor(homeVX / CH) && info.cy === Math.floor(homeVY / CH)) {
-      // put the home chunk's lowest surface at y≈0
-      world.position.y = -info.zmin * VS;
-      groundSet = true;
-    }
-  };
-  workers.forEach((w) => (w.onmessage = onMesh));
-
-  // load nearest chunks first
-  const order = [...manifest.chunks].sort((p, q) =>
-    Math.hypot((p.cx + 0.5) * CH - homeVX, (p.cy + 0.5) * CH - homeVY) -
-    Math.hypot((q.cx + 0.5) * CH - homeVX, (q.cy + 0.5) * CH - homeVY));
-  let next = 0;
-  order.forEach((info, i) => {
-    fetch(`tiles/${ROI}/${info.file}`).then((r) => r.arrayBuffer()).then((buf) => {
-      pending.set(i, info);
-      const req: MeshRequest = { id: i, buf, ch: CH, nz: NZ };
-      workers[next++ % nWorkers].postMessage(req, [buf]);
+      telemetry.event('initial-load', { ms: Math.round(performance.now() - tStart), ...lod.stats });
+      resolve();
     });
+    setTimeout(check, 50);
   });
 
   // --- input ---------------------------------------------------------------
@@ -184,7 +136,7 @@ async function main() {
   });
 
   telemetry.setState(() => ({
-    view: getView(), chunks: loaded, faces: totalFaces,
+    view: getView(), lod: lod.stats, errPx: lod.errPx,
     screen: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
   }));
 
@@ -204,6 +156,7 @@ async function main() {
 
     controls.update();
     camera.updateMatrixWorld();
+    lod.update(camera, renderer.domElement.height);
     const moving = !lastCam.equals(camera.matrixWorld);
     lastCam.copy(camera.matrixWorld);
     renderer.render(scene, camera);
@@ -238,8 +191,9 @@ async function main() {
       hud.textContent =
         `${backend} · ${(1000 / avg).toFixed(0)} fps · avg ${avg.toFixed(1)} ms · p99 ${p99.toFixed(1)} ms` +
         (GPU_TIMING ? ` · gpu ${gpuMs.toFixed(2)} ms` : '') + '\n' +
-        `chunks ${loaded}/${manifest.chunks.length}${loadMs ? ` in ${(loadMs / 1000).toFixed(1)} s` : ''}` +
-        ` · ${(totalFaces / 1e6).toFixed(2)}M faces · ${renderer.info.render.drawCalls} draws` +
+        `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces · ` +
+        `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `loaded ${lod.stats.ready}/${lod.stats.total}`}` +
+        `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
         ` · shadows ${SHADOWS ? 'on' : 'off'}` +
         (TELEMETRY ? ' · telemetry on' : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
     }
@@ -247,8 +201,9 @@ async function main() {
 
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
-    renderer, scene, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks,
-    info: () => ({ backend, loaded, chunks: manifest.chunks.length, totalFaces, loadMs,
+    renderer, scene, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod,
+    whenIdle: () => lod.whenIdle(),
+    info: () => ({ backend, ...lod.stats, loadMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
   };
 }

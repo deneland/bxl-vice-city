@@ -4,6 +4,7 @@
 //   npm run bench                       run, print table, compare to bench/baseline.json
 //   npm run bench -- --save-baseline    also store this run as the new baseline
 //   npm run bench -- --only street,orbit --query shadows=1 --size 1920x1080
+//   npm run bench -- --strict          abort if the GPU is busy with something else
 //
 // Needs the dev server running (npm run dev). Results + screenshots go to
 // data/metrics/bench/<timestamp>/.
@@ -11,6 +12,7 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../..');
@@ -37,6 +39,23 @@ function stats(v) {
   const s = [...v].sort((a, b) => a - b);
   return { avg: r2(s.reduce((a, b) => a + b, 0) / s.length), p50: r2(pct(s, 0.5)), p95: r2(pct(s, 0.95)),
     p99: r2(pct(s, 0.99)), max: r2(s.at(-1)) };
+}
+
+// Background GPU load (e.g. a viewer tab open in your browser) skews results: sample it first.
+function gpuLoad(samples = 6) {
+  try {
+    const v = [];
+    for (let i = 0; i < samples; i++) {
+      v.push(Number(execFileSync('nvidia-smi', ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits']).toString().trim().split('\n')[0]));
+      execFileSync('sleep', ['0.3']);
+    }
+    return Math.round(v.reduce((a, b) => a + b, 0) / v.length);
+  } catch { return null; }
+}
+const idleBefore = gpuLoad();
+if (idleBefore != null && idleBefore > 10) {
+  console.log(`⚠ GPU is ${idleBefore}% busy before the run (another app or an open viewer tab). Results will be skewed.`);
+  if (flag('strict')) { console.log('--strict: aborting'); process.exit(2); }
 }
 
 const browser = await chromium.launch({
@@ -103,7 +122,15 @@ const measure = (s) => page.evaluate(({ s, frames, warmup }) => new Promise((don
 
 const results = [];
 for (const s of scenarios) {
+  // settle: move the camera, let LOD tiles for this view finish loading (paths load while moving)
+  await page.evaluate(async (view) => {
+    const v = window.__viewer;
+    v.setView(view);
+    for (let i = 0; i < 3; i++) await new Promise((r) => requestAnimationFrame(r));
+    await v.whenIdle?.();
+  }, s.view);
   const { rec, gpu } = await measure(s);
+  const lod = await page.evaluate(() => window.__viewer.lod?.stats ?? null);
   if (!s.path) await page.screenshot({ path: resolve(OUT, `${s.name}.png`) });
   results.push({
     name: s.name, path: s.path ?? null,
@@ -112,13 +139,15 @@ for (const s of scenarios) {
     gpu: stats(gpu),
     drawCalls: Math.round(stats(rec.map((f) => f.drawCalls)).avg),
     trianglesM: r2(stats(rec.map((f) => f.triangles)).avg / 1e6),
+    lod,
   });
   process.stdout.write('.');
 }
 process.stdout.write('\n');
 await browser.close();
 
-const run = { stamp, url: `${URL_BASE}?${query}`, size: [W, H], env, load, results, errors: [...new Set(errors)] };
+const idleAfter = gpuLoad();
+const run = { gpuBusyBefore: idleBefore, gpuBusyAfter: idleAfter, stamp, url: `${URL_BASE}?${query}`, size: [W, H], env, load, results, errors: [...new Set(errors)] };
 writeFileSync(resolve(OUT, 'results.json'), JSON.stringify(run, null, 1));
 
 // --- report ------------------------------------------------------------------
@@ -130,8 +159,9 @@ const delta = (now, old) => {
   return Math.abs(d) < 3 ? ' (=)' : ` (${d > 0 ? '+' : ''}${d.toFixed(0)}%)`;
 };
 const fmt = (x) => (x == null ? '–' : x.toFixed(2));
-console.log(`${env.backend} · ${env.gpu}\n${W}x${H} · query "${query}" · load ${load.readyMs} ms (${load.chunks} chunks, ${(load.totalFaces / 1e6).toFixed(2)}M faces) · heap ${env.mem} MB`);
-console.log('\nscenario     gpu avg ms      gpu p95 ms      frame p50  frame p99 ms     cpu p99  draws  tris(M)');
+console.log(`GPU busy before/after run: ${idleBefore ?? '?'}% / ${idleAfter ?? '?'}%${(idleBefore > 10 || idleAfter > 10) ? '  ⚠ not idle, compare with care' : ''}`);
+console.log(`${env.backend} · ${env.gpu}\n${W}x${H} · query "${query}" · first view ${load.readyMs} ms (${load.ready ?? load.chunks}/${load.total ?? load.chunks} tiles loaded) · heap ${env.mem} MB`);
+console.log('\nscenario     gpu avg ms      gpu p95 ms      frame p50  frame p99 ms     cpu p99  draws  tris(M)  tiles L0/L1/L2/L3 (end of run)');
 for (const r of results) {
   const b = base?.results.find((x) => x.name === r.name);
   console.log(
@@ -142,7 +172,8 @@ for (const r of results) {
     (fmt(r.interval.p99) + delta(r.interval.p99, b?.interval?.p99)).padEnd(16),
     fmt(r.cpu.p99).padEnd(9),
     String(r.drawCalls).padEnd(6),
-    fmt(r.trianglesM),
+    fmt(r.trianglesM).padEnd(8),
+    r.lod ? r.lod.perLevel.join('/') : '',
   );
 }
 if (base) console.log(`\n(compared with baseline ${base.stamp}; % = change, (=) within 3%)`);

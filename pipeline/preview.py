@@ -12,24 +12,25 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 man = json.loads((ROOT / "viewer/public/tiles/home/manifest.json").read_text())
-VS, CH = man["voxelSize"], man["chunkSize"]
+L0 = man["levels"][0]
+VS, CH = L0["voxelSize"], man["tileSize"]
 OUT = ROOT / "data/cache"
 OUT.mkdir(parents=True, exist_ok=True)
 
 parts = []
-for c in man["chunks"]:
+for c in L0["tiles"]:
     v = np.frombuffer((ROOT / "viewer/public/tiles/home" / c["file"]).read_bytes(), np.uint8).reshape(-1, 8)
     v = v[(v[:, 7] & 2) == 0]
     g = np.empty((len(v), 7), np.int32)
-    g[:, 0] = v[:, 0].astype(np.int32) - 1 + c["cx"] * CH
-    g[:, 1] = v[:, 1].astype(np.int32) - 1 + c["cy"] * CH
+    g[:, 0] = v[:, 0].astype(np.int32) - 1 + c["tx"] * CH
+    g[:, 1] = v[:, 1].astype(np.int32) - 1 + c["ty"] * CH
     g[:, 2] = v[:, 2]
     g[:, 3:6] = v[:, 3:6]
     g[:, 6] = v[:, 6]
     parts.append(g)
 V = np.concatenate(parts)
 x, y, z, rgb = V[:, 0], V[:, 1], V[:, 2], V[:, 3:6].astype(np.float32)
-NX, NY = man["size"][0], man["size"][1]
+NX, NY = L0["size"][0], L0["size"][1]
 hx = int((man["home"][0] - man["origin"][0]) / VS)
 hy = int((man["home"][1] - man["origin"][1]) / VS)
 
