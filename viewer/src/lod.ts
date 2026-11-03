@@ -18,6 +18,7 @@ interface Node {
   state: 'idle' | 'queued' | 'loading' | 'ready';
   mesh: THREE.Mesh | null; faces: number;
   box: THREE.Box3;      // world space
+  diag: number;         // box diagonal
   prio: number;
   used: number;         // frame number when last visited
 }
@@ -42,6 +43,8 @@ export class TileManager {
   /** keep at most this many faces meshed (12 bytes each on the GPU); least recently used go first */
   budgetFaces = 16_000_000;
   errPx: number;
+  /** optional per-tile error limit (px) from its distance range, e.g. larger where depth of field blurs */
+  errAt: ((dmin: number, dmax: number) => number) | null = null;
   /** appended to tile URLs (build id), so a browser never mixes tiles from two builds */
   query = '';
 
@@ -62,7 +65,7 @@ export class TileManager {
           new THREE.Vector3((t.tx + 1) * s, (t.zmax + 1) * lv.voxelSize, -t.ty * s),
         ).applyMatrix4(group.matrixWorld);
         const n: Node = { id: this.nodes.length, L: lv.level, info: t, vs: lv.voxelSize, children: [],
-          state: 'idle', mesh: null, faces: 0, box, prio: 0, used: 0 };
+          state: 'idle', mesh: null, faces: 0, box, diag: box.getSize(new THREE.Vector3()).length(), prio: 0, used: 0 };
         this.nodes.push(n);
         byKey.set(`${lv.level}/${t.tx}/${t.ty}`, n);
       }
@@ -109,7 +112,8 @@ export class TileManager {
       n.used = frame;
       const d = n.box.distanceToPoint(cam);
       const px = d > 0 ? (n.vs * focal) / d : Infinity;
-      if (n.L > 0 && px > this.errPx && n.children.length) {
+      const err = this.errAt ? Math.max(this.errPx, this.errAt(d, d + n.diag)) : this.errPx;
+      if (n.L > 0 && px > err && n.children.length) {
         let allReady = true;
         for (const k of n.children) {
           k.used = frame; // wanted: never evict it while its siblings load

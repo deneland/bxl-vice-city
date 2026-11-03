@@ -3,6 +3,11 @@ import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
 import { TELEMETRY, telemetry } from './telemetry';
 import { LABELS, viewMode } from './voxelMaterial';
+import { Voxels } from './voxels';
+import { Walk } from './walk';
+import { Inspector } from './inspect';
+import { lighting, sunDirection, sunPosition } from './sun';
+import { blurPx, createTiltShift, DEPTH_RATIO, focalLength, focusDistance } from './tiltshift';
 
 telemetry.start();
 
@@ -20,6 +25,7 @@ const SHADOWS = params.get('shadows') === '1';
 const CONTINUOUS = params.get('continuous') === '1';
 const GPU_TIMING = params.get('gpu') !== '0' && (TELEMETRY || params.get('gpu') === '1');
 const SKY = new THREE.Color(0xbcd3e6);
+const LAT = 50.866, LON = 4.375; // Schaerbeek
 
 const hud = document.getElementById('hud')!;
 document.getElementById('attr')!.textContent = 'loading…';
@@ -65,8 +71,8 @@ async function main() {
     pixelRatio: renderer.getPixelRatio() });
 
   const scene = new THREE.Scene();
-  scene.background = SKY;
-  scene.fog = new THREE.Fog(SKY, 700, 2600);
+  scene.background = SKY.clone();
+  scene.fog = new THREE.Fog(SKY.clone(), 700, 2600);
 
   const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 6000);
   camera.position.set(-110, 120, 150);
@@ -78,6 +84,7 @@ async function main() {
   controls.minDistance = 4;
   controls.maxDistance = 2200;
   controls.screenSpacePanning = false;
+  controls.zoomToCursor = true;   // the orbit point follows what you zoom into
   controls.listenToKeyEvents(window);
   controls.keyPanSpeed = 25;
   controls.target.set(0, 0, 0);
@@ -95,13 +102,14 @@ async function main() {
   const cam = params.get('cam')?.split(',').map(Number);
   if (cam?.length === 6 && cam.every(Number.isFinite)) setView({ pos: cam.slice(0, 3) as Vec3, target: cam.slice(3) as Vec3 });
 
-  scene.add(new THREE.HemisphereLight(0xdfeeff, 0x5a5040, 1.6));
+  const hemi = new THREE.HemisphereLight(0xdfeeff, 0x5a5040, 1.6);
+  scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff1dc, 3.2);
-  sun.position.set(-180, 260, 120); // from the south-west-ish, afternoon
   if (SHADOWS) {
     sun.castShadow = true;
-    const half = (L0.size[0] * VS) / 2 + 60;
-    Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, near: 1, far: 1200 });
+    // the shadow box is centred on the region and must cover it from any sun direction
+    const half = (Math.hypot(L0.size[0], L0.size[1]) * VS) / 2 + 60;
+    Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, near: 1, far: 4000 });
     sun.shadow.mapSize.set(4096, 4096);
     sun.shadow.bias = -0.0005;
     sun.shadow.normalBias = 0.3;
@@ -113,6 +121,41 @@ async function main() {
   const homeTile = L0.tiles.find((t) => t.tx === Math.floor(homeVX / CH) && t.ty === Math.floor(homeVY / CH));
   world.position.set(-homeVX * VS, -(homeTile?.zmin ?? groundGuess) * VS, homeVY * VS);
   scene.add(world);
+  // region centre in the scene: sun target, so the shadow box covers everything
+  world.updateMatrixWorld();
+  sun.target.position.set((L0.size[0] / 2) * VS + world.position.x, 0, -(L0.size[1] / 2) * VS + world.position.z);
+
+  // --- time of day: real sun position over Schaerbeek ----------------------
+  const timeInput = document.getElementById('time') as HTMLInputElement;
+  const timeLabel = document.getElementById('time-label')!;
+  const day = params.get('date') ?? new Date().toISOString().slice(0, 10);
+  const brusselsOffset = (d: Date) => {  // minutes ahead of UTC (CET/CEST)
+    const tz = new Intl.DateTimeFormat('en', { timeZone: 'Europe/Brussels', timeZoneName: 'shortOffset' })
+      .formatToParts(d).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT+1';
+    const m = tz.match(/GMT([+-]\d+)(?::(\d+))?/);
+    return m ? Number(m[1]) * 60 + Math.sign(Number(m[1])) * Number(m[2] ?? 0) : 60;
+  };
+  const setTime = (hours: number) => {
+    const [y, mo, d] = day.split('-').map(Number);
+    let t = new Date(Date.UTC(y, mo - 1, d) + hours * 3600e3);
+    t = new Date(t.getTime() - brusselsOffset(t) * 60e3);
+    const { az, alt } = sunPosition(t, LAT, LON);
+    const l = lighting(alt);
+    sunDirection(az, Math.max(alt, 0.02), sun.position).multiplyScalar(2000).add(sun.target.position);
+    sun.color.copy(l.sunColor);
+    sun.intensity = l.sunIntensity;
+    hemi.color.copy(l.hemiColor);
+    hemi.intensity = l.hemiIntensity;
+    (scene.background as THREE.Color).copy(l.sky);
+    scene.fog!.color.copy(l.sky);
+    document.body.style.background = '#' + l.sky.getHexString();
+    const hh = Math.floor(hours), mm = Math.round((hours - hh) * 60);
+    timeLabel.textContent = `${day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` +
+      ` · sun ${(alt * 180 / Math.PI).toFixed(0)}°`;
+    dirty = true;
+  };
+  timeInput.value = params.get('time') ?? '15';
+  timeInput.addEventListener('input', () => setTime(Number(timeInput.value)));
 
   // --- level-of-detail tiles ------------------------------------------------
   const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
@@ -131,6 +174,75 @@ async function main() {
     setTimeout(check, 50);
   });
 
+  // --- CPU voxel access, walking, picking ---------------------------------
+  const vox = new Voxels(`tiles/${ROI}`, CH, L0, world, lod.query);
+  const crosshair = document.getElementById('crosshair')!;
+  const walkHint = document.getElementById('walk-hint')!;
+  let mapView: View | null = null;
+  const walk = new Walk(camera, renderer.domElement, vox, (active) => {
+    dirty = true;
+    controls.enabled = !active;
+    crosshair.style.display = active && walk.locked ? 'block' : 'none';
+    walkHint.style.display = active && !walk.locked ? 'block' : 'none';
+  });
+  const toggleWalk = () => {
+    if (walk.active) {
+      walk.exit();
+      // back to the map, looking at where you stood
+      const p = camera.position.clone();
+      const back = camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize().multiplyScalar(-60);
+      setView({ pos: [p.x + back.x, p.y + 50, p.z + back.z], target: [p.x, p.y - 1.7, p.z] });
+      mapView = null;
+      telemetry.event('walk', { on: false });
+    } else {
+      mapView = getView();
+      walk.enter(controls.target.clone()).then(() => telemetry.event('walk', { on: walk.active }));
+    }
+  };
+  const inspector = new Inspector(vox, scene, manifest.origin[2], () => { dirty = true; });
+  const raycaster = new THREE.Raycaster();
+  let down: { x: number; y: number; t: number } | null = null;
+  renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button === 0) down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (!down || e.button !== 0) return;
+    const click = Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5 && performance.now() - down.t < 400;
+    down = null;
+    if (!click) return;
+    if (walk.active && !walk.locked) return; // this click re-locks the mouse
+    const ndc = walk.active ? new THREE.Vector2(0, 0)
+      : new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+    // wait briefly: a double-click sets the orbit point instead
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      raycaster.setFromCamera(ndc, camera);
+      inspector.pick(raycaster.ray).then(() => telemetry.event('inspect', {}));
+    }, walk.active ? 0 : 250);
+  });
+  let clickTimer = 0;
+
+  // double-click: orbit around / focus on that voxel (smoothly turn towards it)
+  let targetAnim: { from: THREE.Vector3; to: THREE.Vector3; t0: number } | null = null;
+  renderer.domElement.addEventListener('dblclick', async (e) => {
+    clearTimeout(clickTimer);
+    if (walk.active) return;
+    raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+    const hit = await vox.raycast(raycaster.ray.origin, raycaster.ray.direction);
+    if (!hit) return;
+    const to = vox.toScene(hit.voxel.clone().addScalar(0.5));
+    targetAnim = { from: controls.target.clone(), to, t0: performance.now() };
+    telemetry.event('set-target', {});
+  });
+
+  // --- tilt-shift ----------------------------------------------------------
+  let tilt: THREE.RenderPipeline | null = null;
+  let tiltOn = false;
+  const setTilt = (on: boolean) => {
+    tiltOn = on;
+    if (on && !tilt) tilt = createTiltShift(renderer, scene, camera);
+    lod.errAt = on ? blurPx : null;   // blurred areas need less detail
+    dirty = true;
+  };
+
   // --- view mode: colours or semantic classes ----------------
   const legend = document.getElementById('legend')!;
   legend.innerHTML = '<b>classes</b> (LiDAR + street-level photos)<br>' + LABELS.map(([, name, h]) =>
@@ -145,12 +257,17 @@ async function main() {
   // --- input ---------------------------------------------------------------
   let snapshotRequested = false;
   window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'h' || e.key === 'H') setView(home);
+    if ((e.key === 'h' || e.key === 'H') && !walk.active) setView(home);
     if (e.key === 'l' || e.key === 'L') setMode(viewMode.value === 0);
     if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
+    if (e.key === 'v' || e.key === 'V') toggleWalk();
+    if (e.key === 'm' || e.key === 'M') setTilt(!tiltOn);
+    if (e.key === 'Escape') inspector.clear();
     dirty = true;
   });
   let dirty = true; // something outside camera/tiles changed: draw the next tick
+  setTime(Number(timeInput.value));
+  setTilt(params.get('tilt') === '1');
   window.addEventListener('resize', () => {
     dirty = true;
     camera.aspect = innerWidth / innerHeight;
@@ -176,11 +293,23 @@ async function main() {
     const interval = now - last;
     last = now;
 
-    controls.update();
+    if (targetAnim) {
+      const k = Math.min(1, (now - targetAnim.t0) / 400), e = k * k * (3 - 2 * k);
+      controls.target.lerpVectors(targetAnim.from, targetAnim.to, e);
+      if (k >= 1) targetAnim = null;
+    }
+    if (walk.active) walk.update(interval / 1000);
+    else controls.update();
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
     if (moving) lastCam.copy(camera.matrixWorld);
+    if (tiltOn) {
+      // focus on the orbit target (map) or 20 m ahead (walking), measured along the view direction
+      const d = walk.active ? 20 : Math.max(5, controls.target.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3())));
+      focusDistance.value = d;
+      focalLength.value = d * DEPTH_RATIO;
+    }
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
     if (!(CONTINUOUS || moving || tilesChanged || dirty || snapshotRequested)) {
       // nothing changed: draw nothing, the GPU stays idle
@@ -191,7 +320,8 @@ async function main() {
       return;
     }
     dirty = false;
-    renderer.render(scene, camera);
+    if (tiltOn && tilt) tilt.render();
+    else renderer.render(scene, camera);
     rendered++;
     const cpu = performance.now() - now;
     // a frame interval only means something if the previous tick also rendered
@@ -239,13 +369,14 @@ async function main() {
       `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
       ` (${(lod.stats.residentFaces / 1e6).toFixed(1)}M faces)` +
       `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
-      ` · shadows ${SHADOWS ? 'on' : 'off'}` +
+      ` · shadows ${SHADOWS ? 'on' : 'off'}${tiltOn ? ' · tilt-shift' : ''}${walk.active ? ' · walking' : ''}` +
       (TELEMETRY ? ' · telemetry on' : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
   }
 
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
-    renderer, scene, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod,
+    renderer, scene, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
+    setTime, setTilt, toggleWalk,
     whenIdle: () => lod.whenIdle(),
     info: () => ({ backend, ...lod.stats, loadMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
