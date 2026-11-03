@@ -10,12 +10,15 @@
     canvas { display: block; }
     #hud { position: fixed; top: 8px; left: 8px; padding: 6px 8px; background: #0008; color: #fff; border-radius: 4px; white-space: pre; pointer-events: none; }
     #help { position: fixed; bottom: 8px; left: 8px; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
+    #legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
+    #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
     #attr { position: fixed; bottom: 8px; right: 8px; padding: 4px 8px; background: #fffa; color: #222; border-radius: 4px; }
   </style>
 </head>
 <body>
   <div id="hud">starting…</div>
-  <div id="help">drag: pan · right-drag: rotate · wheel: zoom · arrows: move · H: home · P: snapshot · ?shadows=1</div>
+  <div id="help">drag: pan · right-drag: rotate · wheel: zoom · arrows: move · H: home · L: classes · P: snapshot · ?shadows=1</div>
+  <div id="legend"></div>
   <div id="attr"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>

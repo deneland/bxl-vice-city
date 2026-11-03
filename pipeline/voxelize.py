@@ -16,7 +16,8 @@ Works in 256 m blocks so memory does not grow with the region:
 
 Tile (tx,ty) at level L has children (2tx..2tx+1, 2ty..2ty+1) at L-1.
 
-Usage: uv run python voxelize.py [roi-name] [--jobs=N]      (default region from config.toml)
+Usage: uv run python voxelize.py [roi-name] [--jobs=N] [--no-photo]   (default region from config.toml)
+  merges data/cache/streetview/<roi>/layer.npz (streetview.py) when present
 
 Builds into <name>.building and swaps it in at the end, so a running viewer never
 sees a half-written build; the manifest carries a build id for cache busting.
@@ -50,11 +51,24 @@ MARGIN = 64        # extra L0 columns read around each block (32 m)
 OUT = ROOT / "viewer" / "public" / "tiles" / ROI["name"]
 CACHE = ROOT / "data" / "cache" / "points" / ROI["name"]
 DEST = OUT  # where tiles are written (a staging folder during a build)
+LAYER_F = ROOT / "data" / "cache" / "streetview" / ROI["name"] / "layer.npz"
+LAYER = {}  # street-level colour layer, loaded in main() (shared with forked workers)
 
 C_UNCLASSIFIED, C_GROUND, C_LOWVEG, C_HIGHVEG, C_BUILDING = 1, 2, 3, 5, 6
+C_VEHICLE = 64     # derived here (ASPRS user range): parked vehicles found in unclassified geometry
 FLAG_FILL = 1      # geometry synthesised (wall / terrain fill), not measured
 FLAG_APRON = 2     # belongs to the neighbouring tile, used only for culling
 FLAG_PTCOLOR = 4   # synthetic voxel whose colour comes from nearby measured points
+FLAG_PHOTO = 8     # colour from street-level photos (streetview.py layer)
+LABEL_SHIFT = 4    # flags bits 4-7: semantic class of the voxel, whatever the source (see SEM_*)
+LABEL_MIN_SESSIONS = 2
+# semantic classes 1-12 as in streetview.L_NAMES (12 = sky is a photo/model mismatch, never a voxel class)
+SEM_BUILDING, SEM_VEG, SEM_GROUND, SEM_SKY, SEM_WATER, SEM_RAIL, SEM_OTHER = 1, 3, 9, 12, 13, 14, 15
+SEM_FROM_LIDAR = np.full(256, SEM_OTHER, np.uint8)
+SEM_FROM_LIDAR[[C_GROUND, C_LOWVEG, C_HIGHVEG, C_BUILDING, 9, 10, C_VEHICLE]] = [
+    SEM_GROUND, SEM_VEG, SEM_VEG, SEM_BUILDING, SEM_WATER, SEM_RAIL, 4]
+SEM_SIGN = 2
+SEM_TRANSIENT = [4, 5, 10]   # vehicle, bike, person: they move, so photos taken later cannot label LiDAR geometry
 
 PT = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1"), ("c", "u1")])
 
@@ -165,8 +179,17 @@ def aggregate(key, rgb, cls, flags=None, weight=None):
     ucls[k2[last] // 32] = (k2[last] % 32).astype(np.uint8)
     uflag = None
     if flags is not None:
+        # low bits: OR of flags; high bits: majority street-level label among labelled members
         uflag = np.zeros(len(ukey), np.uint8)
-        np.bitwise_or.at(uflag, inv, flags)
+        np.bitwise_or.at(uflag, inv, flags & ((1 << LABEL_SHIFT) - 1))
+        lab = flags >> LABEL_SHIFT
+        m = lab > 0
+        if m.any():
+            k3, c3 = np.unique(inv[m] * 16 + lab[m], return_counts=True)
+            o = np.lexsort((c3, k3 // 16))
+            k3 = k3[o]
+            last = np.r_[k3[1:] // 16 != k3[:-1] // 16, True]
+            uflag[k3[last] // 16] |= ((k3[last] % 16) << LABEL_SHIFT).astype(np.uint8)
     return ukey, col, ucls, uflag, cnt
 
 
@@ -356,6 +379,28 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     st["absorbed"] += int((vis & loose).sum())
     vis &= ~loose
     vkey, col, vcls = vkey[vis], col[vis], vcls[vis]
+
+    # e. parked vehicles (the LiDAR has no class for them): blobs of unclassified voxels standing
+    #    0.5-3 m on the ground, car-width (rows of parked cars are long but never wide), nothing tall above
+    vx, vy, vz = vkey % GW, (vkey // GW) % GH, vkey // (GW * GH)
+    h = vz - ground[vy, vx]
+    u = vcls == C_UNCLASSIFIED
+    low = u & (h >= 1) & (h <= 6)
+    foot = np.zeros((GH, GW), bool)
+    foot[vy[low], vx[low]] = True
+    tall = np.zeros((GH, GW), bool)
+    tall[vy[u & (h > 6)], vx[u & (h > 6)]] = True
+    foot &= ~is_bld & ~ndimage.binary_dilation(tall, iterations=1)
+    foot = ndimage.binary_opening(foot)                     # drop bollards, fence lines, specks
+    lab, n = ndimage.label(foot)
+    if n:
+        idx = np.arange(1, n + 1)
+        area = ndimage.sum(foot, lab, idx) * VS * VS
+        half = ndimage.maximum(ndimage.distance_transform_edt(foot), lab, idx) * VS   # half width, m
+        ok = np.r_[False, (area >= 2.5) & (half >= 0.6) & (half <= 1.6)]
+        veh = low & ok[lab[vy, vx]]
+        vcls[veh] = C_VEHICLE
+        st["vehicle"] += int(veh.sum())
     new = ~np.isin(fkey, vkey, assume_unique=True)
     akey = np.concatenate([vkey, fkey[new]])
     acol = np.concatenate([col, fcol[new]])
@@ -366,7 +411,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
 
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0}
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
     f = CACHE / f"b{by * NBX + bx}.bin"
     if not f.exists():
@@ -378,6 +423,29 @@ def process_block(bx: int, by: int, z0: float):
     gx1, gy1 = min(cx1 + MARGIN, NX), min(cy1 + MARGIN, NY)
     v = voxelize_block(p, gx0, gy0, gx1 - gx0, gy1 - gy0, z0, st)
     del p
+    if LAYER:
+        # street-level photo colours (streetview.py), keyed by L0 voxel; coarser levels inherit them
+        k = (v.z.astype(np.int64) * NY + v.y) * NX + v.x
+        pos = np.searchsorted(LAYER["key"], k).clip(0, len(LAYER["key"]) - 1)
+        m = LAYER["key"][pos] == k
+        v.col[m] = LAYER["rgb"][pos[m]]
+        v.flag[m] |= FLAG_PHOTO
+        st["photo"] += int(m.sum())
+    # semantic class: from the LiDAR class, refined by street-level labels where sessions agree
+    sem = SEM_FROM_LIDAR[v.cls]
+    if LAYER:
+        pos = np.searchsorted(LAYER["lkey"], k).clip(0, len(LAYER["lkey"]) - 1)
+        m = LAYER["lkey"][pos] == k
+        lab = LAYER["label"][pos[m]]
+        cls = v.cls[m]
+        # photos only fill in what the LiDAR left unclassified (and shop signs on buildings);
+        # never sky (a mismatch, not a class) and never things that move
+        use = (((cls == C_UNCLASSIFIED) | ((cls == C_BUILDING) & (lab == SEM_SIGN)))
+               & (lab != SEM_SKY) & ~np.isin(lab, SEM_TRANSIENT))
+        idx = np.flatnonzero(m)[use]
+        sem[idx] = lab[use]
+        st["labelled"] += len(idx)
+    v.flag = (v.flag & ((1 << LABEL_SHIFT) - 1)) | (sem << LABEL_SHIFT).astype(np.uint8)
     carry = None
     BL = min(LEVELS, 4)
     for L in range(BL):
@@ -402,6 +470,14 @@ def main() -> None:
     log(f"region '{ROI['name']}': {NX}x{NY} columns @ {VS} m, {NBX}x{NBY} blocks of {BLOCK * VS:.0f} m, "
         f"{LEVELS} levels, {jobs} parallel jobs")
     z0 = bucket_points()
+    if LAYER_F.exists() and "--no-photo" not in sys.argv:
+        lf = np.load(LAYER_F)
+        if tuple(lf["size"]) == (NX, NY):
+            ok = lf["lnses"] >= LABEL_MIN_SESSIONS
+            LAYER.update(key=lf["key"], rgb=lf["rgb"], lkey=lf["lkey"][ok], label=lf["label"][ok])
+            log(f"street-level layer: {len(LAYER['key']):,} coloured, {ok.sum():,} labelled voxels")
+        else:
+            log("street-level layer is for another region size; ignored")
     log(f"z0 = {z0} m (height range {z0}–{z0 + NZ * VS} m)")
 
     # build into a staging folder; the viewer keeps serving the old build until the swap
@@ -411,7 +487,7 @@ def main() -> None:
         (DEST / f"L{L}").mkdir(parents=True)
 
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0}
     carry = []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
@@ -441,6 +517,8 @@ def main() -> None:
     log(f"walls: {st['wall_coloured']:,}/{st['wall']:,} voxels coloured from facade points "
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
         f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
+        f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
+        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = []
     for L, lv in enumerate(levels):

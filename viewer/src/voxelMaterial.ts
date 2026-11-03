@@ -2,8 +2,19 @@
 // shader expands a unit quad into the right face from packed attributes.
 import * as THREE from 'three/webgpu';
 import {
-  attribute, float, floor, mod, mix, pow, positionGeometry, select, varying, vec3, vec4,
+  attribute, float, floor, mod, mix, pow, positionGeometry, select, uniform, varying, vec3, vec4,
 } from 'three/tsl';
+
+// semantic class per voxel (pipeline voxelize.py SEM_*: LiDAR class refined by street-level labels)
+export const LABELS: [number, string, number][] = [
+  [1, 'building', 0xd9c7a7], [2, 'shop sign', 0xff3d9a], [3, 'vegetation', 0x3fae49], [4, 'vehicle', 0x2f6bff],
+  [5, 'bike', 0x00d5ff], [6, 'pole', 0xffd400], [7, 'traffic sign', 0xff2a2a], [8, 'fence', 0xa65cff],
+  [9, 'ground', 0x6b6b6b], [10, 'person', 0xff8a00], [11, 'street furniture', 0x9cff3c], [13, 'water', 0x1f8fd6],
+  [14, 'rail', 0x7a4a2a], [15, 'other', 0xb8b8b8],
+];
+
+/** 0: photo/LiDAR colours, 1: semantic classes */
+export const viewMode = uniform(0);
 
 export const voxelGeometryBase = (() => {
   // unit quad corners (q.x, q.y); triangles (0,1,2) (2,1,3) are CCW for u×v
@@ -50,6 +61,13 @@ export function createVoxelMaterial(voxelSize: number) {
   const lum = srgb.dot(vec3(0.299, 0.587, 0.114));
   const col = varying(pow(mix(vec3(lum), srgb, 1.25).clamp(0, 1), vec3(2.2)), 'vColor');
 
-  m.colorNode = vec4(col.mul(ao), 1);
+  // class view: palette colour per semantic class
+  const label = bits(packed.y, 17, 4);
+  const hex = (h: number) => { const c = new THREE.Color(h); return vec3(c.r, c.g, c.b); }; // sRGB hex -> linear
+  let lc: any = hex(0xff00ff); // unknown code: magenta, should never show
+  for (const [code, , h] of LABELS) lc = select(label.equal(code), hex(h), lc);
+  const labelCol: any = varying(lc, 'vLabel');
+
+  m.colorNode = vec4(mix(col, labelCol, viewMode).mul(ao), 1);
   return m;
 }

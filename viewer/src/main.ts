@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
 import { TELEMETRY, telemetry } from './telemetry';
+import { LABELS, viewMode } from './voxelMaterial';
 
 telemetry.start();
 
@@ -130,10 +131,22 @@ async function main() {
     setTimeout(check, 50);
   });
 
+  // --- view mode: colours or semantic classes ----------------
+  const legend = document.getElementById('legend')!;
+  legend.innerHTML = '<b>classes</b> (LiDAR + street-level photos)<br>' + LABELS.map(([, name, h]) =>
+    `<span style="background:#${h.toString(16).padStart(6, '0')}"></span>${name}`).join('<br>');
+  const setMode = (labels: boolean) => {
+    viewMode.value = labels ? 1 : 0;
+    legend.style.display = labels ? 'block' : 'none';
+    telemetry.event('view-mode', { mode: labels ? 'classes' : 'colour' });
+  };
+  setMode(params.get('mode') === 'labels');
+
   // --- input ---------------------------------------------------------------
   let snapshotRequested = false;
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'h' || e.key === 'H') setView(home);
+    if (e.key === 'l' || e.key === 'L') setMode(viewMode.value === 0);
     if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
     dirty = true;
   });

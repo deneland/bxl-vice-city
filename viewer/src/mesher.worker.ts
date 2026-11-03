@@ -3,7 +3,7 @@
 // Input voxel record (8 bytes): x+1, y+1, z, r, g, b, class, flags
 //   x/y are chunk-local with a 1-voxel apron (0 and CH+1 are neighbours' voxels).
 // Output per face:
-//   a: Float32 x2  [ x | y<<6 | z<<12 | dir<<20 ,  ao | class<<8 | flags<<16 ]
+//   a: Float32 x2  [ x | y<<6 | z<<12 | dir<<20 ,  ao | class<<8 | fill<<16 | label<<17 ]
 //      (all < 2^24 so they are exact in float32)
 //   c: Uint8 x4    [ r, g, b, 255 ]
 // dir: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z (up), 5 -z (down)   (voxel space, z up)
@@ -62,7 +62,7 @@ self.onmessage = (ev: MessageEvent<MeshRequest>) => {
         }
       }
       a[f * 2] = (x - 1) | ((y - 1) << 6) | (z << 12) | (dir << 20);
-      a[f * 2 + 1] = ao | (v[o + 6] << 8) | ((flags & FLAG_FILL) << 16);
+      a[f * 2 + 1] = ao | (v[o + 6] << 8) | ((flags & FLAG_FILL) << 16) | ((flags >> 4) << 17);
       c[f * 4] = v[o + 3];
       c[f * 4 + 1] = v[o + 4];
       c[f * 4 + 2] = v[o + 5];
