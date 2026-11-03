@@ -5,13 +5,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "bench": "node bench/bench.mjs",
+    "sessions": "node scripts/sessions.mjs"
   },
   "dependencies": {
     "three": "0.186.1"
   },
   "devDependencies": {
     "@types/three": "0.186.0",
+    "playwright-core": "1.55.0",
     "typescript": "6.0.3",
     "vite": "8.3.4"
   }

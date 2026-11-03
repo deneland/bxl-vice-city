@@ -1,0 +1,14 @@
+{
+  "_comment": "Camera coordinates are three.js world units (metres) with the ROI's home point at the origin; y is up, -z is north.",
+  "warmupFrames": 60,
+  "frames": 300,
+  "scenarios": [
+    { "name": "overview", "view": { "pos": [-110, 120, 150], "target": [0, 0, 0] } },
+    { "name": "whole-roi", "view": { "pos": [0, 420, 330], "target": [0, 0, 0] } },
+    { "name": "rooftops", "view": { "pos": [-32, 35, 44], "target": [0, 0, 0] } },
+    { "name": "street", "view": { "pos": [40, 8, 30], "target": [0, 4, 0] } },
+    { "name": "orbit", "view": { "pos": [-110, 120, 150], "target": [0, 0, 0] }, "path": "orbit" },
+    { "name": "pan", "view": { "pos": [-200, 90, 120], "target": [-200, 0, 0] }, "path": "pan" },
+    { "name": "dolly", "view": { "pos": [0, 420, 330], "target": [0, 0, 0] }, "path": "dolly" }
+  ]
+}
