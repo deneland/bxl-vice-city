@@ -274,7 +274,22 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     gcol[vy[g], vx[g]] = col[g]
     ground = ndimage.median_filter(fill_nearest(ground, has_ground), size=3)
     ground = np.where(ground == BIG, 0, ground)
-    gcol = fill_nearest(gcol, has_ground)
+    # LiDAR RGB comes from a top-down aerial photo: ground under a tree crown gets the crown's
+    # colour. Distrust it and continue the surrounding open ground (smoothed) under the canopy.
+    hv = (vcls == C_HIGHVEG) & (vz > ground[vy, vx] + 4)
+    canopy = np.zeros((GH, GW), bool)
+    canopy[vy[hv], vx[hv]] = True
+    canopy = ndimage.binary_dilation(canopy, iterations=1)
+    open_g = has_ground & ~canopy
+    if open_g.any() and canopy.any():
+        w = ndimage.uniform_filter(open_g.astype(np.float32), size=5)
+        sm = np.stack([ndimage.uniform_filter(np.where(open_g, gcol[..., c], 0).astype(np.float32), size=5)
+                       for c in range(3)], -1) / np.maximum(w, 1e-6)[..., None]
+        gcol = np.where(open_g[..., None], gcol, fill_nearest(sm.round().clip(0, 255).astype(np.uint8), open_g))
+        under = g & canopy[vy, vx]
+        col[under] = gcol[vy[under], vx[under]]
+        st["under_canopy"] += int(under.sum())
+    gcol = fill_nearest(gcol, has_ground | canopy)
     btop = np.full((GH, GW), -1, np.int64)
     b = vcls == C_BUILDING
     np.maximum.at(btop, (vy[b], vx[b]), vz[b])
@@ -351,7 +366,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
 
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0}
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
     f = CACHE / f"b{by * NBX + bx}.bin"
     if not f.exists():
@@ -396,7 +411,7 @@ def main() -> None:
         (DEST / f"L{L}").mkdir(parents=True)
 
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0}
     carry = []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
@@ -425,6 +440,7 @@ def main() -> None:
 
     log(f"walls: {st['wall_coloured']:,}/{st['wall']:,} voxels coloured from facade points "
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
+        f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = []
     for L, lv in enumerate(levels):
