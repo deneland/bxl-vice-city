@@ -448,29 +448,49 @@ async function main() {
   // Only lowered when the GPU is what is slow: if the main thread's own work (simulation, loading) takes
   // most of the frame, fewer pixels would not help (a real laptop lost half its resolution to the start-up
   // work and kept it). Not judged at all while tiles load or the agents re-plan.
-  let resAcc = 0, resN = 0, resCpu = 0, resGood = 0, resAt = performance.now();
+  let resAcc = 0, resN = 0, resCpu = 0, resSlow = 0, resGood = 0, resAt = performance.now();
+  let lowered: { from: number; slow: number } | null = null, noHelpUntil = 0;
   const adaptResolution = (interval: number, moving: boolean, now: number, cpu: number) => {
     if (!DYNRES) return;
-    if (moving) { resAcc += interval; resCpu += cpu; resN++; }
+    if (moving) { resAcc += interval; resCpu += cpu; resN++; if (interval > 20) resSlow++; }
     if (now - resAt < 1000) return;
     resAt = now;
-    if (resN < 20) { resAcc = resCpu = resN = 0; return; }      // not enough moving frames to judge
-    const avg = resAcc / resN, cpuAvg = resCpu / resN;
-    resAcc = resCpu = resN = 0;
+    if (resN < 20) { resAcc = resCpu = resN = resSlow = 0; return; }      // not enough moving frames to judge
+    const avg = resAcc / resN, cpuAvg = resCpu / resN, slow = resSlow / resN;
+    resAcc = resCpu = resN = resSlow = 0;
     const busy = lod.stats.loading > 0 || (agents?.replanning ?? 0) > 0;
-    const max = maxRatio(), min = Math.max(0.5, max * 0.45);
-    if (avg > 22 && pixelRatio > min && !busy && cpuAvg < avg * 0.6) {   // GPU-bound and slow: 15 % fewer pixels per side
-      pixelRatio = Math.max(min, pixelRatio * 0.85);
+    const max = maxRatio(), min = Math.max(0.5, max * 0.6);
+    // did the last step down help? If the slow share did not drop by a quarter, the GPU is not limited by
+    // pixels (a real Intel laptop: geometry-bound, 25 % slow at 0.6 as at 1.0): back up, and leave it
+    if (lowered) {
+      const helped = slow < lowered.slow * 0.75;
+      if (!helped) {
+        pixelRatio = lowered.from; resize();
+        noHelpUntil = now + 120_000;
+        telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2), reverted: true });
+      }
+      lowered = null;
+      if (!helped) return;
+    }
+    // What you notice is missed frames (a 60 Hz display shows a slow frame as a 33 ms stutter), not the
+    // average: a GPU right at the edge averages 17 ms while one frame in five skips. So: more than 12 % of
+    // moving frames over 20 ms, while the CPU is not what is slow -> 10 % fewer pixels per side.
+    if ((slow > 0.12 || avg > 22) && pixelRatio > min && !busy && cpuAvg < avg * 0.6 && now > noHelpUntil) {
+      lowered = { from: pixelRatio, slow };
+      pixelRatio = Math.max(min, pixelRatio * 0.9);
       resGood = 0;
       resize();
-      telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1) });
-    } else if (avg < 17.5 && pixelRatio < max) {         // smooth for a while: try more pixels
-      if (++resGood >= 2) { pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize(); }
+      telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
+    } else if (slow < 0.03 && avg < 17.5 && pixelRatio < max) {   // smooth for a while: try more pixels
+      if (++resGood >= 3) {
+        pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize();
+        telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
+      }
     } else resGood = 0;
   };
 
   telemetry.setState(() => ({
-    view: getView(), lod: lod.stats, errPx: lod.errPx,
+    view: getView(), lod: lod.stats, errPx: lod.errPx, pixelRatio: +pixelRatio.toFixed(2),
     screen: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
   }));
 
@@ -485,7 +505,7 @@ async function main() {
   const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
   let shadowTiles = true, dynShadowDirty = true;
   let wasMoving = false, lastCpu = 0;
-  let prevTags: Record<string, boolean> = {}, shadowStepped = false, dynShadowDrawn = false;
+  let prevTags: Record<string, boolean> = {}, prevOwn: Record<string, boolean> = {}, shadowStepped = false, dynShadowDrawn = false;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
@@ -573,7 +593,9 @@ async function main() {
       }
       // vehicles, around what you look at: every other frame is enough (a fast car's shadow lags < 0.25 m;
       // the map and its transform always match)
-      dynShadowDrawn = dynShadowDirty || (trafficOn && (rendered & 1) === 0);
+      // (while the camera moves the city is redrawn every frame too: a real Intel laptop dropped exactly the
+      // frames that had both, so then only every 8th frame; a moving view hides the lag)
+      dynShadowDrawn = dynShadowDirty || (trafficOn && (rendered & (moving ? 7 : 1)) === 0);
       if (dynShadowDrawn) {
         prof.begin('shadowDyn');
         deferred.renderDynamicShadow(scene, walk.active ? camera.position : controls.target);
@@ -600,8 +622,14 @@ async function main() {
     }
     lastTickRendered = true;
     // what this frame did (its cost shows in the next interval)
-    prevTags = { moving, city: cityChanged, cityShadow: shadowStepped, carShadow: dynShadowDrawn, simStep: (traffic?.lastSteps ?? 0) > 0,
-      tiles: lod.lastArrived > 0, cpu12: cpu > 12 };
+    {
+      const t: Record<string, boolean> = { moving, city: cityChanged, cityShadow: shadowStepped, carShadow: dynShadowDrawn,
+        simStep: (traffic?.lastSteps ?? 0) > 0, tiles: lod.lastArrived > 0, cpu12: cpu > 12 };
+      // (GPU work can land in the next interval: also the frame before, as p:<tag>)
+      for (const [k, v] of Object.entries(prevOwn)) t['p:' + k] = v;
+      prevOwn = { city: cityChanged, carShadow: dynShadowDrawn, cityShadow: shadowStepped, tiles: lod.lastArrived > 0 };
+      prevTags = t;
+    }
 
     if (GPU_TIMING && !gpuInFlight) {
       gpuInFlight = true;
