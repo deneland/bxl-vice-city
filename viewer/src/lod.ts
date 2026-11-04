@@ -18,7 +18,7 @@ export class FaceAtlas {
   static readonly W = 2048;
   readonly tex: THREE.Texture;
   private target: THREE.RenderTarget | null = null;
-  private free: [number, number][];   // [first row, rows], sorted by row
+  private free: [number, number][];
   constructor(webgpu: boolean, readonly rows = 8192) {
     // allocated on the GPU without CPU data. WebGPU: a render target's texture (a DataTexture without
     // data makes its upload throw); WebGL: a DataTexture (copies into render-target textures do not
@@ -34,26 +34,29 @@ export class FaceAtlas {
       t.needsUpdate = true;   // (allocates it; without this three binds a shared placeholder)
       this.tex = t;
     }
-    this.free = [[0, rows]];
+    this.free = [[0, (rows * FaceAtlas.W) / FaceAtlas.BLOCK]];   // [first block, blocks], sorted
   }
   private ready = false;
   get capacity() { return this.rows * FaceAtlas.W; }
-  /** first row of a range for n texels (first fit), or -1 */
+  // allocation in blocks of BLOCK texels (a tile's range may span rows: the shader indexes texels linearly)
+  static readonly BLOCK = 256;
+  private blocks(n: number) { return Math.max(1, Math.ceil(n / FaceAtlas.BLOCK)); }
+  /** first texel of a free range for n texels (first fit), or -1 */
   alloc(n: number) {
-    const need = Math.max(1, Math.ceil(n / FaceAtlas.W));
+    const need = this.blocks(n);
     for (let i = 0; i < this.free.length; i++) {
-      const [r, c] = this.free[i];
+      const [b, c] = this.free[i];
       if (c < need) continue;
-      if (c === need) this.free.splice(i, 1); else this.free[i] = [r + need, c - need];
-      return r;
+      if (c === need) this.free.splice(i, 1); else this.free[i] = [b + need, c - need];
+      return b * FaceAtlas.BLOCK;
     }
     return -1;
   }
-  release(row: number, n: number) {
-    const rows = Math.max(1, Math.ceil(n / FaceAtlas.W));
+  release(start: number, n: number) {
+    const b0 = start / FaceAtlas.BLOCK, nb = this.blocks(n);
     let i = 0;
-    while (i < this.free.length && this.free[i][0] < row) i++;
-    this.free.splice(i, 0, [row, rows]);
+    while (i < this.free.length && this.free[i][0] < b0) i++;
+    this.free.splice(i, 0, [b0, nb]);
     if (i + 1 < this.free.length && this.free[i][0] + this.free[i][1] === this.free[i + 1][0]) {
       this.free[i][1] += this.free[i + 1][1]; this.free.splice(i + 1, 1);
     }
@@ -61,15 +64,26 @@ export class FaceAtlas {
       this.free[i - 1][1] += this.free[i][1]; this.free.splice(i, 1);
     }
   }
-  upload(renderer: THREE.WebGPURenderer, row: number, data: Uint8Array) {
+  /** copy n texels (4 bytes each) to the linear range from `start`: a partial first row, whole rows, a
+   *  partial last row */
+  upload(renderer: THREE.WebGPURenderer, start: number, data: Uint8Array) {
     if (!this.ready) { if (this.target) renderer.initRenderTarget(this.target); this.ready = true; }
-    const rows = Math.max(1, Math.ceil(data.length / 4 / FaceAtlas.W));
-    const full = new Uint8Array(rows * FaceAtlas.W * 4);
-    full.set(data);
-    const src = new THREE.DataTexture(full, FaceAtlas.W, rows, THREE.RGBAFormat, THREE.UnsignedByteType);
-    src.needsUpdate = true;
-    renderer.copyTextureToTexture(src, this.tex, null, new THREE.Vector2(0, row));
-    src.dispose();
+    const W = FaceAtlas.W, n = data.length / 4;
+    const put = (from: number, w: number, h: number, x: number, y: number) => {
+      const src = new THREE.DataTexture(data.slice(from * 4, (from + w * h) * 4), w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      src.needsUpdate = true;
+      renderer.copyTextureToTexture(src, this.tex, null, new THREE.Vector2(x, y));
+      src.dispose();
+    };
+    let done = 0, pos = start;
+    if (pos % W) {                                   // head: rest of the first row
+      const w = Math.min(n, W - (pos % W));
+      put(0, w, 1, pos % W, Math.floor(pos / W));
+      done += w; pos += w;
+    }
+    const rows = Math.floor((n - done) / W);
+    if (rows) { put(done, W, rows, 0, pos / W); done += rows * W; pos += rows * W; }
+    if (n - done) put(done, n - done, 1, 0, pos / W);   // tail
   }
 }
 
@@ -77,7 +91,7 @@ interface Node {
   id: number; L: number; info: TileInfo; vs: number;
   children: Node[];
   state: 'idle' | 'queued' | 'loading' | 'ready';
-  mesh: THREE.Mesh | null; faces: number; quads: number; row: number;   // row: first atlas row (-1: none)
+  mesh: THREE.Mesh | null; faces: number; quads: number; start: number;   // start: first atlas texel (-1: none)
   box: THREE.Box3;      // world space
   diag: number;         // box diagonal
   prio: number;
@@ -132,7 +146,7 @@ export class TileManager {
           new THREE.Vector3((t.tx + 1) * s, (t.zmax + 1) * lv.voxelSize, -t.ty * s),
         ).applyMatrix4(group.matrixWorld);
         const n: Node = { id: this.nodes.length, L: lv.level, info: t, vs: lv.voxelSize, children: [],
-          state: 'idle', mesh: null, faces: 0, quads: 0, row: -1, box, diag: box.getSize(new THREE.Vector3()).length(), prio: 0, used: 0 };
+          state: 'idle', mesh: null, faces: 0, quads: 0, start: -1, box, diag: box.getSize(new THREE.Vector3()).length(), prio: 0, used: 0 };
         this.nodes.push(n);
         byKey.set(`${lv.level}/${t.tx}/${t.ty}`, n);
       }
@@ -215,21 +229,38 @@ export class TileManager {
     return changed;
   }
 
+  /** free a tile's mesh and atlas range */
+  private drop(n: Node) {
+    if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh = null; }
+    if (n.start >= 0) { this.atlas.release(n.start, n.faces); n.start = -1; }
+    this.resident -= n.faces;
+    this.quadsResident -= n.quads;
+    n.faces = 0; n.quads = 0;
+    n.state = 'idle';
+    this.readyCount--;
+    this.evicted++;
+  }
+
   private evict(target = this.budgetFaces) {
     if (this.resident <= target) return;
     const cand = this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame)
       .sort((a, b) => a.used - b.used);
     for (const n of cand) {
       if (this.resident <= target * 0.85) break;
-      if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh = null; }
-      if (n.row >= 0) { this.atlas.release(n.row, n.faces); n.row = -1; }
-      this.resident -= n.faces;
-      this.quadsResident -= n.quads;
-      n.faces = 0; n.quads = 0;
-      n.state = 'idle';
-      this.readyCount--;
-      this.evicted++;
+      this.drop(n);
     }
+  }
+
+  /** the atlas has no room for n texels: free least recently used tiles until it has; first texel or -1 */
+  private freeFor(n: number) {
+    const cand = this.nodes.filter((x) => x.state === 'ready' && x.start >= 0 && x.L < this.levels.length - 1 && !this.shown.has(x) && x.used < this.frame)
+      .sort((a, b) => a.used - b.used);
+    for (const x of cand) {
+      this.drop(x);
+      const s = this.atlas.alloc(n);
+      if (s >= 0) return s;
+    }
+    return -1;
   }
 
   private request(n: Node, prio: number) {
@@ -256,12 +287,12 @@ export class TileManager {
     this.inflight--;
     if (faces) {
       // room in the face atlas: free least recently used tiles if needed
-      let row = this.atlas.alloc(faces);
-      if (row < 0) { this.evict(Math.min(this.budgetFaces, this.resident) * 0.8); row = this.atlas.alloc(faces); }
-      if (row < 0) { n.state = 'idle'; return; }   // (still full: asked for again later)
-      this.atlas.upload(this.renderer, row, t);
-      n.row = row;
-      const base = row * FaceAtlas.W;
+      let start = this.atlas.alloc(faces);
+      if (start < 0) start = this.freeFor(faces);
+      if (start < 0) { n.state = 'idle'; return; }   // (still full: asked for again later)
+      this.atlas.upload(this.renderer, start, t);
+      n.start = start;
+      const base = start;
       for (let i = 2; i < q.length; i += 3) q[i] += base;
     }
     n.state = 'ready';
@@ -287,6 +318,7 @@ export class TileManager {
     mesh.castShadow = mesh.receiveShadow = this.shadows;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
+    mesh.matrixWorld.multiplyMatrices(this.group.matrixWorld, mesh.matrix);   // (the city scene does not update matrices)
     mesh.visible = false; // the next update decides
     this.group.add(mesh);
     n.mesh = mesh;

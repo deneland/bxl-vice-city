@@ -152,6 +152,10 @@ async function main() {
   const homeTile = L0.tiles.find((t) => t.tx === Math.floor(homeVX / CH) && t.ty === Math.floor(homeVY / CH));
   world.position.set(-homeVX * VS, -(homeTile?.zmin ?? groundGuess) * VS, homeVY * VS);
   cityScene.add(world);
+  // the city never moves: no per-render matrix update of every resident tile (lod.ts updates a tile's
+  // world matrix once, when it is added)
+  world.updateMatrixWorld(true);
+  cityScene.matrixWorldAutoUpdate = false;
   // same frame for the forward layer (lamps, roads overlay, traffic)
   const fx = new THREE.Group();
   fx.position.copy(world.position);
@@ -476,6 +480,7 @@ async function main() {
   let lastTickRendered = false, rendered = 0, skipped = 0, cityRenders = 0, shadowRenders = 0;
   const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
   let shadowTiles = true, dynShadowDirty = true;
+  let wasMoving = false;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
@@ -495,6 +500,7 @@ async function main() {
       const f = walk.active ? camera.position : controls.target;
       agents?.setFocus(f.x - fx.position.x, f.z - fx.position.z);
       transit?.setFocus(f.x - fx.position.x, f.z - fx.position.z);
+      if (agents) agents.budgetMs = wasMoving ? 1 : 2;   // (moving: the frame needs its time for the city)
       prof.begin('agents'); agents?.update(now, day); prof.end('agents');
       const [y, mo, d] = day.split('-').map(Number);
       prof.begin('transit'); transit?.update(now, (new Date(Date.UTC(y, mo - 1, d)).getUTCDay() + 6) % 7); prof.end('transit');   // 0 Monday
@@ -504,6 +510,7 @@ async function main() {
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
+    wasMoving = moving;
     if (moving) lastCam.copy(camera.matrixWorld);
     if (tiltOn) {
       // focus on the orbit target (map) or 20 m ahead (walking), measured along the view direction

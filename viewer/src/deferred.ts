@@ -38,6 +38,7 @@ export const GBUF = ['output', 'emissive', 'normal'] as const;
 /** layer of objects that cast shadows into the per-frame (vehicle) shadow map */
 export const DYNAMIC_SHADOW_LAYER = 1;
 const DEBUG_SHADOW = location.search.includes('dbg=shadow');
+const DEPTH_BLIT = new URLSearchParams(location.search).get('depthcopy') !== 'shader';   // (?depthcopy=shader: the old copy, for A/B)
 const STATIC_SIZE = 4096, DYN_SIZE = 1024, DYN_HALF = 120;   // texels; m half-width of the vehicle shadow box
 
 interface ShadowMap { rt: THREE.RenderTarget; cam: THREE.OrthographicCamera; mat: any }
@@ -77,9 +78,9 @@ export class Deferred {
     this.city = new THREE.RenderTarget(size.x, size.y, { ...opts, count: GBUF.length });
     GBUF.forEach((n, i) => { this.city.textures[i].name = n; });
     (this.city as any).label = 'gbuffer';   // (names for the GPU pass timings, main.ts)
-    this.city.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    this.city.depthTexture = new THREE.DepthTexture(size.x, size.y, THREE.FloatType);   // (32-bit: copyable)
     this.fwd = new THREE.RenderTarget(size.x, size.y, opts);
-    this.fwd.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    this.fwd.depthTexture = new THREE.DepthTexture(size.x, size.y, THREE.FloatType);
     this.glow = new THREE.RenderTarget(size.x, size.y, opts);
     (this.fwd as any).label = 'fwd'; (this.glow as any).label = 'glow';
     this.glow.depthTexture = this.fwd.depthTexture;   // shared: glows are hidden by city and vehicles
@@ -136,7 +137,7 @@ export class Deferred {
 
   /** Light arriving at a surface (multiply by albedo): sun (with shadows) and sky. Shared by the city
    *  (resolve pass) and forward-lit objects such as vehicles, so both look the same. */
-  light(n: any, world: any, vehicleShadows = true): any {
+  light(n: any, world: any, vehicleShadows = true, taps = 4): any {
     // three.js physical lights on a rough dielectric: Lambert diffuse (albedo / π) from sun and hemisphere
     const hemi = mix(this.groundCol, this.skyCol, n.y.mul(0.5).add(0.5));
     let sun: any = this.sunCol.mul(max(dot(n, this.sunDir), 0));
@@ -149,10 +150,11 @@ export class Deferred {
         const suv = vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5).oneMinus());
         const z = (webgl ? ndc.z.mul(0.5).add(0.5) : ndc.z).sub(bias);
         let lit: any = float(0);
-        for (const [dx, dy] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]])   // 2×2 PCF
+        const offs = taps === 1 ? [[0, 0]] : [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]];   // 2×2 PCF (or 1 tap)
+        for (const [dx, dy] of offs)
           lit = lit.add(step(z, texture(sm.rt.depthTexture!, suv.add(vec2(dx / size, dy / size))).x));
         const inside = suv.x.greaterThan(0).and(suv.x.lessThan(1)).and(suv.y.greaterThan(0)).and(suv.y.lessThan(1));
-        return select(inside, lit.mul(0.25), float(1));
+        return select(inside, lit.mul(1 / offs.length), float(1));
       };
       // depth range 5000 m: 1e-4 ≈ 0.5 m
       // (vehicles skip the vehicle shadow map: at its resolution they would shadow themselves)
@@ -182,7 +184,7 @@ export class Deferred {
     // paint a little muted, like the LiDAR colours of the city around it
     const paint = attribute('paint', 'vec3'), pl = dot(paint, vec3(0.299, 0.587, 0.114));
     const alb = select(kind.equal(1), mix(paint, vec3(pl), 0.25).mul(0.85), attribute('vcol', 'vec3'));
-    let l = this.light(normalWorld, positionWorld, false);
+    let l = this.light(normalWorld, positionWorld, false, 1);   // (small objects: one shadow tap is enough)
     l = l.mul(weathered(0.25, 0.9));
     if (extra) l = l.add(extra(positionWorld));
     const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
@@ -224,7 +226,9 @@ export class Deferred {
     this.pipeline.needsUpdate = true;
   }
 
+  private fwdReady = false;
   setSize(w: number, h: number) {   // (shadow maps keep their size)
+    this.fwdReady = false;
     this.city.setSize(w, h);
     this.fwd.setSize(w, h);
     this.glow.setSize(w, h);
@@ -368,11 +372,25 @@ export class Deferred {
   present(fwdScene: THREE.Scene, glowScene: THREE.Scene, camera: THREE.Camera) {
     const r = this.renderer;
     const autoClear = r.autoClear;
-    r.setRenderTarget(this.fwd);
-    r.setClearColor(0x000000, 0);
-    r.clear();
-    r.autoClear = false;
-    this.restore.render(r);
+    if (DEPTH_BLIT) {
+      // the city depth copied in by the GPU (a shader writing depth would disable early depth rejection
+      // for the vehicles drawn after it: hidden parked cars would all be shaded)
+      if (!this.fwdReady) {   // (the copy needs the target's framebuffer: it exists once it was drawn into)
+        r.setRenderTarget(this.fwd); r.clear(); r.setRenderTarget(null);
+        this.fwdReady = true;
+      }
+      r.copyTextureToTexture(this.city.depthTexture!, this.fwd.depthTexture!);
+      r.setRenderTarget(this.fwd);
+      r.setClearColor(0x000000, 0);
+      r.clear(true, false, false);
+      r.autoClear = false;
+    } else {
+      r.setRenderTarget(this.fwd);
+      r.setClearColor(0x000000, 0);
+      r.clear();
+      r.autoClear = false;
+      this.restore.render(r);
+    }
     r.render(fwdScene, camera);
     r.setRenderTarget(this.glow);
     r.clear(true, false, false);
