@@ -318,7 +318,7 @@ async function main() {
   const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
   const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR, renderer);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
-  lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions
+  lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions (the face atlas holds 33.5M: slack)
   const t0 = performance.now();
   let loadMs = 0;
   const ready = new Promise<void>((resolve) => {
@@ -445,23 +445,27 @@ async function main() {
   };
   window.addEventListener('resize', () => { pixelRatio = Math.min(pixelRatio, maxRatio()); resize(); });
   // adapt to the frame rate while moving (full redraws): average interval over ~1 s
-  let resAcc = 0, resN = 0, resGood = 0, resAt = performance.now();
-  const adaptResolution = (interval: number, moving: boolean, now: number) => {
+  // Only lowered when the GPU is what is slow: if the main thread's own work (simulation, loading) takes
+  // most of the frame, fewer pixels would not help (a real laptop lost half its resolution to the start-up
+  // work and kept it). Not judged at all while tiles load or the agents re-plan.
+  let resAcc = 0, resN = 0, resCpu = 0, resGood = 0, resAt = performance.now();
+  const adaptResolution = (interval: number, moving: boolean, now: number, cpu: number) => {
     if (!DYNRES) return;
-    if (moving) { resAcc += interval; resN++; }
+    if (moving) { resAcc += interval; resCpu += cpu; resN++; }
     if (now - resAt < 1000) return;
     resAt = now;
-    if (resN < 20) { resAcc = resN = 0; return; }      // not enough moving frames to judge
-    const avg = resAcc / resN;
-    resAcc = resN = 0;
+    if (resN < 20) { resAcc = resCpu = resN = 0; return; }      // not enough moving frames to judge
+    const avg = resAcc / resN, cpuAvg = resCpu / resN;
+    resAcc = resCpu = resN = 0;
+    const busy = lod.stats.loading > 0 || (agents?.replanning ?? 0) > 0;
     const max = maxRatio(), min = Math.max(0.5, max * 0.45);
-    if (avg > 22 && pixelRatio > min) {                  // slow: 15 % fewer pixels per side
+    if (avg > 22 && pixelRatio > min && !busy && cpuAvg < avg * 0.6) {   // GPU-bound and slow: 15 % fewer pixels per side
       pixelRatio = Math.max(min, pixelRatio * 0.85);
       resGood = 0;
       resize();
       telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1) });
     } else if (avg < 17.5 && pixelRatio < max) {         // smooth for a while: try more pixels
-      if (++resGood >= 4) { pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize(); }
+      if (++resGood >= 2) { pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize(); }
     } else resGood = 0;
   };
 
@@ -480,7 +484,7 @@ async function main() {
   let lastTickRendered = false, rendered = 0, skipped = 0, cityRenders = 0, shadowRenders = 0;
   const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
   let shadowTiles = true, dynShadowDirty = true;
-  let wasMoving = false;
+  let wasMoving = false, lastCpu = 0;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
@@ -521,7 +525,7 @@ async function main() {
     prof.begin('lod');
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
     prof.end('lod');
-    if (lastTickRendered) adaptResolution(interval, moving, now);
+    if (lastTickRendered) adaptResolution(interval, moving, now, lastCpu);
     const cityChanged = CITY_ALWAYS || moving || tilesChanged || cityDirty;
     if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested)) {
       // nothing changed: draw nothing, the GPU stays idle
@@ -577,6 +581,7 @@ async function main() {
     prof.end('present');
     rendered++;
     const cpu = performance.now() - now;
+    lastCpu = cpu;
     prof.endFrame();
     // a frame interval only means something if the previous tick also rendered
     if (lastTickRendered) {

@@ -134,6 +134,8 @@ export class Agents {
   private last = -1;
   /** called when something changed that the info panel shows */
   onChange: ((a: Agent) => void) | null = null;
+  /** agents still to re-plan after a jump in time (0: done) */
+  get replanning() { return this.list.length - Math.min(this.pending, this.list.length); }
   /** counts for the benchmark: agents simulated in detail, as timelines, parked cars shown */
   stats() {
     let detailed = 0, timeline = 0, shown = 0;
@@ -206,19 +208,46 @@ export class Agents {
 
   /** a destination of these categories near home (walking distance): one of the nearest few */
   private near(a: Agent, r: () => number, max: number, ...cats: string[]): Where | null {
-    // the nearest few per home and category set, cached: homes do not move (every later day is cheap)
-    const key = `${a.home}|${max}|${cats.join(',')}`;
+    // the nearest few per 25 m cell of homes and category set, cached (neighbours share their shops and
+    // schools; every later day is cheap)
+    const h0 = this.places.homes[a.home], hc = [Math.floor(h0[0] / 50), Math.floor(h0[1] / 50)];
+    const key = `${hc[0]},${hc[1]}|${max}|${cats.join(',')}`;
     let pool = this.nearCache.get(key);
     if (!pool) {
-      const h = this.places.homes[a.home];
-      pool = this.poolOf(cats)
-        .map((i) => ({ i, d: Math.hypot(this.places.pois[i][0] - h[0], this.places.pois[i][1] - h[1]) * this.vs }))
-        .filter((x) => x.d < max).sort((x, y) => x.d - y.d).slice(0, 6).map((x) => x.i);
+      const h = [hc[0] * 50 + 25, hc[1] * 50 + 25];
+      // candidates from the cells around (a grid per category set) instead of every place
+      const grid = this.gridOf(cats), C = Agents.POI_CELL, r = Math.ceil(max / this.vs / C);
+      const cx = Math.floor(h[0] / C), cy = Math.floor(h[1] / C), found: { i: number; d: number }[] = [];
+      for (let gx = cx - r; gx <= cx + r; gx++)
+        for (let gy = cy - r; gy <= cy + r; gy++)
+          for (const i of grid.get(gx * 65536 + gy) ?? []) {
+            const d = Math.hypot(this.places.pois[i][0] - h[0], this.places.pois[i][1] - h[1]) * this.vs;
+            if (d < max) found.push({ i, d });
+          }
+      pool = found.sort((x, y) => x.d - y.d).slice(0, 6).map((x) => x.i);
       this.nearCache.set(key, pool);
     }
     return pool.length ? { kind: 'poi', i: pool[Math.floor(r() * pool.length)] } : null;
   }
   private nearCache = new Map<string, number[]>();
+  private static POI_CELL = 400;   // voxels (200 m)
+  private grids = new Map<string, Map<number, number[]>>();
+  /** places of these categories by grid cell (key gx * 65536 + gy) */
+  private gridOf(cats: string[]) {
+    const key = cats.join(',');
+    let g = this.grids.get(key);
+    if (!g) {
+      g = new Map();
+      for (const i of this.poolOf(cats)) {
+        const p = this.places.pois[i], k = Math.floor(p[0] / Agents.POI_CELL) * 65536 + Math.floor(p[1] / Agents.POI_CELL);
+        let l = g.get(k);
+        if (!l) g.set(k, (l = []));
+        l.push(i);
+      }
+      this.grids.set(key, g);
+    }
+    return g;
+  }
   // --- public transport stops (transit.ts data) ---
   private stops: [number, number, string][] = [];
   setStops(stops: [number, number, string][]) { this.stops = stops; }

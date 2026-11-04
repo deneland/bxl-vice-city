@@ -6,7 +6,7 @@
 // than `errPx` pixels. A parent is only replaced once all of its children are
 // meshed, so there are never holes; coarse tiles load first.
 import * as THREE from 'three/webgpu';
-import { createVoxelMaterial, voxelGeometryBase } from './voxelMaterial';
+import { ATLAS_W, createVoxelMaterial, voxelGeometryBase } from './voxelMaterial';
 import type { MeshRequest, MeshResult } from './mesher.worker';
 
 export interface TileInfo { file: string; tx: number; ty: number; count: number; zmin: number; zmax: number }
@@ -15,7 +15,7 @@ export interface LevelInfo { level: number; voxelSize: number; size: [number, nu
 /** Face data (colour, class) of all resident tiles in one texture: each tile owns a range of rows. Merged
  *  quads (mesher.worker.ts) index it by face; new tiles are copied in on the GPU. */
 export class FaceAtlas {
-  static readonly W = 2048;
+  static readonly W = ATLAS_W;   // x 8192 rows = 33.5M faces (twice the face budget: it never runs full)
   readonly tex: THREE.Texture;
   private target: THREE.RenderTarget | null = null;
   private free: [number, number][];
@@ -67,14 +67,30 @@ export class FaceAtlas {
   /** copy n texels (4 bytes each) to the linear range from `start`: a partial first row, whole rows, a
    *  partial last row */
   upload(renderer: THREE.WebGPURenderer, start: number, data: Uint8Array) {
-    if (!this.ready) { if (this.target) renderer.initRenderTarget(this.target); this.ready = true; }
-    const W = FaceAtlas.W, n = data.length / 4;
+    const be = renderer.backend as any;
+    if (!this.ready) {
+      if (this.target) renderer.initRenderTarget(this.target); else renderer.initTexture(this.tex);
+      this.ready = true;
+    }
+    // written straight into the atlas (no temporary texture: WebGL would upload the data twice)
+    const d = be.get(this.tex);
     const put = (from: number, w: number, h: number, x: number, y: number) => {
-      const src = new THREE.DataTexture(data.slice(from * 4, (from + w * h) * 4), w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
-      src.needsUpdate = true;
-      renderer.copyTextureToTexture(src, this.tex, null, new THREE.Vector2(x, y));
-      src.dispose();
+      const bytes = data.subarray(from * 4, (from + w * h) * 4);
+      if (be.isWebGPUBackend) {
+        be.device.queue.writeTexture({ texture: d.texture, origin: { x, y } }, bytes, { bytesPerRow: w * 4 }, { width: w, height: h });
+      } else {
+        const gl = be.gl as WebGL2RenderingContext, st = be.state;
+        st.bindTexture(gl.TEXTURE_2D, d.textureGPU);
+        st.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        st.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        st.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+        st.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+        st.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+        st.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+      }
     };
+    const W = FaceAtlas.W, n = data.length / 4;
     let done = 0, pos = start;
     if (pos % W) {                                   // head: rest of the first row
       const w = Math.min(n, W - (pos % W));
@@ -106,6 +122,10 @@ export class TileManager {
   private queue: Node[] = [];
   private inflight = 0;
   private shown = new Set<Node>();
+  private arrived: MeshResult[] = [];
+  /** ms per frame for integrating new tiles */
+  arriveMs = 3;
+  arriveQuads = 300_000;
   private showB = new Set<Node>();
   private readyCount = 0;
   private workers: Worker[];
@@ -159,7 +179,7 @@ export class TileManager {
     const nWorkers = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
     this.workers = Array.from({ length: nWorkers }, () => {
       const w = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' });
-      w.onmessage = (ev: MessageEvent<MeshResult>) => this.onMesh(ev.data);
+      w.onmessage = (ev: MessageEvent<MeshResult>) => { this.arrived.push(ev.data); };   // (integrated in update, within a budget)
       return w;
     });
     for (const r of this.roots) this.request(r, 1e9);
@@ -169,7 +189,7 @@ export class TileManager {
 
   /** Resolves once nothing is queued or loading (after the next update). */
   /** tiles still queued or loading */
-  get busy() { return this.inflight > 0 || this.queue.length > 0 || this.roots.some((r) => r.state !== 'ready'); }
+  get busy() { return this.inflight > 0 || this.queue.length > 0 || this.arrived.length > 0 || this.roots.some((r) => r.state !== 'ready'); }
   private meshArrived = false;
   /** true while tiles load, or when a mesh arrived since the last update (it must be shown) */
   get needsUpdate() { return this.busy || this.meshArrived || this.idleWaiters.length > 0; }
@@ -189,6 +209,15 @@ export class TileManager {
 
     this.meshArrived = false;
     const frame = ++this.frame;
+    // new tiles from the workers: as many as fit in a few ms (each one is an upload and a new mesh)
+    const until = performance.now() + this.arriveMs;
+    let k = 0;
+    let q = 0;   // (and at most arriveQuads new quads: their first render uploads them)
+    while (k < this.arrived.length && (k === 0 || (performance.now() < until && q < this.arriveQuads))) {
+      q += this.arrived[k].quads;
+      this.onMesh(this.arrived[k++]);
+    }
+    if (k) this.arrived.splice(0, k);
     const visit = (n: Node) => {
       n.used = frame;
       const d = n.box.distanceToPoint(cam);
@@ -252,10 +281,16 @@ export class TileManager {
   }
 
   /** the atlas has no room for n texels: free least recently used tiles until it has; first texel or -1 */
+  private lru: Node[] = []; private lruFrame = -1;
   private freeFor(n: number) {
-    const cand = this.nodes.filter((x) => x.state === 'ready' && x.start >= 0 && x.L < this.levels.length - 1 && !this.shown.has(x) && x.used < this.frame)
-      .sort((a, b) => a.used - b.used);
-    for (const x of cand) {
+    if (this.lruFrame !== this.frame) {   // (eviction candidates, least recently used first: once per frame)
+      this.lru = this.nodes.filter((x) => x.state === 'ready' && x.start >= 0 && x.L < this.levels.length - 1 && !this.shown.has(x) && x.used < this.frame)
+        .sort((a, b) => b.used - a.used);
+      this.lruFrame = this.frame;
+    }
+    while (this.lru.length) {
+      const x = this.lru.pop()!;
+      if (x.state !== 'ready' || x.start < 0) continue;
       this.drop(x);
       const s = this.atlas.alloc(n);
       if (s >= 0) return s;
@@ -275,16 +310,17 @@ export class TileManager {
       const n = this.queue.shift()!;
       n.state = 'loading';
       this.inflight++;
-      fetch(`${this.base}/${n.info.file}${this.query}`).then((r) => r.arrayBuffer()).then((buf) => {
-        const req: MeshRequest = { id: n.id, buf, ch: this.tileSize, nz: this.levels[n.L].size[2] };
-        this.workers[this.nextWorker++ % this.workers.length].postMessage(req, [buf]);
-      });
+      // the mesher worker fetches the tile itself (keeps network callbacks and copies off the main thread)
+      const url = new URL(`${this.base}/${n.info.file}${this.query}`, location.href).href;
+      const req: MeshRequest = { id: n.id, url, ch: this.tileSize, nz: this.levels[n.L].size[2] };
+      this.workers[this.nextWorker++ % this.workers.length].postMessage(req);
     }
   }
 
-  private onMesh({ id, q, t, quads, faces }: MeshResult) {
+  private onMesh({ id, q, t, quads, faces, failed }: MeshResult) {
     const n = this.nodes[id];
     this.inflight--;
+    if (failed) { n.state = 'idle'; return; }   // (network error: asked for again later)
     if (faces) {
       // room in the face atlas: free least recently used tiles if needed
       let start = this.atlas.alloc(faces);

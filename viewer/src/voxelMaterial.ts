@@ -15,6 +15,9 @@ export const LABELS: [number, string, number][] = [
   [14, 'rail', 0x7a4a2a], [15, 'other', 0xb8b8b8],
 ];
 
+/** width of the face atlas texture (lod.ts FaceAtlas) */
+export const ATLAS_W = 4096;
+
 /** 0: photo/LiDAR colours, 1: semantic classes */
 export const viewMode = uniform(0);
 
@@ -68,7 +71,7 @@ export function createVoxelMaterial(voxelSize: number, baseSize: number, atlas: 
   const cross = varying(mix(A, B, runOnA), 'vCross');      // 0 .. lv across
   const i = floor(run).min(vLu.sub(1)), jv = floor(cross).min(vLv.sub(1));
   const idx = vStart.add(jv.mul(vLu)).add(i);               // texels row by row
-  const W = 2048;   // (FaceAtlas.W)
+  const W = ATLAS_W;
   const texel = textureLoad(atlas, ivec2(int(mod(idx, W)), int(floor(idx.div(W)))));
   // unpack the face's 32 bits (mesher.worker.ts): colour 6+6+6, occlusion 8, label 4, photo 1
   const by = (c: any) => floor(c.mul(255).add(0.5));

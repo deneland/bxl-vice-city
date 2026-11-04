@@ -18,8 +18,8 @@
 // dir: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z (up), 5 -z (down)   (voxel space, z up)
 // u (run axis): z for side faces, x for dir 4/5; v: y for dir 0/1, x for dir 2/3, y for dir 4/5.
 
-export interface MeshRequest { id: number; buf: ArrayBuffer; ch: number; nz: number }
-export interface MeshResult { id: number; q: Float32Array; t: Uint8Array; quads: number; faces: number }
+export interface MeshRequest { id: number; url: string; ch: number; nz: number }   // (the worker fetches the tile itself)
+export interface MeshResult { id: number; q: Float32Array; t: Uint8Array; quads: number; faces: number; failed?: boolean }
 
 const FLAG_FILL = 1;
 const FLAG_APRON = 2;
@@ -29,8 +29,11 @@ const MAXRUN = 255;
 // unit vectors per axis
 const E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
-self.onmessage = (ev: MessageEvent<MeshRequest>) => {
-  const { id, buf, ch, nz } = ev.data;
+self.onmessage = async (ev: MessageEvent<MeshRequest>) => {
+  const { id, url, ch, nz } = ev.data;
+  let buf: ArrayBuffer;
+  try { buf = await (await fetch(url)).arrayBuffer(); }
+  catch { (self as unknown as Worker).postMessage({ id, q: new Float32Array(0), t: new Uint8Array(0), quads: 0, faces: 0, failed: true }); return; }
   const v = new Uint8Array(buf);
   const n = v.length / 8;
   const W = ch + 2;
