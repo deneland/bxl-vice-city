@@ -10,6 +10,8 @@ export interface RoadNetwork {
   // mapped crosswalks [[m from start, 1 signals | 2 marked | 3 unmarked]], roundabout
   edges: [number, number, number, number, number, number, number[], number, [number, number, number][], number, [number, number],
     [number, number][]?, number?][];
+  /** road inside merged junctions (pipeline consolidate): same fields as edges, not driven as edges */
+  pieces?: RoadNetwork['edges'];
   /** footpaths (parks, squares, pedestrian streets): [[node a, node b], xyz...] */
   paths?: [[number, number], number[]][];
 }
@@ -58,10 +60,27 @@ function offsetLine(p: number[], off: number) {
     let dx = p[b * 3] - p[a * 3], dz = p[b * 3 + 2] - p[a * 3 + 2];
     const l = Math.hypot(dx, dz) || 1;
     dx /= l; dz /= l;
+    // miter: at a bend the corner point sits off / cos(half the bend) out, so both neighbouring segments
+    // stay `off` from the centreline (without it, lanes folded at sharp corners); capped at 2x (no spikes)
+    // (the bend measured over at least 1 m each side: resampled lines have near-duplicate points whose
+    // tiny segments have no meaningful direction)
+    let k = 1;
+    if (i > 0 && i < n - 1) {
+      let j = i - 1, m = i + 1;
+      while (j > 0 && Math.hypot(p[i * 3] - p[j * 3], p[i * 3 + 2] - p[j * 3 + 2]) < 1) j--;
+      while (m < n - 1 && Math.hypot(p[m * 3] - p[i * 3], p[m * 3 + 2] - p[i * 3 + 2]) < 1) m++;
+      let ux = p[i * 3] - p[j * 3], uz = p[i * 3 + 2] - p[j * 3 + 2], vx = p[m * 3] - p[i * 3], vz = p[m * 3 + 2] - p[i * 3 + 2];
+      const ul = Math.hypot(ux, uz), vl = Math.hypot(vx, vz);
+      if (ul > 0.3 && vl > 0.3) {
+        ux /= ul; uz /= ul; vx /= vl; vz /= vl;
+        const cosHalf = Math.sqrt(Math.max(0, (1 + ux * vx + uz * vz) / 2));
+        k = 1 / Math.max(0.5, cosHalf);
+      }
+    }
     // right of travel direction d (y up): d × up = (-dz, 0, dx)
-    out[i * 3] = p[i * 3] - dz * off;
+    out[i * 3] = p[i * 3] - dz * off * k;
     out[i * 3 + 1] = p[i * 3 + 1];
-    out[i * 3 + 2] = p[i * 3 + 2] + dx * off;
+    out[i * 3 + 2] = p[i * 3 + 2] + dx * off * k;
   }
   return out;
 }
@@ -105,7 +124,8 @@ export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
 export function roadOverlay(net: RoadNetwork, lanes: Lane[], vs: number) {
   const pos: number[] = [], col: number[] = [];
   const c = new THREE.Color();
-  for (const [, , kind, oneway, , , p] of net.edges) {
+  // (junction pieces: road surface inside merged junctions, driven through the junction's curves)
+  for (const [, , kind, oneway, , , p] of [...net.edges, ...(net.pieces ?? [])]) {
     c.set(kind === KIND.road && oneway ? ONEWAY : COLORS[kind]);
     for (let i = 0; i + 5 < p.length; i += 3) {
       const a = toScene(vs, p[i], p[i + 1], p[i + 2]), b = toScene(vs, p[i + 3], p[i + 4], p[i + 5]);

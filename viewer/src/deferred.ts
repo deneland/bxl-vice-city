@@ -105,6 +105,7 @@ export class Deferred {
         return { rt, cam, mat: uniform(new THREE.Matrix4()) };
       };
       this.stat = mk(STATIC_SIZE, shadows.half);
+      this.statTexel = (2 * shadows.half) / STATIC_SIZE;
       this.dyn = mk(DYN_SIZE, DYN_HALF);
       (this.stat.rt as any).label = 'shadowCity'; (this.dyn.rt as any).label = 'shadowDyn';
       this.dyn.cam.layers.set(DYNAMIC_SHADOW_LAYER);
@@ -146,10 +147,11 @@ export class Deferred {
     const hemi = mix(this.groundCol, this.skyCol, n.y.mul(0.5).add(0.5));
     let sun: any = this.sunCol.mul(max(dot(n, this.sunDir), 0));
     if (this.stat && this.dyn && world) {
-      const p = world.add(n.mul(0.35));   // pushed off the surface a little against shadow acne
+      // looked up a little off the surface against shadow acne, by about one texel of the map: the city map
+      // spans the whole region (~1.4 m texels; 0.35 m gave stripes over open ground), the vehicle map 0.23 m
       const webgl = this.renderer.coordinateSystem === THREE.WebGLCoordinateSystem;
-      const lookup = (sm: ShadowMap, size: number, bias: number) => {
-        const c = sm.mat.mul(vec4(p, 1));
+      const lookup = (sm: ShadowMap, size: number, bias: number, off: number) => {
+        const c = sm.mat.mul(vec4(world.add(n.mul(off)), 1));
         const ndc = c.xyz.div(c.w);
         const suv = vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5).oneMinus());
         const z = (webgl ? ndc.z.mul(0.5).add(0.5) : ndc.z).sub(bias);
@@ -162,9 +164,10 @@ export class Deferred {
       };
       // depth range 5000 m: 1e-4 ≈ 0.5 m
       // (vehicles skip the vehicle shadow map: at its resolution they would shadow themselves)
-      const st = lookup(this.stat, STATIC_SIZE, 1e-4);
-      const sh = vehicleShadows ? min(st, lookup(this.dyn, DYN_SIZE, 5e-5)) : st;
-      if (DEBUG_SHADOW) return vec3(lookup(this.stat, STATIC_SIZE, 1e-4), lookup(this.dyn, DYN_SIZE, 5e-5), 0).mul(Math.PI);
+      const statOff = Math.max(0.35, this.statTexel * 1.0);
+      const st = lookup(this.stat, STATIC_SIZE, 1e-4, statOff);
+      const sh = vehicleShadows ? min(st, lookup(this.dyn, DYN_SIZE, 5e-5, 0.35)) : st;
+      if (DEBUG_SHADOW) return vec3(lookup(this.stat, STATIC_SIZE, 1e-4, statOff), lookup(this.dyn, DYN_SIZE, 5e-5, 0.35), 0).mul(Math.PI);
       sun = sun.mul(sh);
     }
     // (× 1.1: stands in for the faint specular of the rough material we used before)
@@ -285,6 +288,7 @@ export class Deferred {
   /** quads per slice frame */
   sliceQuads = 250_000;   // (an integrated GPU draws ~0.5-1 M quads per ms: a slice must fit in a frame's slack)
   get shadowBusy() { return this.job !== null; }
+  private statTexel = 1;   // m per texel of the city shadow map
 
   beginStaticShadow(cityScene: THREE.Scene, center: THREE.Vector3) {
     if (!this.stat) return;

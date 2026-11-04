@@ -480,6 +480,39 @@ export class Traffic {
     return h.block === 'junction:light' || h.block === 'crossing';
   }
 
+  /** (development) every road junction with all its possible curves and the lane ends around it, to check
+   *  the geometry the pipeline produced (bench/junctions.mjs) */
+  junctionGeometry() {
+    const byTo = new Map<number, Path[]>();
+    for (const p of this.paths)
+      if (p.lane && p.kind === KIND.road && !p.lane.bikeOnly) {
+        if (!byTo.has(p.lane.to)) byTo.set(p.lane.to, []);
+        byTo.get(p.lane.to)!.push(p);
+      }
+    const pt = (p: Path, s: number) => { const v = sample(p, s, new THREE.Vector3()); return [+v.x.toFixed(2), +v.z.toFixed(2)]; };
+    const stretch = (p: Path, s0: number, s1: number) => {
+      const o: number[][] = [];
+      for (let s = Math.max(0, s0); s <= Math.min(p.length, s1); s += 2) o.push(pt(p, s));
+      return o;
+    };
+    const out = [];
+    for (const [node, ins] of byTo) {
+      const outs = (this.byNode.get(node) ?? []).filter((b) => b.kind === KIND.road && !b.lane!.bikeOnly);
+      const curves = [];
+      for (const a of ins)
+        for (const b of outs) {
+          if (b.lane!.edge === a.lane!.edge) continue;   // (U-turns)
+          const c = makeCurve(a, b);
+          const p0 = pt(a, a.end), p1 = pt(b, b.start);
+          curves.push({ from: a.lane!.edge, to: b.lane!.edge, len: +c.length.toFixed(2), chord: +Math.hypot(p1[0] - p0[0], p1[1] - p0[1]).toFixed(2),
+            turn: +c.turn.toFixed(3), pts: stretch(c, 0, c.length) });
+        }
+      out.push({ node, signalled: !!ins[0].approach?.signal, ins: ins.map((a) => ({ edge: a.lane!.edge, end: pt(a, a.end), line: stretch(a, a.end - 30, a.end) })),
+        outs: outs.map((b) => ({ edge: b.lane!.edge, start: pt(b, b.start), line: stretch(b, b.start, b.start + 30) })), curves });
+    }
+    return out;
+  }
+
   /** for the shadow pass: let every vehicle mesh render in another layer too */
   enableLayer(layer: number) { this.fleet.enableLayer(layer); }
   /** fill the vehicle instance buffers for this camera (once per frame, before rendering) */

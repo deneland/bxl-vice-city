@@ -558,7 +558,8 @@ async function main() {
     prof.end('lod');
     if (lastTickRendered) adaptResolution(interval, moving, now, lastCpu);
     const cityChanged = CITY_ALWAYS || moving || tilesChanged || cityDirty;
-    if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested)) {
+    // (a city shadow rebuild in slices needs frames to finish, also when nothing else changes)
+    if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested || deferred.shadowBusy)) {
       // nothing changed: draw nothing, the GPU stays idle
       lastTickRendered = false;
       skipped++;

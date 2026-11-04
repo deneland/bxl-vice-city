@@ -64,6 +64,13 @@ FOOTPRINTS = ROOT / "data" / "cache" / "vehicles"
 # street photos recognised (building, sign, pole, fence, street furniture). Everything higher is kept.
 TIDY = "--no-tidy" not in sys.argv
 TIDY_H = 5                 # voxels (2.5 m) above the ground
+# street tidy (default; --no-street-tidy to keep): in the carriageway (OSM roads, measured kerbs) everything
+# unclassified up to ROAD_H that is not part of a taller structure goes (cars of 2021 the vehicle finder missed:
+# vans, buses, moving cars smeared by the scan; fragments); on pavements also next to the facades
+STREET_TIDY = "--no-street-tidy" not in sys.argv
+ROAD_H = 8                 # voxels (4 m)
+FLOAT_VOX = 20             # small clusters floating more than FLOAT_H above the ground go
+FLOAT_H = 2
 SEM_KEEP = [1, 2, 6, 7, 8, 11]
 FLAG_FILL = 1      # geometry synthesised (wall / terrain fill), not measured
 FLAG_APRON = 2     # belongs to the neighbouring tile, used only for culling
@@ -333,6 +340,16 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
         return np.zeros(len(key), bool)
     drop = m & (pts[vl] < SPECK_POINTS)
     st["specks"] += int(drop.sum())
+    if STREET_TIDY:   # small clusters floating in the air (birds, cable bits, scanner noise)
+        nvox = np.bincount(vl[m], minlength=n + 1)
+        h = vz - ground[vy, vx]
+        hmin = np.full(n + 1, 1 << 30)
+        np.minimum.at(hmin, vl[m], h[m])
+        fl = (nvox < FLOAT_VOX) & (hmin > FLOAT_H)
+        fl[0] = False
+        fd = m & fl[vl] & ~drop & (cls != C_BUILDING)
+        st["floating"] = st.get("floating", 0) + int(fd.sum())
+        drop |= fd
     return drop
 
 
@@ -516,6 +533,30 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
             cand = low & ~part_of_tall & ~attached
         else:
             cand = low
+        zb = zones_block(gx0, gy0, GW, GH)
+        if zb is not None and u.any():
+            zone = zb[ay, ax]
+            # carriageway: up to ROAD_H, unless part of something reaching above it (trees, lamp posts, poles)
+            rz = u & (zone == Z_ROAD) & (az - ground[ay, ax] <= ROAD_H)
+            if rz.any():
+                uz0 = int(az[u].min()); nzz = int(az[u].max()) - uz0 + 1
+                gridu = np.zeros((nzz, GH, GW), bool)
+                gridu[az[u] - uz0, ay[u], ax[u]] = True
+                labu, nu = ndimage.label(gridu, structure=np.ones((3, 3, 3)))
+                tall2 = np.zeros(nu + 1, bool)
+                hi2 = u & (az - ground[ay, ax] > ROAD_H + 1)
+                tall2[labu[az[hi2] - uz0, ay[hi2], ax[hi2]]] = True
+                tall2[0] = False
+                keep = tall2[labu[az[rz] - uz0, ay[rz], ax[rz]]]
+                road_c = np.zeros(len(akey), bool)
+                road_c[np.flatnonzero(rz)[~keep]] = True
+                st["street_road"] = st.get("street_road", 0) + int(road_c.sum())
+                cand = cand | road_c
+            # pavements: low clutter also next to the facade (bikes, bins against walls)
+            if low.any():
+                pv = low & ~part_of_tall & (zone == Z_PAVE) & ~cand
+                st["street_pave"] = st.get("street_pave", 0) + int(pv.sum())
+                cand = cand | pv
         if cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
             cc = np.zeros((GH, GW), bool)
             cc[ay[cand], ax[cand]] = True
@@ -532,6 +573,63 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     if cand is not None:
         st["tidy_cand"] = cand[~drop]
     return Vox(akey % GW + gx0, (akey // GW) % GH + gy0, akey // (GW * GH), acol, acls, aflag)
+
+
+# --- street zones (from the road network of an earlier build: roads.py, OSM + measured pavement lines) ---
+ZONES_F = ROOT / "data/cache/zones" / f"{ROI['name']}.npy"
+ROADS_F = ROOT / "viewer/public/roads" / f"{ROI['name']}.json"
+Z_ROAD, Z_PAVE = 1, 2
+_zones = None
+
+
+def build_zones() -> bool:
+    """Per L0 column: 1 carriageway, 2 pavement (kerb to just short of the facade), 0 elsewhere. Kerb and
+    facade from the pavement walking lines roads.py measured (facade - 1.5 m; kerb ~1 m inside it), widths
+    capped to plausible streets (squares and parks are not road)."""
+    if not ROADS_F.exists():
+        return False
+    from PIL import Image, ImageDraw
+    net = json.loads(ROADS_F.read_text())
+    img = Image.new("L", (NX, NY), 0)
+    dr = ImageDraw.Draw(img)
+    road_polys, pave_polys = [], []
+    for e in net["edges"] + net.get("pieces", []):   # (pieces: road inside merged junctions)
+        if e[2] != 0:
+            continue
+        p = np.array(e[6], float).reshape(-1, 3)[:, :2]
+        if len(p) < 2:
+            continue
+        d = np.gradient(p, axis=0)
+        d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
+        left = np.stack([-d[:, 1], d[:, 0]], 1)
+        lanes = e[5] if e[5] else (1 if e[3] else 2)
+        cap = (5.0 if e[3] else 6.5) + max(0, lanes - 2) * 1.6
+        k, f = [], []
+        for side, sgn in ((0, 1.0), (1, -1.0)):
+            pav = e[10][side]
+            kerb = min(pav - 1.0, cap) if pav > 0 else min(4.0, cap)
+            face = min(pav + 0.9, kerb + 4.0) if pav > 0 else kerb
+            k.append(p + sgn * left * (kerb / VS))
+            f.append(p + sgn * left * (face / VS))
+        road_polys.append(np.vstack([k[0], k[1][::-1]]))
+        for side in (0, 1):
+            pave_polys.append(np.vstack([k[side], f[side][::-1]]))
+    for poly in pave_polys:
+        dr.polygon([tuple(q) for q in poly], fill=Z_PAVE)
+    for poly in road_polys:
+        dr.polygon([tuple(q) for q in poly], fill=Z_ROAD)
+    ZONES_F.parent.mkdir(parents=True, exist_ok=True)
+    np.save(ZONES_F, np.asarray(img, np.uint8))   # [y, x]
+    return True
+
+
+def zones_block(gx0, gy0, GW, GH):
+    global _zones
+    if _zones is None:
+        _zones = np.load(ZONES_F, mmap_mode="r") if ZONES_F.exists() and STREET_TIDY else False
+    if _zones is False:
+        return None
+    return np.asarray(_zones[gy0:gy0 + GH, gx0:gx0 + GW])
 
 
 def process_block(bx: int, by: int, z0: float):
@@ -617,6 +715,8 @@ def main() -> None:
         else:
             log("street-level layer is for another region size; ignored")
     log(f"z0 = {z0} m (height range {z0}–{z0 + NZ * VS} m)")
+    if STREET_TIDY:
+        log("street zones from the road network: " + ("built" if build_zones() else "no roads.json yet (run roads.py; then build again)"))
 
     # build into a staging folder; the viewer keeps serving the old build until the swap
     DEST = OUT.with_name(OUT.name + ".building")
@@ -638,8 +738,9 @@ def main() -> None:
                 for k in ("voxels", "faces", "bytes"):
                     levels[L][k] += lv[k]
                 levels[L]["tiles"] += lv["tiles"]
-            for k in st:
-                st[k] += bst[k]
+            for k, v in bst.items():
+                if isinstance(v, (int, float)):
+                    st[k] = st.get(k, 0) + v
             if c is not None:
                 carry.append(c)
             if i % max(1, len(blocks) // 6) == 0 or i == len(blocks):
@@ -662,7 +763,7 @@ def main() -> None:
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
         f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
         f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
-        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied; "
+        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied ({st.get('street_road', 0):,} candidates in the carriageway, {st.get('street_pave', 0):,} on pavements); {st.get('floating', 0):,} floating voxels dropped; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = []
     for L, lv in enumerate(levels):

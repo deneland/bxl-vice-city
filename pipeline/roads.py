@@ -45,6 +45,7 @@ SIGNALS, GIVE_WAY, STOP = 1, 2, 3
 DEFAULT_SPEED = {"living_street": 20, "primary": 50, "trunk": 50, "motorway": 90}   # else 30 (Brussels zone 30)
 SAMPLE = 2.0      # m between height samples
 MERGE = 15.0      # m; road intersections joined by a shorter edge are one intersection
+CLUSTER = 20.0    # m; ...unless the merged junction would be wider than this
 MARGIN = 20.0     # m around the region
 
 to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
@@ -160,7 +161,7 @@ def speed(t):
 
 def consolidate(edges, node_xy, node_sig, vs):
     """Merge intersections joined by short road edges (several OSM nodes in one real crossing) into one
-    node at their centroid; drop the short edges; snap the other edges' ends to the merged node."""
+    node at their centroid; drop the short edges. The other edges keep their own end points."""
     parent = list(range(len(node_xy)))
 
     def find(a):
@@ -188,11 +189,26 @@ def consolidate(edges, node_xy, node_sig, vs):
                     node_sig.append(0)
                     parent.append(len(parent))
                 e[k] = copy[e[k]]
-    for e in edges:
-        # (never along a roundabout: its pieces between entries are often < MERGE, and merging them
-        # collapsed every small roundabout into one point where all its roads met)
-        if e[2] == KIND["road"] and e[0] != e[1] and length(e) < MERGE and not e[11]:
-            parent[find(e[0])] = find(e[1])
+    # (never at a roundabout: its pieces between entries are often < MERGE, and merging them collapsed every
+    # small roundabout into one point where all its roads met; a short approach piece merged into a ring
+    # node pulled the ring into a spike)
+    ring_nodes = {n for e in edges if e[2] == KIND["road"] and e[11] for n in (e[0], e[1])}
+    # shortest connections first, and never into a cluster wider than CLUSTER: chains of short edges used to
+    # merge whole squares into one junction with curves between every pair of its roads
+    members = {i: [i] for i in range(len(node_xy))}
+    def width_ok(ra, rb):
+        pa = np.array([node_xy[i][:2] for i in members[ra]]) * vs
+        pb = np.array([node_xy[i][:2] for i in members[rb]]) * vs
+        return float(np.max(np.hypot(*(pa[:, None, :] - pb[None, :, :]).transpose(2, 0, 1)))) <= CLUSTER
+    short = sorted((length(e), k) for k, e in enumerate(edges)
+                   if e[2] == KIND["road"] and e[0] != e[1] and not e[11] and e[0] not in ring_nodes and e[1] not in ring_nodes)
+    for L, k in short:
+        if L >= MERGE:
+            break
+        ra, rb = find(edges[k][0]), find(edges[k][1])
+        if ra != rb and width_ok(ra, rb):
+            parent[ra] = rb
+            members[rb] += members.pop(ra)
     groups = {}
     for i in range(len(node_xy)):
         groups.setdefault(find(i), []).append(i)
@@ -203,17 +219,21 @@ def consolidate(edges, node_xy, node_sig, vs):
         sig.append(max(node_sig[i] for i in members))
         for i in members:
             new_ix[i] = k
-    out = []
+    out, pieces = [], []
     for e in edges:
         a, b = new_ix[e[0]], new_ix[e[1]]
-        if a == b and e[2] == KIND["road"] and length(e) < MERGE and not e[11]:
-            continue                                         # inside a merged intersection
-        pts = list(e[6])
-        pts[0:3] = [round(float(c), 1) for c in xy[a]]
-        pts[-3:] = [round(float(c), 1) for c in xy[b]]
-        out.append([a, b, *e[2:6], pts, *e[7:]])
-    print(f"consolidated {len(node_xy)} -> {len(xy)} nodes, {len(edges)} -> {len(out)} edges")
-    return out, xy, sig
+        if a == b and e[2] == KIND["road"]:
+            # inside a merged intersection (or a loop back into it): not driven as an edge (the junction's
+            # curves join the roads around it), but kept as a junction piece: it is still road surface
+            # (drawn, a street zone; it used to vanish, e.g. a side street across a boulevard's median)
+            pieces.append([a, b, *e[2:6], list(e[6]), *e[7:]])
+            continue
+        # the edges keep their own OSM ends: one junction for the traffic, but no road is stretched to the
+        # cluster's centroid (that drew straight spikes across dual carriageways and squares); the junction
+        # curves join the real ends
+        out.append([a, b, *e[2:6], list(e[6]), *e[7:]])
+    print(f"consolidated {len(node_xy)} -> {len(xy)} nodes, {len(edges)} -> {len(out)} edges ({len(pieces)} junction pieces)")
+    return out, xy, sig, pieces
 
 
 def edge_length(pts, vs):
@@ -523,16 +543,18 @@ def build():
             edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
                           [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra, xw, ring, pk])
             stats[kind] += d[-1]
-    edges, node_xy, node_sig = consolidate(edges, node_xy, node_sig, vs)
+    edges, node_xy, node_sig, pieces = consolidate(edges, node_xy, node_sig, vs)
+    pieces = [e for e in pieces if all(1 <= c < lim for c, lim in zip(e[6][0:2], m.size[:2]))]
     edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
     tram_directions(edges, vs)
     pavements(edges, m, vs)
+    pavements(pieces, m, vs)
     if "--refetch" in sys.argv or not RAW_PATHS.exists():
         fetch_paths()
     paths = walk_paths(m, X0, Y0, vs)
     out = {"build": m.man["build"], "paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
-           "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
+           "edges": edges, "pieces": pieces, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
                                       "rank", "controls [m, 1 signals|2 give way|3 stop, dir]",
                                       "bikes both ways (one-way street open to cycling against the traffic)",
                                       "pavement [left, right] m from the centreline (0: none found)",
