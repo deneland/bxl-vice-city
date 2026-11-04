@@ -29,7 +29,8 @@ from PIL import Image, ImageDraw
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import ROOT, VS, bbox, overpass, region, to_l72
+from common import (E_CROSSWALKS, E_FROM, E_KIND, E_ONEWAY, E_PARKING, E_PAVEMENT, E_TO, E_XYZ, KIND_ROAD, ROOT,
+                    VS, bbox, overpass, region, to_l72)
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -184,10 +185,10 @@ def main():
     # (pavement offsets from the LiDAR facades, roads.py); degree-2 nodes are bends, not junctions
     deg, reach = {}, {}
     for e in edges:
-        if e[2] != 0:
+        if e[E_KIND] != KIND_ROAD:
             continue
-        half = max(e[10]) - 1.0 if max(e[10]) > 0 else 5.0
-        for n in (e[0], e[1]):
+        half = max(e[E_PAVEMENT]) - 1.0 if max(e[E_PAVEMENT]) > 0 else 5.0
+        for n in (e[E_FROM], e[E_TO]):
             deg[n] = deg.get(n, 0) + 1
             reach.setdefault(n, []).append(half)
     def margin(node, own_half):
@@ -200,20 +201,20 @@ def main():
     spots, rows, used = [], 0, 0
     offs = np.arange(1.5, 12.01, 0.5)                    # m from the centreline
     for e in edges:
-        if e[2] != 0:                                     # roads only
+        if e[E_KIND] != KIND_ROAD:
             continue
-        oneway, pave = e[3], e[10]
-        osm = e[13] if len(e) > 13 else [0, 0]
-        p = np.array(e[6], float).reshape(-1, 3)[:, :2]
+        oneway, pave = e[E_ONEWAY], e[E_PAVEMENT]
+        osm = e[E_PARKING]
+        p = np.array(e[E_XYZ], float).reshape(-1, 3)[:, :2]
         pts, d, L = resample(p, 1.0)                      # every voxel (0.5 m)
         own = max(pave) - 1.0 if max(pave) > 0 else 5.0
-        m0, m1 = margin(e[0], own), margin(e[1], own)
+        m0, m1 = margin(e[E_FROM], own), margin(e[E_TO], own)
         if pts is None or L * VS < m0 + m1 + MIN_ROW:
             continue
         left = np.stack([-d[:, 1], d[:, 0]], 1)           # x east, y north
         s_m = np.arange(len(pts)) * VS
         inner = (s_m > m0) & (s_m < L * VS - m1)
-        for m, _ in (e[11] if len(e) > 11 else []):       # mapped crosswalks
+        for m, _ in e[E_CROSSWALKS]:                      # mapped crosswalks
             inner &= np.abs(s_m - m) > CROSSWALK
         if len(stops):                                    # bus / tram stops
             near = np.min(np.hypot(*(pts[:, None, :] - stops[None, :, :]).transpose(2, 0, 1)), axis=1) * VS

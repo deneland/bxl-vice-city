@@ -40,6 +40,12 @@ FLAG_PHOTO = 8            # colour from street-level photos (streetview.py layer
 LABEL_SHIFT = 4           # flags bits 4-7: semantic label (streetview.L_NAMES)
 
 
+# --- road network (roads.py -> viewer/public/roads/<roi>.json): each edge is a list in this order ---
+(E_FROM, E_TO, E_KIND, E_ONEWAY, E_KMH, E_LANES, E_XYZ, E_RANK, E_CONTROLS, E_CONTRA, E_PAVEMENT, E_CROSSWALKS,
+ E_RING, E_PARKING) = range(14)
+KIND_ROAD, KIND_TRAM, KIND_RAIL = 0, 1, 2
+
+
 def log_clock():
     """log(msg): print with the seconds since this call"""
     t0 = time.time()

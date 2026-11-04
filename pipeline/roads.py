@@ -13,10 +13,11 @@ Map data © OpenStreetMap contributors, ODbL.
 """
 import json
 import sys
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from common import C_BUILDING as BUILDING, ROOT, bbox, overpass, region, to_l72
+from common import KIND_RAIL, KIND_ROAD, KIND_TRAM, C_BUILDING as BUILDING, C_GROUND, ROOT, bbox, overpass, region, to_l72
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -26,7 +27,7 @@ OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 
 ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
          "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
-KIND = {"road": 0, "tram": 1, "rail": 2}
+KIND = {"road": KIND_ROAD, "tram": KIND_TRAM, "rail": KIND_RAIL}
 # road class -> rank: who has priority at an unsigned intersection (Belgium: otherwise from the right)
 RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, "unclassified": 2,
         "residential": 2, "living_street": 1}
@@ -41,10 +42,71 @@ CLUSTER = 20.0    # m; ...unless the merged junction would be wider than this
 MARGIN = 20.0     # m around the region
 
 
+@dataclass(slots=True)
+class Edge:
+    """a road / track edge between two nodes; json() writes it as the list roads.json (and the viewer) read"""
+    a: int                 # from node
+    b: int                 # to node
+    kind: int              # KIND
+    oneway: int            # 1: only from a to b
+    kmh: int
+    lanes: int
+    xyz: list              # centreline: x, y, z per point (voxels)
+    rank: int              # road class priority (RANK)
+    controls: list         # [[m from a, code, dir]]: signals, signs, speed bumps
+    contra: int            # 1: one-way street open to cycling against the traffic
+    crosswalks: list       # [[m from a, 1 signals | 2 marked | 3 unmarked]]
+    ring: int              # 1: part of a roundabout
+    parking: list          # OSM kerbside parking [left, right] (parking_sides)
+    pavement: list = field(default_factory=lambda: [0, 0])   # [left, right] m from the centreline (pavements())
+
+    def end(self, k):
+        return self.b if k else self.a
+
+    def set_end(self, k, n):
+        if k:
+            self.b = n
+        else:
+            self.a = n
+
+    def json(self):   # (the order of common.E_*)
+        return [self.a, self.b, self.kind, self.oneway, self.kmh, self.lanes, self.xyz, self.rank, self.controls,
+                self.contra, self.pavement, self.crosswalks, self.ring, self.parking]
+
+
 def fetch_paths():
     """footways, paths, pedestrian streets, steps (parks, squares); pavements and crossings are generated"""
     overpass(f'[out:json][timeout:120];way["highway"~"^(footway|path|pedestrian|steps)$"]({bbox(ROI, MARGIN)});'
              'out body;>;out skel qt;', RAW_PATHS)
+
+
+def ground(m, px, py, patch, bridge=False):
+    """ground surface (voxels) at a point: median over a 3 x 3 patch (columns `patch` apart) of the top
+    ground voxel per column (bridges: top of anything solid); nan where there is none"""
+    zs = []
+    for dx in (-patch, 0, patch):
+        for dy in (-patch, 0, patch):
+            c = m.column(int(px) + dx, int(py) + dy)
+            if c is None:
+                continue
+            k = np.flatnonzero(c != 0 if bridge else c == C_GROUND)
+            if len(k):
+                zs.append(k.max() + 1)
+    return float(np.median(zs)) if zs else np.nan
+
+
+def profile(m, xy, v, patch, bridge=False):
+    """a polyline (xy in L72 m, v the same in voxels) resampled every SAMPLE m (keeping its own points) with
+    ground heights: (distance along it in m, points in voxels, z in voxels), or None where no ground at all"""
+    d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
+    n = max(1, int(np.ceil(d[-1] / SAMPLE)))
+    s = np.unique(np.r_[np.linspace(0, d[-1], n + 1), d])
+    p = np.c_[np.interp(s, d, v[:, 0]), np.interp(s, d, v[:, 1])]
+    z = np.array([ground(m, px, py, patch, bridge) for px, py in p])
+    if np.isnan(z).all():
+        return None
+    ok = ~np.isnan(z)
+    return d, p, np.interp(np.arange(len(z)), np.flatnonzero(ok), z[ok])
 
 
 def walk_paths(m, X0, Y0, vs):
@@ -58,16 +120,6 @@ def walk_paths(m, X0, Y0, vs):
         for n in w["nodes"]:
             use[n] = use.get(n, 0) + 1
     ids, out = {}, []
-    def ground(px, py):
-        zs = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                c = m.column(int(px) + dx, int(py) + dy)
-                if c is not None:
-                    k = np.flatnonzero(c == 2)
-                    if len(k):
-                        zs.append(k.max() + 1)
-        return float(np.median(zs)) if zs else np.nan
     for w in ways:
         seq = w["nodes"]
         cuts = [0] + [i for i in range(1, len(seq) - 1) if use[seq[i]] > 1] + [len(seq) - 1]
@@ -77,15 +129,10 @@ def walk_paths(m, X0, Y0, vs):
             v = (xy - [X0, Y0]) / vs
             if not ((v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])).all():
                 continue
-            d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
-            n = max(1, int(np.ceil(d[-1] / SAMPLE)))
-            s = np.unique(np.r_[np.linspace(0, d[-1], n + 1), d])
-            p = np.c_[np.interp(s, d, v[:, 0]), np.interp(s, d, v[:, 1])]
-            z = np.array([ground(px, py) for px, py in p])
-            if np.isnan(z).all():
+            prof = profile(m, xy, v, patch=1)
+            if prof is None:
                 continue
-            ok = ~np.isnan(z)
-            z = np.interp(np.arange(len(z)), np.flatnonzero(ok), z[ok])
+            _, p, z = prof
             for nid in (seg[0], seg[-1]):
                 ids.setdefault(nid, len(ids))
             out.append([[ids[seg[0]], ids[seg[-1]]], [round(float(c), 1) for c in np.c_[p, z].ravel()]])
@@ -122,28 +169,28 @@ def consolidate(edges, node_xy, node_sig, vs):
         return a
 
     def length(e):
-        p = np.array(e[6]).reshape(-1, 3)[:, :2] * vs
-        return float(np.hypot(*np.diff(p, axis=0).T).sum())
+        return float(edge_length(e.xyz, vs)[-1])
 
     # tracks get their own copy of nodes shared with roads (cars and trams do not interact yet), so road
     # intersections can be merged without bending the tracks
-    roadn = {n for e in edges if e[2] == KIND["road"] for n in (e[0], e[1])}
+    roadn = {n for e in edges if e.kind == KIND["road"] for n in (e.a, e.b)}
     copy = {}
     for e in edges:
-        if e[2] == KIND["road"]:
+        if e.kind == KIND["road"]:
             continue
         for k in (0, 1):
-            if e[k] in roadn:
-                if e[k] not in copy:
-                    copy[e[k]] = len(node_xy)
-                    node_xy.append(list(node_xy[e[k]]))
+            n = e.end(k)
+            if n in roadn:
+                if n not in copy:
+                    copy[n] = len(node_xy)
+                    node_xy.append(list(node_xy[n]))
                     node_sig.append(0)
                     parent.append(len(parent))
-                e[k] = copy[e[k]]
+                e.set_end(k, copy[n])
     # (never at a roundabout: its pieces between entries are often < MERGE, and merging them collapsed every
     # small roundabout into one point where all its roads met; a short approach piece merged into a ring
     # node pulled the ring into a spike)
-    ring_nodes = {n for e in edges if e[2] == KIND["road"] and e[11] for n in (e[0], e[1])}
+    ring_nodes = {n for e in edges if e.kind == KIND["road"] and e.ring for n in (e.a, e.b)}
     # shortest connections first, and never into a cluster wider than CLUSTER: chains of short edges used to
     # merge whole squares into one junction with curves between every pair of its roads
     members = {i: [i] for i in range(len(node_xy))}
@@ -152,11 +199,11 @@ def consolidate(edges, node_xy, node_sig, vs):
         pb = np.array([node_xy[i][:2] for i in members[rb]]) * vs
         return float(np.max(np.hypot(*(pa[:, None, :] - pb[None, :, :]).transpose(2, 0, 1)))) <= CLUSTER
     short = sorted((length(e), k) for k, e in enumerate(edges)
-                   if e[2] == KIND["road"] and e[0] != e[1] and not e[11] and e[0] not in ring_nodes and e[1] not in ring_nodes)
+                   if e.kind == KIND["road"] and e.a != e.b and not e.ring and e.a not in ring_nodes and e.b not in ring_nodes)
     for L, k in short:
         if L >= MERGE:
             break
-        ra, rb = find(edges[k][0]), find(edges[k][1])
+        ra, rb = find(edges[k].a), find(edges[k].b)
         if ra != rb and width_ok(ra, rb):
             parent[ra] = rb
             members[rb] += members.pop(ra)
@@ -172,17 +219,17 @@ def consolidate(edges, node_xy, node_sig, vs):
             new_ix[i] = k
     out, pieces = [], []
     for e in edges:
-        a, b = new_ix[e[0]], new_ix[e[1]]
-        if a == b and e[2] == KIND["road"]:
+        a, b = new_ix[e.a], new_ix[e.b]
+        if a == b and e.kind == KIND["road"]:
             # inside a merged intersection (or a loop back into it): not driven as an edge (the junction's
             # curves join the roads around it), but kept as a junction piece: it is still road surface
             # (drawn, a street zone; it used to vanish, e.g. a side street across a boulevard's median)
-            pieces.append([a, b, *e[2:6], list(e[6]), *e[7:]])
+            pieces.append(replace(e, a=a, b=b, xyz=list(e.xyz)))
             continue
         # the edges keep their own OSM ends: one junction for the traffic, but no road is stretched to the
         # cluster's centroid (that drew straight spikes across dual carriageways and squares); the junction
         # curves join the real ends
-        out.append([a, b, *e[2:6], list(e[6]), *e[7:]])
+        out.append(replace(e, a=a, b=b, xyz=list(e.xyz)))
     print(f"consolidated {len(node_xy)} -> {len(xy)} nodes, {len(edges)} -> {len(out)} edges ({len(pieces)} junction pieces)")
     return out, xy, sig, pieces
 
@@ -197,12 +244,12 @@ def clip(edges, node_xy, node_sig, size, vs):
     boundary = [0] * len(node_xy)
     out = []
     for e in edges:
-        p = np.array(e[6]).reshape(-1, 3)
+        p = np.array(e.xyz).reshape(-1, 3)
         inside = (p[:, 0] >= 1) & (p[:, 1] >= 1) & (p[:, 0] < size[0] - 1) & (p[:, 1] < size[1] - 1)
         if inside.all():
             out.append(e)
             continue
-        cum = edge_length(e[6], vs)
+        cum = edge_length(e.xyz, vs)
         i = 0
         while i < len(p):
             if not inside[i]:
@@ -213,7 +260,7 @@ def clip(edges, node_xy, node_sig, size, vs):
                 j += 1
             if j > i:
                 ends = []
-                for k, orig in ((i, e[0]), (j, e[1])):
+                for k, orig in ((i, e.a), (j, e.b)):
                     if k in (0, len(p) - 1):
                         ends.append(orig)
                     else:                                    # new boundary node
@@ -221,9 +268,10 @@ def clip(edges, node_xy, node_sig, size, vs):
                         node_sig.append(0)
                         boundary.append(1)
                         ends.append(len(node_xy) - 1)
-                ctl = [[round(m - cum[i], 1), c, d] for m, c, d in e[8] if cum[i] <= m <= cum[j]]
-                xw = [[round(m - cum[i], 1), c] for m, c in e[10] if cum[i] <= m <= cum[j]]   # (index 10 before pavements())
-                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl, e[9], xw, *e[11:]])
+                ctl = [[round(m - cum[i], 1), c, d] for m, c, d in e.controls if cum[i] <= m <= cum[j]]
+                xw = [[round(m - cum[i], 1), c] for m, c in e.crosswalks if cum[i] <= m <= cum[j]]
+                out.append(replace(e, a=ends[0], b=ends[1], xyz=[round(float(c), 1) for c in p[i:j + 1].ravel()],
+                                   controls=ctl, crosswalks=xw))
             i = j + 1
     print(f"clipped to the region: {len(edges)} -> {len(out)} edges, {sum(boundary)} boundary nodes")
     return out, node_xy, node_sig, boundary
@@ -232,8 +280,8 @@ def clip(edges, node_xy, node_sig, size, vs):
 def tram_directions(edges, vs):
     """OSM maps both tracks of a tram line but not their direction: on double track, trams keep right
     (the other track is on their left). Single track stays two-way."""
-    trams = [e for e in edges if e[2] == KIND["tram"] and not e[3]]
-    pts = {id(e): np.array(e[6]).reshape(-1, 3)[:, :2] for e in trams}
+    trams = [e for e in edges if e.kind == KIND["tram"] and not e.oneway]
+    pts = {id(e): np.array(e.xyz).reshape(-1, 3)[:, :2] for e in trams}
     n = 0
     for e in trams:
         p = pts[id(e)]
@@ -263,37 +311,37 @@ def tram_directions(edges, vs):
                 continue
             if rd < 0:
                 reverse(e, vs)
-            e[3] = 1
+            e.oneway = 1
             n += 1
             continue
         rel = best[1] - P
         left = D[0] * rel[1] - D[1] * rel[0] > 0           # other track on the left (x east, y north)
         if not left:                                       # travel the other way
             reverse(e, vs)
-        e[3] = 1
+        e.oneway = 1
         n += 1
     # chains: a track continuing a one-way track through a node (and nothing else there) continues its direction
-    tram_all = [e for e in edges if e[2] == KIND["tram"]]
+    tram_all = [e for e in edges if e.kind == KIND["tram"]]
     changed = True
     while changed:
         changed = False
         deg = {}
         for e in tram_all:
-            for k in (e[0], e[1]):
+            for k in (e.a, e.b):
                 deg[k] = deg.get(k, 0) + 1
         for e in tram_all:
-            if e[3]:
+            if e.oneway:
                 continue
-            for node, at_start in ((e[0], True), (e[1], False)):
+            for node, at_start in ((e.a, True), (e.b, False)):
                 if deg.get(node) != 2:
                     continue
-                f = next(f for f in tram_all if f is not e and node in (f[0], f[1]))
-                if not f[3]:
+                f = next(f for f in tram_all if f is not e and node in (f.a, f.b))
+                if not f.oneway:
                     continue
-                into = f[1] == node                         # f arrives at the node
+                into = f.b == node                         # f arrives at the node
                 if into != at_start:                        # e must leave where f arrives (and vice versa)
                     reverse(e, vs)
-                e[3] = 1
+                e.oneway = 1
                 n += 1
                 changed = True
                 break
@@ -306,10 +354,9 @@ def pavements(edges, m, vs):
     pavement runs 1.5 m in front of it (median over the edge). Appended to the edge as
     [left, right] in metres (left / right of the edge direction); 0: no facade found."""
     for e in edges:
-        if e[2] != KIND["road"]:
-            e.insert(10, [0, 0])   # (index 10: crosswalks and the roundabout flag follow)
+        if e.kind != KIND["road"]:
             continue
-        p = np.array(e[6]).reshape(-1, 3)
+        p = np.array(e.xyz).reshape(-1, 3)
         found = [[], []]
         for k in range(1, len(p) - 1, 5):
             d = p[k + 1, :2] - p[k - 1, :2]
@@ -325,7 +372,7 @@ def pavements(edges, m, vs):
                     if (c[z0 + 2:z0 + 12] == BUILDING).any():
                         found[side].append(r * vs)
                         break
-        e.insert(10, [round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found])
+        e.pavement = [round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found]
 
 
 SIG_REACH = 35.0   # m: an OSM light this close to a junction (along the road, through plain bends) is that junction's
@@ -347,19 +394,19 @@ def assign_signals(edges, node_sig, pieces, vs):
         reach them.
     Rewrites the controls of road edges: signals become [m, SIGNALS, dir towards the junction] (stop lines,
     always for the junction the edge leads to in that direction) or [m, CROSSING_LIGHT, dir]."""
-    roads = [e for e in edges if e[2] == KIND["road"]]
+    roads = [e for e in edges if e.kind == KIND["road"]]
     deg, at = {}, {}
     for e in roads:
-        for n in (e[0], e[1]):
+        for n in (e.a, e.b):
             deg[n] = deg.get(n, 0) + 1
             at.setdefault(n, []).append(e)
-    length = {id(e): edge_length(e[6], vs)[-1] for e in roads}
+    length = {id(e): edge_length(e.xyz, vs)[-1] for e in roads}
     is_junction = lambda n: deg.get(n, 0) >= 3
 
     def reach(e, end, d):
         """the junction reached leaving edge e through its end `end` (0 start, 1 end) within SIG_REACH
         (d: m already to that end), passing plain bends; or None"""
-        n, seen = e[end], {id(e)}
+        n, seen = e.end(end), {id(e)}
         while d <= SIG_REACH:
             if is_junction(n):
                 return n
@@ -369,31 +416,31 @@ def assign_signals(edges, node_sig, pieces, vs):
             o = nxt[0]
             seen.add(id(o))
             d += length[id(o)]
-            n = o[1] if o[0] == n else o[0]
+            n = o.b if o.a == n else o.a
         return None
 
     signalled = {n for n, s in enumerate(node_sig) if s and is_junction(n)}
-    signalled |= {e[0] for e in pieces if any(c == SIGNALS for _, c, _ in e[8])}
+    signalled |= {e.a for e in pieces if any(c == SIGNALS for _, c, _ in e.controls)}
     stats = {"stop line (OSM direction)": 0, "stop line (nearest junction)": 0, "on an exit: in the junction's cycle": 0,
              "for a junction beyond a bend": 0, "crossing light": 0}
     plan = []                                               # (edge, m, kind, dir, junction)
     for e in roads:
         L = length[id(e)]
-        for m, c, dr in e[8]:
+        for m, c, dr in e.controls:
             if c != SIGNALS:
                 continue
             ends = {0: reach(e, 0, m), 1: reach(e, 1, L - m)}   # junction behind each end (or None)
-            dirs = [dr] if dr else ([1] if e[3] else [1, -1])   # directions driving through this light
+            dirs = [dr] if dr else ([1] if e.oneway else [1, -1])   # directions driving through this light
             # each direction that drives through it heads for the junction ahead (end 1 for +1, end 0 for -1)
             ahead = {d: ends[1 if d > 0 else 0] for d in dirs}
-            if dr == 0 and not e[3] and ahead[1] is not None and ahead[-1] is not None:
+            if dr == 0 and not e.oneway and ahead[1] is not None and ahead[-1] is not None:
                 # (two-way, no direction, junctions both ways: the nearer one's)
                 ahead = {1: ahead[1]} if L - m <= m else {-1: ahead[-1]}
             got = {d: j for d, j in ahead.items() if j is not None}
             if got:
                 for d, j in got.items():
                     signalled.add(j)
-                    direct = e[1 if d > 0 else 0] == j
+                    direct = e.end(1 if d > 0 else 0) == j
                     plan.append((e, m, "stop" if direct else "beyond", d, j))
                     stats["stop line (OSM direction)" if dr and direct else "stop line (nearest junction)" if direct
                           else "for a junction beyond a bend"] += 1
@@ -405,48 +452,51 @@ def assign_signals(edges, node_sig, pieces, vs):
                 plan.append((e, m, "exit", 0, None))
                 stats["on an exit: in the junction's cycle"] += 1
             else:
-                plan.append((e, m, "crossing", dr if dr else (1 if e[3] else 0), None))
+                plan.append((e, m, "crossing", dr if dr else (1 if e.oneway else 0), None))
                 stats["crossing light"] += 1
     # lights on plain bends (OSM ways split there): crossing lights for the traffic reaching them, unless a
     # junction is close (then they are its)
     for n, s in enumerate(node_sig):
         if not s or is_junction(n) or deg.get(n, 0) == 0:
             continue
-        near = [j for e in at[n] for j in [reach(e, 1 if e[0] == n else 0, length[id(e)])] if j is not None and
+        near = [j for e in at[n] for j in [reach(e, 1 if e.a == n else 0, length[id(e)])] if j is not None and
                 length[id(e)] <= SIG_REACH]
         if near:
             signalled.update(near)
             continue
         for e in at[n]:
-            to_n = 1 if e[1] == n else -1
-            if e[3] and to_n < 0:
+            to_n = 1 if e.b == n else -1
+            if e.oneway and to_n < 0:
                 continue
             plan.append((e, length[id(e)] - 0.5 if to_n > 0 else 0.5, "crossing", to_n, None))
             stats["crossing light"] += 1
     for e in roads:
-        e[8] = [x for x in e[8] if x[1] != SIGNALS]
+        e.controls = [x for x in e.controls if x[1] != SIGNALS]
     for e, m, kind, d, _ in plan:
         if kind == "stop":
-            e[8].append([m, SIGNALS, d])
+            e.controls.append([m, SIGNALS, d])
         elif kind == "crossing":
-            e[8].append([m, CROSSING_LIGHT, d])
+            e.controls.append([m, CROSSING_LIGHT, d])
     for e in roads:
-        e[8].sort()
+        e.controls.sort()
     for n in range(len(node_sig)):
         node_sig[n] = 1 if n in signalled else 0
     print(f"traffic lights: {len(signalled)} signalled junctions; OSM lights -> " + ", ".join(f"{v} {k}" for k, v in stats.items()))
 
 
 def reverse(e, vs):
-    L = edge_length(e[6], vs)[-1]
-    e[0], e[1] = e[1], e[0]
-    e[6] = [c for i in range(len(e[6]) - 3, -1, -3) for c in e[6][i:i + 3]]
-    e[8] = sorted([[round(L - m, 1), c, -d] for m, c, d in e[8]])
+    """the edge drawn the other way (positions along it measured from the new start, left / right swapped)"""
+    L = edge_length(e.xyz, vs)[-1]
+    e.a, e.b = e.b, e.a
+    e.xyz = [c for i in range(len(e.xyz) - 3, -1, -3) for c in e.xyz[i:i + 3]]
+    e.controls = sorted([[round(L - m, 1), c, -d] for m, c, d in e.controls])
+    e.crosswalks = sorted([[round(L - m, 1), c] for m, c in e.crosswalks])
+    e.parking, e.pavement = e.parking[::-1], e.pavement[::-1]
 
 
 def road_along(e, edges, vs):
     """+1 / -1 if a one-way road runs alongside tram edge e (same / opposite direction), else None"""
-    p = np.array(e[6]).reshape(-1, 3)[:, :2]
+    p = np.array(e.xyz).reshape(-1, 3)[:, :2]
     if len(p) < 3:
         return None
     votes = 0
@@ -455,9 +505,9 @@ def road_along(e, edges, vs):
         D = D / (np.linalg.norm(D) or 1)
         best = None
         for o in edges:
-            if o[2] != KIND["road"] or not o[3]:
+            if o.kind != KIND["road"] or not o.oneway:
                 continue
-            q = np.array(o[6]).reshape(-1, 3)[:, :2]
+            q = np.array(o.xyz).reshape(-1, 3)[:, :2]
             d = np.hypot(*(q - P).T)
             i = int(np.argmin(d))
             if d[i] > 8.0 / vs or len(q) < 2:
@@ -523,21 +573,6 @@ def build():
     X0, Y0 = m.man["origin"][:2]
     vs = m.vs
 
-    def ground(px, py, bridge):
-        """ground surface (voxels) at a point: median over a small patch of the top ground voxel per column
-        (bridges: top of anything solid)"""
-        cx, cy = int(px), int(py)
-        zs = []
-        for dx in (-2, 0, 2):
-            for dy in (-2, 0, 2):
-                c = m.column(cx + dx, cy + dy)
-                if c is None:
-                    continue
-                k = np.flatnonzero(c != 0 if bridge else c == 2)
-                if len(k):
-                    zs.append(k.max() + 1)
-        return float(np.median(zs)) if zs else np.nan
-
     # spatial order: the LiDAR tiles behind ground() are read through a bounded cache
     ways.sort(key=lambda w: (round(nodes[w["nodes"][0]][1] / 250), nodes[w["nodes"][0]][0]))
     node_ix, node_xy, node_sig = {}, [], []
@@ -559,16 +594,10 @@ def build():
             inside = (v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])
             if not inside.any():
                 continue
-            # resample every SAMPLE m
-            d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
-            n = max(1, int(np.ceil(d[-1] / SAMPLE)))
-            s = np.unique(np.r_[np.linspace(0, d[-1], n + 1), d])
-            p = np.c_[np.interp(s, d, v[:, 0]), np.interp(s, d, v[:, 1])]
-            z = np.array([ground(px, py, bridge) for px, py in p])
-            if np.isnan(z).all():
+            prof = profile(m, xy, v, patch=2, bridge=bridge)
+            if prof is None:
                 continue
-            ok = ~np.isnan(z)
-            z = np.interp(np.arange(len(z)), np.flatnonzero(ok), z[ok])
+            d, p, z = prof
             z = np.convolve(np.pad(z, 2, mode="edge"), np.ones(5) / 5, mode="valid")    # smooth kerb steps
             for nid in (seg[0], seg[-1]):
                 if nid not in node_ix:
@@ -603,22 +632,20 @@ def build():
                         xw.append([round(float(d[i]), 1), typ])
             ring = 1 if t.get("junction") in ("roundabout", "circular") else 0
             pk = parking_sides(t, ow == "-1") if kind == "road" else [0, 0]
-            edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
-                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra, xw, ring, pk])
+            edges.append(Edge(node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
+                              [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra, xw, ring, pk))
             stats[kind] += d[-1]
     edges, node_xy, node_sig, pieces = consolidate(edges, node_xy, node_sig, vs)
-    pieces = [e for e in pieces if all(1 <= c < lim for c, lim in zip(e[6][0:2], m.size[:2]))]
+    pieces = [e for e in pieces if all(1 <= c < lim for c, lim in zip(e.xyz[0:2], m.size[:2]))]
     edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
     tram_directions(edges, vs)
     assign_signals(edges, node_sig, pieces, vs)
     pavements(edges, m, vs)
     pavements(pieces, m, vs)
-    if "--refetch" in sys.argv or not RAW_PATHS.exists():
-        fetch_paths()
     paths = walk_paths(m, X0, Y0, vs)
     out = {"build": m.man["build"], "paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
-           "edges": edges, "pieces": pieces, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
+           "edges": [e.json() for e in edges], "pieces": [e.json() for e in pieces], "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
                                       "rank", "controls [m, 1 stop line of the signalled junction ahead|2 give way|3 stop|4 crossing light|5 speed bump, dir]",
                                       "bikes both ways (one-way street open to cycling against the traffic)",
                                       "pavement [left, right] m from the centreline (0: none found)",
@@ -626,7 +653,7 @@ def build():
                                       "OSM parking [left, right]: 0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular"]}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":")))
-    nctl = sum(len(e[8]) for e in edges)
+    nctl = sum(len(e.controls) for e in edges)
     print(f"{len(node_xy)} nodes ({sum(node_sig)} signalled), {len(edges)} edges ({nctl} controls); road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "
           f"rail {stats['rail'] / 1000:.1f} km -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 
@@ -634,4 +661,6 @@ def build():
 if __name__ == "__main__":
     if "--refetch" in sys.argv or not RAW.exists():
         fetch()
+    if "--refetch" in sys.argv or not RAW_PATHS.exists():
+        fetch_paths()
     build()

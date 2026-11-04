@@ -14,15 +14,15 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from common import ROOT, VS, region
+from common import E_KIND, E_XYZ, KIND_ROAD, ROOT, VS, region
 
 ROI_NAME, _ = region(1)   # (the first argument is the junctions.json)
 src = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted((ROOT / "data/metrics/junctions").glob("*/junctions.json"))[-1]
 js = json.loads(src.read_text())
 roads = json.loads((ROOT / f"viewer/public/roads/{ROI_NAME}.json").read_text())
 # road centrelines and junction pieces in the viewer's frame (x east, z south: x * vs, -y * vs)
-lines = [("edge", [(e[6][i] * VS, -e[6][i + 1] * VS) for i in range(0, len(e[6]), 3)]) for e in roads["edges"] if e[2] == 0]
-lines += [("piece", [(e[6][i] * VS, -e[6][i + 1] * VS) for i in range(0, len(e[6]), 3)]) for e in roads.get("pieces", []) if e[2] == 0]
+lines = [("edge", [(e[E_XYZ][i] * VS, -e[E_XYZ][i + 1] * VS) for i in range(0, len(e[E_XYZ]), 3)]) for e in roads["edges"] if e[E_KIND] == KIND_ROAD]
+lines += [("piece", [(e[E_XYZ][i] * VS, -e[E_XYZ][i + 1] * VS) for i in range(0, len(e[E_XYZ]), 3)]) for e in roads.get("pieces", []) if e[E_KIND] == KIND_ROAD]
 random.seed(1)
 
 # junctions the user pointed out (viewer frame: x east, z south, metres from the region origin)

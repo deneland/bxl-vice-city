@@ -37,7 +37,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (CFG, C_BUILDING, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+from common import (CFG, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
                     FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
 
 ROI_NAME, ROI = region()
@@ -561,19 +561,19 @@ def build_zones() -> bool:
     dr = ImageDraw.Draw(img)
     road_polys, pave_polys = [], []
     for e in net["edges"] + net.get("pieces", []):   # (pieces: road inside merged junctions)
-        if e[2] != 0:
+        if e[E_KIND] != KIND_ROAD:
             continue
-        p = np.array(e[6], float).reshape(-1, 3)[:, :2]
+        p = np.array(e[E_XYZ], float).reshape(-1, 3)[:, :2]
         if len(p) < 2:
             continue
         d = np.gradient(p, axis=0)
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
         left = np.stack([-d[:, 1], d[:, 0]], 1)
-        lanes = e[5] if e[5] else (1 if e[3] else 2)
-        cap = (5.0 if e[3] else 6.5) + max(0, lanes - 2) * 1.6
+        lanes = e[E_LANES] if e[E_LANES] else (1 if e[E_ONEWAY] else 2)
+        cap = (5.0 if e[E_ONEWAY] else 6.5) + max(0, lanes - 2) * 1.6
         k, f = [], []
         for side, sgn in ((0, 1.0), (1, -1.0)):
-            pav = e[10][side]
+            pav = e[E_PAVEMENT][side]
             kerb = min(pav - 1.0, cap) if pav > 0 else min(4.0, cap)
             face = min(pav + 0.9, kerb + 4.0) if pav > 0 else kerb
             k.append(p + sgn * left * (kerb / VS))
