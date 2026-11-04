@@ -7,3 +7,4 @@ __pycache__/
 dist/
 data/metrics/
 .env
+viewer/public/lights/

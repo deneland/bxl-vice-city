@@ -3,6 +3,7 @@ import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
 import { TELEMETRY, telemetry } from './telemetry';
 import { LABELS, viewMode } from './voxelMaterial';
+import { gridOrigin, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
 import { Walk } from './walk';
 import { Inspector } from './inspect';
@@ -125,6 +126,13 @@ async function main() {
   // region centre in the scene: sun target, so the shadow box covers everything
   world.updateMatrixWorld();
   sun.target.position.set((L0.size[0] / 2) * VS + world.position.x, 0, -(L0.size[1] / 2) * VS + world.position.z);
+  gridOrigin.value.copy(world.position);
+  let lamps: THREE.Object3D | null = null;
+  loadLamps(`lights/${ROI}.json`, world, VS, [L0.size[0], L0.size[1]]).then((m) => {
+    lamps = m;
+    if (m) m.visible = night.value > 0.01;
+    dirty = true;
+  }).catch((e) => console.warn('street lights unavailable', e));
 
   // --- time of day + weather: live over Schaerbeek, or chosen with the slider ---------
   const timeInput = document.getElementById('time') as HTMLInputElement;
@@ -163,6 +171,9 @@ async function main() {
     sun.intensity = l.sunIntensity;
     hemi.color.copy(l.hemiColor);
     hemi.intensity = l.hemiIntensity;
+    night.value = nightFor(alt * 180 / Math.PI);
+    windowsLit.value = litShare(hours);
+    if (lamps) lamps.visible = night.value > 0.01;
     (scene.background as THREE.Color).copy(l.sky);
     scene.fog!.color.copy(l.sky);
     document.body.style.background = '#' + l.sky.getHexString();

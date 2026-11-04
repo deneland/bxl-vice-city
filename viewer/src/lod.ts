@@ -55,7 +55,7 @@ export class TileManager {
     this.errPx = errPx;
     this.maxInflight = maxInflight;
     group.updateMatrixWorld(true);
-    this.materials = levels.map((l) => createVoxelMaterial(l.voxelSize));
+    this.materials = levels.map((l) => createVoxelMaterial(l.voxelSize, levels[0].voxelSize));
     const byKey = new Map<string, Node>();
     for (const lv of levels) {
       for (const t of lv.tiles) {

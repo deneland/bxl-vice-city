@@ -2,8 +2,10 @@
 // shader expands a unit quad into the right face from packed attributes.
 import * as THREE from 'three/webgpu';
 import {
-  attribute, float, floor, mod, mix, pow, positionGeometry, select, uniform, varying, vec3, vec4,
+  attribute, float, floor, hash, mod, mix, positionGeometry, positionWorld, pow, select, smoothstep, uniform, varying,
+  vec2, vec3, vec4,
 } from 'three/tsl';
+import { LAMP_COLOR, gridOrigin, gridSize, lampMap, night, windowsLit } from './nightlights';
 
 // semantic class per voxel (pipeline voxelize.py SEM_*: LiDAR class refined by street-level labels)
 export const LABELS: [number, string, number][] = [
@@ -30,7 +32,7 @@ const bits = (v: any, shift: number, count: number) => mod(floor(v.div(2 ** shif
 const axisVec = (i: any) =>
   vec3(select(i.equal(0), 1, 0), select(i.equal(1), 1, 0), select(i.equal(2), 1, 0));
 
-export function createVoxelMaterial(voxelSize: number) {
+export function createVoxelMaterial(voxelSize: number, baseSize = voxelSize) {
   const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.92, metalness: 0 });
   m.flatShading = true;
 
@@ -69,5 +71,29 @@ export function createVoxelMaterial(voxelSize: number) {
   const labelCol: any = varying(lc, 'vLabel');
 
   m.colorNode = vec4(mix(col, labelCol, viewMode).mul(ao), 1);
+
+  // --- night lights (see nightlights.ts) ---
+  // street lamps: light map over the ground plan, fading out above lamp height
+  const rel = positionWorld.sub(gridOrigin);                             // metres from voxel (0,0,0)
+  const lm = lampMap.sample(vec2(rel.x, rel.z.negate()).div(gridSize));
+  const above = rel.y.sub(lm.g.mul(255 * baseSize));
+  const fall = float(1).sub(smoothstep(2.5, 9, above)).mul(smoothstep(-1, 0, above));
+  const up = select(dir.equal(4), float(1), float(0.6));
+  const lampLight = varying(up, 'vUp').mul(lm.r).mul(fall).mul(1.6);
+  // lit windows: dark (glass) photo-coloured facade voxels, per window cell (1.5 m wide, 3 m floor) on or off
+  const isFacade = varying(select(label.equal(1).and(bits(packed.y, 21, 1).equal(1)).and(dir.lessThan(4)), 1, 0), 'vFacade');
+  const xAxis = varying(select(axis.equal(0), 1, 0), 'vXAxis');                // face normal along east-west
+  const v = rel.div(baseSize).mul(vec3(1, 1, -1));                            // L0 voxels: x east, y up, z north
+  const along = mix(v.x, v.z, xAxis), across = mix(v.z, v.x, xAxis);
+  const cell = floor(along.div(3)).add(floor(v.y.sub(0.01).div(6)).mul(101)).add(floor(across.add(0.5).div(2)).mul(7919));
+  const lit = select(hash(cell).lessThan(windowsLit), 1, 0);
+  const glass = float(1).sub(smoothstep(0.18, 0.32, lum));                    // photo colour is dark: window
+  const warm = select(hash(cell.add(17)).lessThan(0.8), vec3(1.0, 0.62, 0.3), vec3(0.55, 0.7, 1.0));
+  const windowLight = warm.mul(lit).mul(glass).mul(isFacade).mul(1.4);
+  // shop signs glow
+  const sign = varying(select(label.equal(2), 1, 0), 'vSign');
+  const lampCol = vec3(LAMP_COLOR.r, LAMP_COLOR.g, LAMP_COLOR.b);
+  m.emissiveNode = col.mul(lampCol.mul(lampLight).add(sign.mul(1.5))).mul(ao).add(windowLight).mul(night)
+    .mul(float(1).sub(viewMode));
   return m;
 }
