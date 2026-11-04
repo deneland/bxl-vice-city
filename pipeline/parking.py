@@ -12,9 +12,14 @@ parked cars, so gaps up to GAP between seen cars are parking too.)
   closed) become rows of evenly spaced places, kept clear of junctions. Rows whose footprint is deep
   across the kerb (> 3.6 m) are perpendicular parking: places 2.6 m apart, facing the kerb.
 
-Places are [x, y (voxels), heading (rad, x east / y north)].
+Car parks (OpenStreetMap, data/raw/osm_lots_<roi>.json): inside each mapped surface car park, the
+LiDAR footprints give the stalls: a car-sized blob of footprint is a car (along its long axis); bigger
+blobs (cars touching) a row of cars side by side (wide: 2.5 m apart) or nose to tail (narrow). Public underground / multi-storey
+garages are places too, at their entrances, never drawn: cars drive in and are gone.
 
-Usage: uv run python parking.py [roi-name]
+Places are [x, y (voxels), heading (rad, x east / y north), kind (0 kerb, 1 car park, 2 garage)].
+
+Usage: uv run python parking.py [roi-name] [--refetch]
 """
 import json
 import sys
@@ -22,7 +27,12 @@ import tomllib
 from pathlib import Path
 
 import numpy as np
+from PIL import Image, ImageDraw
+from pyproj import Transformer
 from scipy import ndimage
+from scipy.spatial import cKDTree
+
+from roads import bbox, overpass
 
 ROOT = Path(__file__).resolve().parent.parent
 CFG = tomllib.loads((ROOT / "config.toml").read_text())
@@ -45,6 +55,10 @@ REACH = 20.0        # m: a row ending this close to the junction margin is exten
 MIN_ROW = 4.5       # m: shorter stretches are not a parking place
 LANE_CLEAR = {0: 2.6, 1: 2.0}   # m from the centreline the parking line must be (two-way / one-way)
 HALF = 1.0          # m: footprint within this of the parking line counts for the row
+LOTS = ROOT / "data/raw" / f"osm_lots_{ROI_NAME}.json"
+KERB, LOT, GARAGE = 0, 1, 2
+GARAGE_CAP = (40, 150)  # places per public garage: when OSM has no capacity, at most
+to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
 
 
 def resample(p, step):
@@ -66,6 +80,93 @@ def runs(mask):
     m = np.concatenate([[False], mask, [False]]).astype(np.int8)
     d = np.diff(m)
     return list(zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]))
+
+
+def fetch_lots():
+    q = (f'[out:json][timeout:120];(way["amenity"="parking"]({bbox()});nwr["amenity"="parking_entrance"]({bbox()});'
+         f'nwr["amenity"="parking"]["parking"~"underground|multi-storey"]({bbox()}););out tags geom;')
+    overpass(q, LOTS)
+
+
+def lot_places(grid, x0, y0, origin, kerb):
+    """stalls inside OSM's surface car parks where the LiDAR saw cars, and public garages"""
+    els = json.loads(LOTS.read_text())["elements"]
+    h, w = grid.shape
+    vox = lambda lon, lat: ((np.array(to_l72.transform(lon, lat)) - origin) / VS)
+    mask = Image.new("1", (w, h), 0)
+    d = ImageDraw.Draw(mask)
+    lots = 0
+    for e in els:
+        t = e.get("tags", {})
+        if e["type"] != "way" or t.get("amenity") != "parking" or t.get("parking", "surface") not in ("surface", "yes"):
+            continue                                       # (street-side / lane parking: the kerb rows)
+        pts = [tuple(vox(g["lon"], g["lat"]) - [x0, y0]) for g in e.get("geometry", [])]
+        if len(pts) >= 3:
+            d.polygon(pts, fill=1)
+            lots += 1
+    inside = grid & np.array(mask, bool)
+    lab, n = ndimage.label(inside, structure=np.ones((3, 3)))
+    out = []
+    for k, sl in enumerate(ndimage.find_objects(lab), 1):
+        yy, xx = np.nonzero(lab[sl] == k)
+        if len(yy) < 12:
+            continue
+        P = np.c_[xx + sl[1].start + x0, yy + sl[0].start + y0].astype(float)
+        c = P.mean(0)
+        ev, V = np.linalg.eigh(np.cov((P - c).T))
+        u, v = V[:, 1], V[:, 0]                            # major, minor axis
+        pu, pv = (P - c) @ u, (P - c) @ v
+        lu = (np.percentile(pu, 98) - np.percentile(pu, 2)) * VS + VS
+        lv = (np.percentile(pv, 98) - np.percentile(pv, 2)) * VS + VS
+        if lu < 2.5:
+            continue
+        if lu <= 6.5 and lv <= 3.0:                        # one car: along its own long axis
+            q = c + u * (np.percentile(pu, 98) + np.percentile(pu, 2)) / 2
+            out.append([q[0], q[1], np.arctan2(u[1], u[0]) + (np.pi if (len(out) * 7919) % 2 else 0)])
+            continue
+        mu, mv = (np.percentile(pu, 98) + np.percentile(pu, 2)) / 2, (np.percentile(pv, 98) + np.percentile(pv, 2)) / 2
+        if lv >= 3.2:                                      # cars side by side, in one or more rows
+            rows = max(1, int(round(lv / 5.0)))
+            n = max(1, int(round(lu / 2.5)))
+            for r in range(rows):
+                ov = mv + ((r + 0.5) / rows - 0.5) * lv / VS
+                hd = v if r % 2 == 0 else -v               # (back to back rows face apart)
+                for i in range(n):
+                    ou = mu + ((i + 0.5) / n - 0.5) * lu / VS
+                    q = c + u * ou + v * ov
+                    out.append([q[0], q[1], np.arctan2(hd[1], hd[0])])
+        else:                                              # nose to tail
+            n = max(1, int(round(lu / 5.4)))
+            for i in range(n):
+                ou = mu + ((i + 0.5) / n - 0.5) * lu / VS
+                q = c + u * ou + v * mv
+                out.append([q[0], q[1], np.arctan2(u[1], u[0])])
+    if out and len(kerb):                                  # (not on top of a kerb place)
+        dk, _ = cKDTree(np.array(kerb)[:, :2]).query(np.array(out)[:, :2])
+        out = [o for o, dd in zip(out, dk) if dd * VS > 2.5]
+    spots = [[round(float(x), 1), round(float(y), 1), round(float(hd), 3), LOT] for x, y, hd in out]
+    # public garages: places at their entrances (or the garage itself where no entrance is mapped)
+    pub = lambda t: t.get("access", "yes") not in ("private", "no", "permit")
+    at = lambda e: (e["lon"], e["lat"]) if "lon" in e else (e["bounds"]["minlon"] / 2 + e["bounds"]["maxlon"] / 2,
+                                                           e["bounds"]["minlat"] / 2 + e["bounds"]["maxlat"] / 2)
+    garages = [(vox(*at(e)), e["tags"]) for e in els if e.get("tags", {}).get("parking") in ("underground", "multi-storey")
+               and e["tags"].get("amenity") == "parking" and pub(e["tags"])]
+    entrances = [vox(*at(e)) for e in els if e.get("tags", {}).get("amenity") == "parking_entrance" and pub(e["tags"])
+                 and e["tags"].get("parking", "underground") in ("underground", "multi-storey")]
+    ng = 0
+    for g, t in garages:
+        doors = [p for p in entrances if np.hypot(*(p - g)) * VS < 150] or [g]
+        cap = int(t["capacity"]) if t.get("capacity", "").isdigit() else GARAGE_CAP[0]
+        cap = min(cap, GARAGE_CAP[1])
+        if not (0 <= g[0] - x0 < w and 0 <= g[1] - y0 < h):
+            continue
+        ng += 1
+        for i in range(cap):
+            p = doors[i % len(doors)]
+            spots.append([round(float(p[0]), 1), round(float(p[1]), 1), 0.0, GARAGE])
+    print(f"{lots} surface car parks -> {sum(1 for s in spots if s[3] == LOT)} stalls where the LiDAR saw cars; "
+          f"{ng} public garages -> {sum(1 for s in spots if s[3] == GARAGE)} places")
+    return spots
 
 
 def main():
@@ -178,10 +279,14 @@ def main():
                         # the other way on two-way streets, the same way on one-way streets
                         forward = side == 1 or oneway
                         hd = np.arctan2(dy, dx) if forward else np.arctan2(-dy, -dx)
-                    spots.append([round(float(c[0]), 1), round(float(c[1]), 1), round(float(hd), 3)])
+                    spots.append([round(float(c[0]), 1), round(float(c[1]), 1), round(float(hd), 3), KERB])
                 used += b - a
+    if "--refetch" in sys.argv or not LOTS.exists():
+        fetch_lots()
+    from model import Model
+    spots += lot_places(grid, x0, y0, np.array(Model(ROI_NAME).man["origin"][:2]), spots)
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"spots": spots, "fields": ["x", "y", "heading (rad, x east / y north)"]},
+    OUT.write_text(json.dumps({"spots": spots, "fields": ["x", "y", "heading (rad, x east / y north)", "kind (0 kerb, 1 car park, 2 garage)"]},
                               separators=(",", ":")))
     print(f"{len(f):,} footprint columns -> {rows:,} kerbside rows, {used * VS / 1000:.1f} km of kerb, "
           f"{len(spots):,} parking places -> {OUT.relative_to(ROOT)}")

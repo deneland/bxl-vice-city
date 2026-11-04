@@ -601,7 +601,7 @@ export class Agents {
   /** show / hide a parked car depending on the distance to where you look */
   private showParked(a: Agent) {
     const P = this.parking!;
-    const want = a.parked >= 0 && this.inZone([P.x[a.parked], P.z[a.parked]], this.radius.park);
+    const want = a.parked >= 0 && !P.hidden[a.parked] && this.inZone([P.x[a.parked], P.z[a.parked]], this.radius.park);
     if (want && !a.shown) { this.traffic.park(a, a.car, P.x[a.parked], P.z[a.parked], P.heading[a.parked]); a.shown = true; this.shownSet.add(a); }
     else if (!want && a.shown) { this.traffic.unpark(a); a.shown = false; this.shownSet.delete(a); }
   }
