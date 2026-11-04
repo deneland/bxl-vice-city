@@ -177,37 +177,62 @@ function moped() {
   return g;
 }
 
-/** voxel grid -> mesh of its outer faces; attributes: position, normal, vcol (fixed colour), vmat */
+/** voxel grid -> mesh of its outer faces, merged into rectangles of one material (greedy, per direction
+ *  and plane); attributes: position, normal, vcol (fixed colour), vmat. The per-voxel weathering noise
+ *  (deferred.ts) is computed per pixel from the position, so merged faces look the same. */
 function mesh(g: Grid) {
   const pos: number[] = [], nrm: number[] = [], col: number[] = [], mat: number[] = [], idx: number[] = [];
   const VOX = g.vox, ox = (g.nx * VOX) / 2, oy = (g.ny * VOX) / 2, oz = (g.nz * VOX) / 2;
   const c = new THREE.Color();
+  const N = [g.nx, g.ny, g.nz];
   const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-  for (let y = 0; y < g.ny; y++)
-    for (let z = 0; z < g.nz; z++)
-      for (let x = 0; x < g.nx; x++) {
-        const m = g.get(x, y, z);
-        if (!m) continue;
-        c.set(FIXED[m] ?? 0xffffff);
-        const shade = 1;
-        for (const [dx, dy, dz] of dirs) {
-          if (g.get(x + dx, y + dy, z + dz)) continue;
-          // face corners: the two axes other than the normal
-          const a = dx ? [0, 1, 0] : [1, 0, 0], b = dz ? [0, 1, 0] : dx ? [0, 0, 1] : [0, 0, 1];
-          const cx = x + (dx > 0 ? 1 : 0), cy = y + (dy > 0 ? 1 : 0), cz = z + (dz > 0 ? 1 : 0);
+  for (const [dx, dy, dz] of dirs) {
+    const axis = dx ? 0 : dy ? 1 : 2, sgn = dx + dy + dz;
+    // in-plane axes (u, v) and their unit vectors
+    const ua = (axis + 1) % 3, va = (axis + 2) % 3;
+    const nu = N[ua], nv = N[va];
+    const e1 = [0, 0, 0], e2 = [0, 0, 0]; e1[ua] = 1; e2[va] = 1;
+    const n = new THREE.Vector3(dx, dy, dz);
+    const flip = new THREE.Vector3(...e1).cross(new THREE.Vector3(...e2)).dot(n) <= 0;
+    const m2 = new Int32Array(nu * nv);
+    for (let w = 0; w < N[axis]; w++) {
+      // material of each exposed face in this plane (0: none)
+      m2.fill(0);
+      for (let v = 0; v < nv; v++)
+        for (let u = 0; u < nu; u++) {
+          const p = [0, 0, 0]; p[axis] = w; p[ua] = u; p[va] = v;
+          const m = g.get(p[0], p[1], p[2]);
+          if (m && !g.get(p[0] + dx, p[1] + dy, p[2] + dz)) m2[u + v * nu] = m;
+        }
+      // greedy rectangles of one material
+      for (let v = 0; v < nv; v++)
+        for (let u = 0; u < nu; u++) {
+          const m = m2[u + v * nu];
+          if (!m) continue;
+          let lu = 1;
+          while (u + lu < nu && m2[u + lu + v * nu] === m) lu++;
+          let lv = 1;
+          grow: while (v + lv < nv) {
+            for (let k = 0; k < lu; k++) if (m2[u + k + (v + lv) * nu] !== m) break grow;
+            lv++;
+          }
+          for (let b = 0; b < lv; b++) for (let k = 0; k < lu; k++) m2[u + k + (v + b) * nu] = 0;
+          c.set(FIXED[m] ?? 0xffffff);
           const base = pos.length / 3;
-          for (const [u, v] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-            pos.push((cx + a[0] * u + b[0] * v) * VOX - ox, (cy + a[1] * u + b[1] * v) * VOX - oy, (cz + a[2] * u + b[2] * v) * VOX - oz);
+          const corner = [0, 0, 0]; corner[axis] = w + (sgn > 0 ? 1 : 0); corner[ua] = u; corner[va] = v;
+          for (const [a, bb] of [[0, 0], [lu, 0], [0, lv], [lu, lv]]) {
+            pos.push((corner[0] + e1[0] * a + e2[0] * bb) * VOX - ox, (corner[1] + e1[1] * a + e2[1] * bb) * VOX - oy,
+              (corner[2] + e1[2] * a + e2[2] * bb) * VOX - oz);
             nrm.push(dx, dy, dz);
-            col.push(c.r * shade, c.g * shade, c.b * shade);
+            col.push(c.r, c.g, c.b);
             mat.push(m === M.paint ? 1 : m === M.head ? 2 : m === M.tail ? 3 : 0);
           }
           // winding: front side along the normal
-          const n = new THREE.Vector3(dx, dy, dz), e1 = new THREE.Vector3(...a), e2 = new THREE.Vector3(...b);
-          if (e1.cross(e2).dot(n) > 0) idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+          if (!flip) idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
           else idx.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
         }
-      }
+    }
+  }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));

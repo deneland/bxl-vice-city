@@ -9,6 +9,7 @@
 import type { Spot, Traffic } from './traffic';
 import type { Pedestrians, WalkSpot } from './pedestrians';
 import { Parking } from './parking';
+import { prof } from './prof';
 
 export interface Places {
   cats: string[]; streets: string[]; names: string[];
@@ -772,6 +773,7 @@ export class Agents {
       this.deadline = performance.now() + this.budgetMs;   // (the re-plan used this frame's time)
     }
     // due events: departures (at a place) and arrivals of timeline trips
+    prof.begin('ag:events');
     while (this.events.peek() <= now) {
       const a = this.events.pop();
       if (!a || a.driving) continue;
@@ -784,9 +786,16 @@ export class Agents {
         this.alighting.get(st)!.add(a);
       } else if (a.i + 1 < a.plan.length) this.depart(a, now);
     }
+    prof.end('ag:events');
+    prof.begin('ag:rebalance');
     if (now - this.tick >= 1 || now < this.tick) { this.tick = now; this.rebalance(now); }
+    prof.end('ag:rebalance');
+    prof.begin('ag:promote');
     this.promote(now);   // every frame, within the budget
+    prof.end('ag:promote');
+    prof.begin('ag:parked');
     this.refreshParked();
+    prof.end('ag:parked');
   }
 
   /** agents on the way: in detail, as timelines */

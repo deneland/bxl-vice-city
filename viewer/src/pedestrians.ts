@@ -340,6 +340,8 @@ export class Pedestrians {
   private route(from: WalkSpot, to: WalkSpot) {
     if (from.seg === to.seg) return [{ seg: from.seg, fwd: to.s >= from.s }];
     const goal = at(to.seg, to.s, new THREE.Vector3()), p = new THREE.Vector3();
+    const start = at(from.seg, from.s, new THREE.Vector3());
+    const maxCost = start.distanceTo(goal) * 2.5 + 400;   // m: generous detours
     type Node = { v: number; cost: number; prev: Node | null; via: { seg: Seg; fwd: boolean } | null };
     const best = new Map<number, number>();
     // binary min-heap on (estimated total cost)
@@ -386,6 +388,7 @@ export class Pedestrians {
         }
         const nv = e.fwd ? e.seg.b : e.seg.a;
         const c = n.cost + e.seg.len + (e.seg.cross !== null ? 4 : 0);
+        if (c > maxCost) continue;   // (an unreachable goal gives up early instead of searching everywhere)
         if (c < (best.get(nv) ?? Infinity)) {
           best.set(nv, c);
           const nn: Node = { v: nv, cost: c, prev: n, via: e };

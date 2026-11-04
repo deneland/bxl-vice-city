@@ -556,11 +556,13 @@ async function main() {
         if (deferred.stepStaticShadow(cityScene)) shadowRenders++;
         prof.end('shadowCity');
       }
-      if (trafficOn || dynShadowDirty) {   // vehicles, around what you look at
+      // vehicles, around what you look at: every other frame is enough (a fast car's shadow lags < 0.25 m;
+      // the map and its transform always match)
+      if (dynShadowDirty || (trafficOn && (rendered & 1) === 0)) {
         prof.begin('shadowDyn');
         deferred.renderDynamicShadow(scene, walk.active ? camera.position : controls.target);
         prof.end('shadowDyn');
-        dynShadowDirty = trafficOn;
+        dynShadowDirty = false;   // (toggling traffic sets it: redraw or clear once)
       }
     }
     prof.begin('present');

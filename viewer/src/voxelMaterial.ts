@@ -1,5 +1,5 @@
-// One material per level for all tiles. Each instance is a run of voxel faces (mesher.worker.ts); the vertex
-// shader expands a unit quad over the run, the fragment shader reads each face's colour from the face atlas.
+// One material per level for all tiles. Each instance is a rectangle of voxel faces (mesher.worker.ts); the
+// vertex shader expands a unit quad over it, the fragment shader reads each face's colour from the face atlas.
 import * as THREE from 'three/webgpu';
 import {
   attribute, float, floor, hash, int, ivec2, mod, mix, mrt, positionGeometry, positionWorld, pow, select, smoothstep, textureLoad,
@@ -45,14 +45,14 @@ export function createVoxelMaterial(voxelSize: number, baseSize: number, atlas: 
   const dir = bits(p0, 20, 3);
   const axis = floor(dir.div(2));
   const positive = float(1).sub(mod(dir, 2));
-  const len = bits(quad.y, 8, 8);
+  const lu = bits(quad.y, 0, 8), lv = bits(quad.y, 8, 8);   // rectangle: faces along the run axis, across
   // negative faces swap u/v to flip winding so the front side faces outwards
   const a = select(positive.equal(1), q.x, q.y);
   const b = select(positive.equal(1), q.y, q.x);
   // runs go up (z) for side faces, along x for top / bottom: that is the u axis (a) for axis 1 and 2,
   // the v axis (b) for axis 0
   const runOnA = select(axis.equal(0), float(0), float(1));
-  const A = a.mul(mix(float(1), len, runOnA)), B = b.mul(mix(len, float(1), runOnA));
+  const A = a.mul(mix(lv, lu, runOnA)), B = b.mul(mix(lu, lv, runOnA));
   const pv = vec3(bits(p0, 0, 6), bits(p0, 6, 6), bits(p0, 12, 8))
     .add(axisVec(axis).mul(positive))
     .add(axisVec(mod(axis.add(1), 3)).mul(A))
@@ -62,12 +62,12 @@ export function createVoxelMaterial(voxelSize: number, baseSize: number, atlas: 
 
   // --- per pixel: which face of the run, its texel in the atlas, occlusion within the face ---
   const flat = <T,>(n: T, name: string) => (varying(n as any, name) as any).setInterpolation('flat');
-  const vStart = flat(quad.z, 'vStart'), vLen = flat(len, 'vLen');
+  const vStart = flat(quad.z, 'vStart'), vLu = flat(lu, 'vLu'), vLv = flat(lv, 'vLv');
   const vRunOnA = flat(runOnA, 'vRunOnA');
-  const run = varying(mix(B, A, runOnA), 'vRun');          // 0 .. len along the run
-  const cross = varying(mix(A, B, runOnA), 'vCross');      // 0 .. 1 across
-  const i = floor(run).min(vLen.sub(1));
-  const idx = vStart.add(i);
+  const run = varying(mix(B, A, runOnA), 'vRun');          // 0 .. lu along the run axis
+  const cross = varying(mix(A, B, runOnA), 'vCross');      // 0 .. lv across
+  const i = floor(run).min(vLu.sub(1)), jv = floor(cross).min(vLv.sub(1));
+  const idx = vStart.add(jv.mul(vLu)).add(i);               // texels row by row
   const W = 2048;   // (FaceAtlas.W)
   const texel = textureLoad(atlas, ivec2(int(mod(idx, W)), int(floor(idx.div(W)))));
   // unpack the face's 32 bits (mesher.worker.ts): colour 6+6+6, occlusion 8, label 4, photo 1
@@ -77,7 +77,7 @@ export function createVoxelMaterial(voxelSize: number, baseSize: number, atlas: 
   const vAo = floor(b2.div(4)).add(mod(b3, 4).mul(64));
   const label = mod(floor(b3.div(4)), 16), photo = mod(floor(b3.div(64)), 2);
   // ambient occlusion: the face's 4 corner levels, blended across it (corner (a, b) at bits 2(a + 2b))
-  const lr = run.sub(i), la = mix(cross, lr, vRunOnA), lb = mix(lr, cross, vRunOnA);
+  const lr = run.sub(i), lx = cross.sub(jv), la = mix(lx, lr, vRunOnA), lb = mix(lr, lx, vRunOnA);
   const corner = (ca: number, cb: number) => mod(floor(vAo.div(4 ** (ca + 2 * cb))), 4);
   const lvl = mix(mix(corner(0, 0), corner(1, 0), la), mix(corner(0, 1), corner(1, 1), la), lb);
   const ao = mix(float(0.42), float(1.0), lvl.div(3));

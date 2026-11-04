@@ -527,14 +527,17 @@ export class Traffic {
     const key = p as unknown as object;
     const cache = inbound ? this.inCache : this.outCache;
     if (cache.has(key)) return cache.get(key)!;
-    let best: Path[] | null = null, bestLen = Infinity;
-    for (const e of this.paths) {
-      if (e.kind !== p.kind || !e.lane) continue;
-      if (inbound ? !this.boundary(e.lane.from) : !this.boundary(e.lane.to)) continue;
-      const r = inbound ? this.route(e, p) : this.route(p, e);
-      if (!r) continue;
-      const len = r.reduce((a, x) => a + x.end - x.start, 0);
-      if (len < bestLen) { bestLen = len; best = r; }
+    // one search for all region-edge lanes at once (inbound: from all of them to p; outbound: from p to the
+    // nearest one), instead of a search per edge lane
+    const G = this.routeGraph(), ip = G.id.get(p);
+    let best: Path[] | null = null;
+    if (ip !== undefined) {
+      const edge = (i: number) => G.lanes[i].kind === p.kind && (inbound ? this.boundary(G.lanes[i].lane!.from) : this.boundary(G.lanes[i].lane!.to));
+      if (inbound) {
+        const src: number[] = [];
+        for (let i = 0; i < G.lanes.length; i++) if (edge(i)) src.push(i);
+        best = src.length ? this.search(src, (i) => i === ip, G.ex[ip], G.ez[ip]) : null;
+      } else best = this.search([ip], edge, NaN, NaN);
     }
     cache.set(key, best);
     return best;
@@ -776,16 +779,22 @@ export class Traffic {
     const G = this.routeGraph();
     const s = G.id.get(from), t = G.id.get(to);
     if (s === undefined || t === undefined) return null;
+    return this.search([s], (i) => i === t, G.ex[t], G.ez[t], bike, maxCost);
+  }
+
+  /** best-first search from any of `sources` to the first lane where `goal` holds; (gx, gz): A* target, or
+   *  NaN for none (several goals: plain Dijkstra) */
+  private search(sources: number[], goal: (i: number) => boolean, gx: number, gz: number, bike = false, maxCost = Infinity) {
+    const G = this.routeGraph();
     const st = ++G.stamp, { g, prev, seen, closed, ex, ez, off, base, lanes, heap } = G;
-    const gx = ex[t], gz = ez[t];
-    g[s] = 0; prev[s] = -1; seen[s] = st;
+    const astar = !Number.isNaN(gx);
     heap.clear();
-    heap.push(0, s);
+    for (const s of sources) { g[s] = 0; prev[s] = -1; seen[s] = st; heap.push(0, s); }
     while (heap.size) {
       const a = heap.pop()!;
       if (closed[a] === st) continue;
       closed[a] = st;
-      if (a === t) {
+      if (goal(a)) {
         const out: Path[] = [];
         for (let k = a; k >= 0; k = prev[k]) out.push(lanes[k]);
         return out.reverse();
@@ -798,7 +807,7 @@ export class Traffic {
         if (c > maxCost) continue;   // (bounded searches give up instead of exploring the whole network)
         if (seen[b] !== st || c < g[b]) {
           g[b] = c; prev[b] = a; seen[b] = st;
-          heap.push(c + Math.hypot(ex[b] - gx, ez[b] - gz) / 14, b);
+          heap.push(astar ? c + Math.hypot(ex[b] - gx, ez[b] - gz) / 14 : c, b);
         }
       }
     }

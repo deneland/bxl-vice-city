@@ -92,6 +92,8 @@ export class TileManager {
   private queue: Node[] = [];
   private inflight = 0;
   private shown = new Set<Node>();
+  private showB = new Set<Node>();
+  private readyCount = 0;
   private workers: Worker[];
   private nextWorker = 0;
   private materials: THREE.Material[];
@@ -167,7 +169,7 @@ export class TileManager {
   update(camera: THREE.PerspectiveCamera, viewportPx: number): boolean {
     const focal = viewportPx / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
     const cam = camera.getWorldPosition(this.tmp);
-    const show = new Set<Node>();
+    const show = this.showB; show.clear();   // (two sets used in turn)
     const perLevel = this.levels.map(() => 0);
     let faces = 0, quads = 0;
 
@@ -198,12 +200,13 @@ export class TileManager {
     let changed = show.size !== this.shown.size;
     for (const n of this.shown) if (!show.has(n)) { changed = true; if (n.mesh) n.mesh.visible = false; }
     for (const n of show) if (n.mesh && !n.mesh.visible) { changed = true; n.mesh.visible = true; }
+    this.showB = this.shown;
     this.shown = show;
     this.evict();
     this.pump();
 
     this.stats = { perLevel, faces, quads, loading: this.inflight + this.queue.length,
-      ready: this.nodes.filter((n) => n.state === 'ready').length, total: this.nodes.length,
+      ready: this.readyCount, total: this.nodes.length,
       residentFaces: this.resident, evicted: this.evicted };
     if (!this.inflight && !this.queue.length && this.roots.every((r) => r.state === 'ready') && this.idleWaiters.length) {
       const w = this.idleWaiters; this.idleWaiters = [];
@@ -224,6 +227,7 @@ export class TileManager {
       this.quadsResident -= n.quads;
       n.faces = 0; n.quads = 0;
       n.state = 'idle';
+      this.readyCount--;
       this.evicted++;
     }
   }
@@ -261,6 +265,7 @@ export class TileManager {
       for (let i = 2; i < q.length; i += 3) q[i] += base;
     }
     n.state = 'ready';
+    this.readyCount++;
     this.meshArrived = true;
     n.faces = faces;
     n.quads = quads;

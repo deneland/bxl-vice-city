@@ -107,7 +107,10 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
-const query = ['telemetry=0', 'gpu=1', 'continuous=1', 'dynres=0', `time=${TIME}`, 'date=2026-11-04', 'weather=clear', EXTRA_QUERY]   // (not ?backend=webgl: forcing WebGL loses the device headless).filter(Boolean).join('&');
+// (not ?backend=webgl: forcing WebGL loses the device headless; the bench reloads until it has the backend)
+const query = ['telemetry=0', 'gpu=1', 'continuous=1', 'dynres=0', `time=${TIME}`, 'date=2026-11-04', 'weather=clear', EXTRA_QUERY]
+  .filter(Boolean).join('&');
+if (!/^telemetry=0&gpu=1&continuous=1&dynres=0&time=/.test(query)) throw new Error(`bench query malformed: ${query}`);
 // headless Chromium hands out WebGPU only some of the time: reload until we have the backend asked for
 let load, tNav;
 for (let attempt = 0; attempt < 8; attempt++) {
@@ -217,7 +220,7 @@ for (const s of scenarios) {
     const v = window.__viewer;
     return { lod: v.lod?.stats ?? null, sections: v.prof.report(), gpuPasses: v.prof.gpuReport(), spikes: v.prof.spikes.slice(), longTasks: v.prof.longTasks.slice(),
       heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) : null,
-      sim: v.agents ? { ...v.agents.stats(), vehicles: v.traffic?.count ?? null, walking: v.peds?.walking ?? null } : null };
+      sim: v.agents ? { ...v.agents.stats(), vehicles: v.traffic?.count ?? null, walking: v.peds?.walking ?? null, jumpLog: v.agents.jumps, clock: Math.round(v.agentTime()) } : null };
   });
   if (!s.path && !s.jump) await page.screenshot({ path: resolve(OUT, `${s.name}.png`) });
   const intervals = rec.map((f) => f.interval);
@@ -246,6 +249,7 @@ await browser.close();
 
 const idleAfter = gpuLoad();
 if (results.some((r) => r.drawCalls === 0)) console.log('\n⚠ some scenarios drew nothing (device lost?): their numbers are meaningless');
+if (results.some((r) => r.sim?.jumpLog?.length > 1)) console.log('\n⚠ the agents\' clock jumped during the run (re-planning): see sim.jumpLog');
 const run = { laptop: LAPTOP, cpuThrottle: CPU_THROTTLE, gpuFactor: GPU_FACTOR, gpuBusyBefore: idleBefore, gpuBusyAfter: idleAfter, stamp, url: `${URL_BASE}?${query}`, size: [W, H], env, load, results, errors: [...new Set(errors)] };
 writeFileSync(resolve(OUT, 'results.json'), JSON.stringify(run, null, 1));
 
