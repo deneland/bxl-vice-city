@@ -86,11 +86,14 @@ interface Path {
   junction: Junction | null; from: Path | null; to: Path | null; turn: number;   // turn: heading change, rad
 }
 
+/** a kerbside spot on a lane: where a trip starts or ends */
+export interface Spot { p: Path; s: number }
+
 interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null }
 interface Junction { occ: Set<Vehicle>; conflicts: Map<Path, Map<Path, boolean>>; signalled: boolean }
 interface Signal { cycle: number; offset: number; phases: [number, number][]; state: number }   // phases: [from, to) green
 
-interface Vehicle {
+export interface Vehicle {
   t: Kind; kind: number;
   route: Path[];               // route[0]: the path the front bumper is on; then planned paths
   hist: Path[];                // paths behind (for the axles and carriages still on them)
@@ -103,6 +106,7 @@ interface Vehicle {
   dest: { p: Path; s: number } | null;   // cars: where to pull over (null: leave the region)
   arrive: number;              // when it started approaching its next junction (first come, first served)
   inst: { mesh: THREE.InstancedMesh; i: number }[];   // per section: its model's instanced mesh, index
+  agent: unknown;              // cars: who drives (agents.ts); null for trams / trains
   stuck: number;               // s without moving
   block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
   why?: string;                // debugging: why it may not enter its next junction
@@ -149,6 +153,13 @@ function makePath(pts: Float32Array, speed: number, kind: number): Path {
 /** travel direction (x, z) at s */
 function heading(p: Path, s: number) {
   sample(p, Math.max(0, s - 1), tmp); sample(p, Math.min(p.length, s + 1), tmp2);
+  return new THREE.Vector2(tmp2.x - tmp.x, tmp2.z - tmp.z).normalize();
+}
+
+/** travel direction (x, z) between s and s + d along the path (d < 0: looking back) */
+function longHeading(p: Path, s: number, d: number) {
+  const a = Math.min(s, s + d), b = Math.max(s, s + d);
+  sample(p, Math.max(0, a), tmp); sample(p, Math.min(p.length, b), tmp2);
   return new THREE.Vector2(tmp2.x - tmp.x, tmp2.z - tmp.z).normalize();
 }
 
@@ -304,52 +315,21 @@ export class Traffic {
     this.kerbTotal = roads.reduce((a, p) => a + p.end - p.start, 0);
     this.entries = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.from) && p.end - p.start > 2);
     this.exits = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.to));
-    // --- vehicles ---
+    // --- vehicle meshes: one instanced mesh per model, a pool of instances (cars come and go) ---
+    this.material = material;
+    this.carPaint = this.paintPicker(palette);
+    for (const k of ROAD_MIX.map(([k]) => k)) this.pool(k.secs[0].model, counts.car);
+    // --- trams and trains: always on the network ---
     const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
-    const plan: [string, Path[], number][] = [
-      ['car', byKind(KIND.road), counts.car], ['tram', byKind(KIND.tram), counts.tram], ['train', byKind(KIND.rail), counts.train]];
-    const paints: number[][] = [];   // per vehicle, linear rgb
-    const carPaint = this.paintPicker(palette);
-    const counts2 = new Map<string, number>();
-    for (const [type, pool, n] of plan) {
+    for (const [kindNo, n] of [[KIND.tram, counts.tram], [KIND.rail, counts.train]] as const) {
+      const pool = byKind(kindNo);
       if (!pool.length) continue;
       for (let i = 0; i < n; i++) {
-        const t = type === 'car' ? pickKind() : type === 'tram' ? (Math.random() < 0.3 ? TYPES.t4000 : TYPES.t3000) : TYPES.train;
-        const calm = t === TYPES.bus || type !== 'car';
-        // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
-        const ag = calm ? 1 : 0.75 + 0.65 * Math.random() ** 1.5;
-        const v: Vehicle = { t, kind: pool[0].kind, route: [], hist: [], s: 0, v: 0, ag,
-          f: calm ? 0.95 : 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random(),
-          grant: null, inJunction: null, wait: 0, arrive: 0, inst: [], stuck: 0, trip: [], dest: null };
-        if (type === 'car') this.newTrip(v, true); else this.place(v, pool);
-        this.vehicles.push(v);
-        for (const x of t.secs) counts2.set(x.model, (counts2.get(x.model) ?? 0) + 1);
-        const hex = t === TYPES.van ? (Math.random() < 0.65 ? VAN_WHITE : carPaint())
-          : t === TYPES.bus ? BUS_COLORS[Math.floor(Math.random() * BUS_COLORS.length)]
-            : t === TYPES.t3000 || t === TYPES.t4000 ? TRAM_SILVER : t === TYPES.train ? TRAIN : carPaint();
-        const c = new THREE.Color(hex);
-        paints.push([c.r, c.g, c.b]);
+        const t = kindNo === KIND.tram ? (Math.random() < 0.3 ? TYPES.t4000 : TYPES.t3000) : TYPES.train;
+        const v = this.make(t, kindNo, kindNo === KIND.tram ? TRAM_SILVER : TRAIN, 1, 0.95, null);
+        this.place(v, pool);
       }
     }
-    // one instanced mesh per model; per-instance paint
-    const meshes = new Map<string, THREE.InstancedMesh>();
-    for (const [model, n] of counts2) {
-      const geo = MODELS[model].geo.clone();
-      geo.setAttribute('paint', new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3));
-      const m = new THREE.InstancedMesh(geo, material, n);
-      m.frustumCulled = false;
-      m.count = 0;
-      meshes.set(model, m);
-      this.group.add(m);
-    }
-    this.vehicles.forEach((v, k) => {
-      for (const x of v.t.secs) {
-        const mesh = meshes.get(x.model)!, i = mesh.count++;
-        (mesh.geometry.getAttribute('paint') as THREE.BufferAttribute).setXYZ(i, paints[k][0], paints[k][1], paints[k][2]);
-        v.inst.push({ mesh, i });
-      }
-    });
-    this.meshes = [...meshes.values()];
     // --- signal heads: a small box at the right of each stop line ---
     const heads: { pos: THREE.Vector3; sig: Signal }[] = [];
     const right = (p: Path, s: number, d: number) => {
@@ -395,6 +375,68 @@ export class Traffic {
   }
 
   private meshes: THREE.InstancedMesh[] = [];
+  private pools = new Map<string, { mesh: THREE.InstancedMesh; free: number[] }>();
+  private material!: THREE.Material;
+  private carPaint!: () => number;
+  private zero = new THREE.Matrix4().makeScale(0, 0, 0);
+  /** called when a car's trip ends (arrived, left the region, or given up when stuck) */
+  onArrive: ((agent: unknown, arrived: boolean) => void) | null = null;
+
+  /** instanced mesh (and free-list) of a model, created on first use */
+  private pool(model: string, capacity: number) {
+    let p = this.pools.get(model);
+    if (!p) {
+      const geo = MODELS[model].geo.clone();
+      geo.setAttribute('paint', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3));
+      const mesh = new THREE.InstancedMesh(geo, this.material, capacity);
+      mesh.frustumCulled = false;
+      mesh.count = 0;
+      for (let i = 0; i < capacity; i++) mesh.setMatrixAt(i, this.zero);
+      p = { mesh, free: [] };
+      this.pools.set(model, p);
+      this.meshes.push(mesh);
+      this.group.add(mesh);
+    }
+    return p;
+  }
+
+  /** a new vehicle with instances for its sections (null if the pool is full) */
+  private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: unknown): Vehicle {
+    const c = new THREE.Color(paint);
+    const v: Vehicle = { t, kind, route: [], hist: [], s: 0, v: 0, ag, f, grant: null, inJunction: null, wait: 0,
+      arrive: 0, inst: [], stuck: 0, trip: [], dest: null, agent };
+    for (const x of t.secs) {
+      const p = this.pool(x.model, kind === KIND.road ? 1 : 96);
+      const i = p.free.length ? p.free.pop()! : p.mesh.count < p.mesh.instanceMatrix.count ? p.mesh.count++ : -1;
+      if (i < 0) { this.release(v); throw new Error('pool full'); }
+      (p.mesh.geometry.getAttribute('paint') as THREE.BufferAttribute).setXYZ(i, c.r, c.g, c.b);
+      p.mesh.geometry.getAttribute('paint').needsUpdate = true;
+      v.inst.push({ mesh: p.mesh, i });
+    }
+    this.vehicles.push(v);
+    return v;
+  }
+
+  /** take a vehicle off the road: free its instances and junction */
+  private release(v: Vehicle) {
+    for (const x of v.inst) {
+      x.mesh.setMatrixAt(x.i, this.zero);
+      this.pools.get([...this.pools.entries()].find(([, p]) => p.mesh === x.mesh)![0])!.free.push(x.i);
+    }
+    v.inst = [];
+    if (v.inJunction) v.inJunction.junction?.occ.delete(v);
+    v.inJunction = null;
+    const k = this.vehicles.indexOf(v);
+    if (k >= 0) this.vehicles.splice(k, 1);
+    for (const m of this.meshes) m.instanceMatrix.needsUpdate = true;
+  }
+
+  /** a car's trip ends */
+  private finish(v: Vehicle, arrived: boolean) {
+    const a = v.agent;
+    this.release(v);
+    this.onArrive?.(a, arrived);
+  }
 
   /** car paint: the measured palette (lifted a little: aerial colours are shaded roofs) plus a few accents */
   private paintPicker(palette: { rgb: number[]; share: number }[]) {
@@ -431,31 +473,120 @@ export class Traffic {
     return { p, s: (p.start + p.end) / 2 };
   }
 
-  /** start a new trip: from the kerb or the region edge, to the kerb or the region edge */
-  private newTrip(v: Vehicle, initial = false) {
-    if (v.kind !== KIND.road) { this.place(v); return; }
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const fromEdge = !initial && this.entries.length && Math.random() < THROUGH;
-      const o = fromEdge ? { p: this.entries[Math.floor(Math.random() * this.entries.length)], s: 0 } : this.kerbSpot();
-      if (fromEdge) o.s = o.p.start;
-      // keep clear of vehicles already there
-      if (o.p.occ.some((y) => y !== v && Math.abs(y.s - o.s) < 10)) continue;
-      const toEdge = this.exits.length && Math.random() < THROUGH;
-      const dest = toEdge ? null : this.kerbSpot();
-      const goal = toEdge ? this.exits[Math.floor(Math.random() * this.exits.length)] : dest!.p;
-      if (goal === o.p && (!dest || dest.s <= o.s + 20)) continue;
+  /** nearest kerb spot to a scene position (in this group's frame), away from intersections */
+  spotNear(x: number, z: number): Spot | null {
+    if (!this.grid) {
+      this.grid = new Map();
+      for (const p of this.kerb)
+        for (let s = p.start + 8; s < p.end - 15; s += 6) {
+          sample(p, s, tmp);
+          const k = `${Math.floor(tmp.x / 40)},${Math.floor(tmp.z / 40)}`;
+          if (!this.grid.has(k)) this.grid.set(k, []);
+          this.grid.get(k)!.push({ p, s, x: tmp.x, z: tmp.z });
+        }
+    }
+    const cx = Math.floor(x / 40), cz = Math.floor(z / 40);
+    let best: { p: Path; s: number; d: number } | null = null;
+    for (let r = 0; r <= 3 && !best; r++)
+      for (let i = cx - r; i <= cx + r; i++)
+        for (let j = cz - r; j <= cz + r; j++)
+          for (const c of this.grid.get(`${i},${j}`) ?? []) {
+            const d = (c.x - x) ** 2 + (c.z - z) ** 2;
+            if (!best || d < best.d) best = { p: c.p, s: c.s, d };
+          }
+    return best && { p: best.p, s: best.s };
+  }
+  private grid: Map<string, { p: Path; s: number; x: number; z: number }[]> | null = null;
+
+  /** where a spot is in the scene (this group's frame) */
+  spotPosition(sp: Spot, out = new THREE.Vector3()) { return sample(sp.p, sp.s, out); }
+
+  /** cars on the road now */
+  get driving() { return this.vehicles.filter((v) => v.kind === KIND.road).length; }
+
+  /** Put a car on the road for a trip, from a kerb spot or the region edge to a kerb spot or the
+   *  region edge. progress (0-1): already that far along (after a jump in time). Returns the route
+   *  length in metres, or 0 if there is no route. */
+  spawn(agent: unknown, from: Spot | 'edge', to: Spot | 'edge', car: { kind: string; paint: number; ag: number; f: number },
+    progress = 0): number {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const o = from === 'edge' ? (() => { const p = this.entries[Math.floor(Math.random() * this.entries.length)]; return { p, s: p.start }; })() : from;
+      const goal = to === 'edge' ? this.exits[Math.floor(Math.random() * this.exits.length)] : to.p;
+      if (!o.p || !goal) return 0;
+      if (goal === o.p && to !== 'edge' && to.s <= o.s + 5) return 0;
       const lanes = this.route(o.p, goal);
-      if (!lanes) { this.failed++; continue; }
-      if (v.inJunction) v.inJunction.junction?.occ.delete(v);
-      v.inJunction = null; v.grant = null; v.wait = 0; v.stuck = 0;
-      v.route = [o.p]; v.hist = []; v.s = o.s; v.v = fromEdge || initial ? o.p.speed * 0.6 : 0;   // from the kerb: pull out
-      v.trip = lanes.slice(1); v.dest = dest;
+      if (!lanes) { this.failed++; if (from !== 'edge' && to !== 'edge') return 0; continue; }
+      // where along the route (progress > 0: somewhere on the way)
+      let k = 0, s = o.s;
+      const len = lanes.reduce((a, p, i) => a + (i === 0 ? p.end - o.s : p.end - p.start), 0);
+      if (progress > 0) {
+        let left = progress * len;
+        for (k = 0; k < lanes.length; k++) {
+          const from0 = k === 0 ? o.s : lanes[k].start, l = lanes[k].end - from0;
+          if (left < l || k === lanes.length - 1) { s = from0 + Math.min(left, l); break; }
+          left -= l;
+        }
+      }
+      const t = (TYPES as Record<string, Kind>)[car.kind] ?? TYPES.hatch;
+      let v: Vehicle;
+      try { v = this.make(t, KIND.road, car.paint, car.ag, car.f, agent); } catch { return 0; }
+      v.route = [lanes[k]]; v.s = s; v.v = from === 'edge' || progress > 0 ? lanes[k].speed * 0.6 : 0;   // from the kerb: pull out
+      v.trip = lanes.slice(k + 1); v.dest = to === 'edge' ? null : to;
       this.trips++;
       this.plan(v);
-      return;
+      return len;
     }
-    this.place(v);       // nothing found: anywhere, no destination (rare)
-    v.trip = []; v.dest = null;
+    return 0;
+  }
+
+  /** the vehicle drawn as instance i of mesh (for picking) */
+  vehicleAt(mesh: THREE.Object3D, i: number) {
+    return this.vehicles.find((v) => v.inst.some((x) => x.mesh === mesh && x.i === i)) ?? null;
+  }
+  /** the car an agent drives now, if any */
+  vehicleOf(agent: unknown) { return this.vehicles.find((v) => v.agent === agent) ?? null; }
+  /** a vehicle's front bumper position (this group's frame) */
+  positionOf(v: Vehicle, out = new THREE.Vector3()) { return this.at(v, v.s, out); }
+  /** points along what is left of a vehicle's trip (this group's frame), and its length (m) */
+  routeAhead(v: Vehicle) {
+    const pts: number[] = [];
+    let len = 0;
+    const lanes = [...v.route, ...v.trip.flatMap((l, k) => {
+      const prev = k === 0 ? v.route[v.route.length - 1] : v.trip[k - 1];
+      const c = prev.next.get(l);
+      return c ? [c, l] : [l];
+    })];
+    lanes.forEach((p, k) => {
+      const from = k === 0 ? v.s : p.start;
+      const to = v.dest && p === v.dest.p && k === lanes.length - 1 ? v.dest.s : p.end;
+      for (let s = from; s <= to; s += 2) { sample(p, s, tmp); pts.push(tmp.x, tmp.y + 0.3, tmp.z); }
+      len += Math.max(0, to - from);
+    });
+    return { pts, len };
+  }
+  /** a short description of a vehicle that has no agent (trams, trains) */
+  describe(v: Vehicle) { return v.t.name === 't3000' ? 'STIB tram (T3000-style)' : v.t.name === 't4000' ? 'STIB tram (T4000-style)' : 'train'; }
+  pickable() { return this.meshes; }
+  speedOf(v: Vehicle) { return v.v; }
+
+  /** take an agent's car off the road (e.g. after a jump in time) */
+  remove(agent: unknown) {
+    const v = this.vehicles.find((x) => x.agent === agent);
+    if (v) this.release(v);
+  }
+
+  /** take all cars off the road */
+  clearCars() { for (const v of this.vehicles.filter((x) => x.kind === KIND.road)) this.release(v); }
+
+  /** default car model and paint for a new agent */
+  randomCar() {
+    const t = pickKind();
+    const paint = t === TYPES.van ? (Math.random() < 0.65 ? VAN_WHITE : this.carPaint())
+      : t === TYPES.bus ? BUS_COLORS[Math.floor(Math.random() * BUS_COLORS.length)] : this.carPaint();
+    const calm = t === TYPES.bus;
+    // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
+    const ag = calm ? 1 : 0.75 + 0.65 * Math.random() ** 1.5;
+    return { kind: t.name, paint, ag, f: calm ? 0.95 : 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() };
   }
 
   /** A* over lanes (directed: one-ways included), cost = travel time + turn penalties */
@@ -505,11 +636,14 @@ export class Traffic {
         if (!next) return;                          // the trip ends on this lane
       } else {
         // rails: only connections a switch allows (no sharp bends, no reversing); none: end of the line
-        const dir = heading(last, last.end);
-        const pick = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1
-          && n.lane!.edge !== last.lane!.edge && dir.dot(heading(n, n.start)) > SWITCH_COS);
-        if (!pick.length) return;                   // leaves the network: handled when it gets there
-        next = pick[Math.floor(Math.random() * pick.length)];
+        // (directions over 8 m, so small kinks in the OSM geometry do not count; if no connection
+        // passes, the gentlest one: trams only leave at real ends of the network)
+        const dir = longHeading(last, last.end, -8);
+        const opts = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1
+          && n.lane!.edge !== last.lane!.edge).map((n) => ({ n, c: dir.dot(longHeading(n, n.start, 8)) }));
+        if (!opts.length) return;                   // leaves the network: handled when it gets there
+        const ok = opts.filter((o) => o.c > SWITCH_COS);
+        next = ok.length ? ok[Math.floor(Math.random() * ok.length)].n : opts.sort((a, b) => b.c - a.c)[0].n;
       }
       let curve = last.next.get(next);
       if (!curve) {
@@ -625,8 +759,8 @@ export class Traffic {
       if (ok) x.v.grant = x.c;
     }
 
-    // IDM per vehicle
-    for (const v of this.vehicles) {
+    // IDM per vehicle (a copy: cars that finish their trip leave the list)
+    for (const v of this.vehicles.slice()) {
       const t = v.t;
       // desired speed: the speed limit, lowered ahead of curves so that braking is comfortable
       let v0 = v.route[0].speed * v.f, gap = Infinity, vLead = 0;
@@ -669,9 +803,9 @@ export class Traffic {
       v.v = Math.max(0, vv + Math.max(a, -9) * dt);
       v.wait = v.v < 0.5 && v.route.some((p, k) => k > 0 && p.junction && v.grant !== p) ? v.wait + dt : 0;
       v.stuck = v.v < 0.2 && !this.atLight(v) ? v.stuck + dt : 0;
-      if (v.stuck > STUCK) { this.newTrip(v); continue; }                  // gridlock safety valve
+      if (v.stuck > STUCK) { this.finish(v, false); continue; }            // gridlock safety valve
       if (v.dest && v.route.length === 1 && v.route[0] === v.dest.p && v.s > v.dest.s - 2 && v.v < 1) {
-        this.newTrip(v);                                                    // arrived: park, next trip
+        this.finish(v, true);                                               // arrived: parks
         continue;
       }
       v.s += v.v * dt;
@@ -712,7 +846,10 @@ export class Traffic {
       const over = v.s - v.route[0].end;
       v.hist.unshift(v.route.shift()!);
       if (v.hist.length > 6) v.hist.pop();
-      if (!v.route.length) { this.newTrip(v); return; }    // left the region (or the network): next trip
+      if (!v.route.length) {                              // left the region (or the network)
+        if (v.kind === KIND.road) this.finish(v, true); else this.place(v);
+        return;
+      }
       const p = v.route[0];
       v.s = p.start + over;
       if (p.junction) {                                     // entering a junction curve

@@ -5,6 +5,8 @@ import { TELEMETRY, telemetry } from './telemetry';
 import { LABELS, viewMode } from './voxelMaterial';
 import { buildLanes, loadRoads, roadOverlay } from './roads';
 import { Traffic } from './traffic';
+import { Agents } from './agents';
+import { AgentView } from './agentView';
 import { baseVoxel, gridOrigin, lampLightAt, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
 import { Walk } from './walk';
@@ -158,6 +160,10 @@ async function main() {
   };
   if (params.get('roads') === '1') setRoads(true);
   let traffic: Traffic | null = null;
+  let agents: Agents | null = null;
+  // agent clock: seconds of the day; runs on from the chosen time (live: the Brussels clock)
+  let clockBase = 0, clockAt = performance.now();
+  const agentTime = () => Math.min(24 * 3600 - 1, clockBase + (performance.now() - clockAt) / 1000);
   let trafficOn = false;
   const setTraffic = async (on: boolean) => {
     trafficOn = on;
@@ -172,6 +178,9 @@ async function main() {
         palette?.palette ?? []);
       traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
       fx.add(traffic.group, traffic.lights);
+      // the people driving them (places from OSM, pipeline places.py)
+      const places = await fetch(`places/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (places) agents = new Agents(places, traffic, VS, Number(params.get('agents') ?? 8000));
     }
     if (traffic) traffic.group.visible = traffic.lights.visible = trafficOn;
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
@@ -185,9 +194,9 @@ async function main() {
   const liveBtn = document.getElementById('live') as HTMLButtonElement;
   const brusselsNow = () => {  // [YYYY-MM-DD, fractional hours] on the Brussels clock
     const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Brussels', hourCycle: 'h23',
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date())
-      .map((x) => [x.type, x.value]));
-    return [`${p.year}-${p.month}-${p.day}`, Number(p.hour) + Number(p.minute) / 60] as const;
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      .formatToParts(new Date()).map((x) => [x.type, x.value]));
+    return [`${p.year}-${p.month}-${p.day}`, Number(p.hour) + Number(p.minute) / 60 + Number(p.second) / 3600] as const;
   };
   let day = params.get('date') ?? brusselsNow()[0];
   let live = !params.has('time');
@@ -206,6 +215,7 @@ async function main() {
     let t = new Date(Date.UTC(y, mo - 1, d) + hours * 3600e3);
     t = new Date(t.getTime() - brusselsOffset(t) * 60e3);
     const { az, alt } = sunPosition(t, LAT, LON);
+    clockBase = hours * 3600; clockAt = performance.now();
     const l = lighting(alt);
     const fog = applyWeather(weather ?? presetWeather('clear'), l);
     (scene.fog as THREE.Fog).near = fog.fogNear;
@@ -222,7 +232,7 @@ async function main() {
     sky.copy(l.sky);
     scene.fog!.color.copy(l.sky);
     document.body.style.background = '#' + l.sky.getHexString();
-    const hh = Math.floor(hours), mm = Math.round((hours - hh) * 60);
+    const hh = Math.floor(hours), mm = Math.floor((hours - hh) * 60);
     timeLabel.textContent = `${live ? 'live · ' : ''}${day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` +
       ` · ${weather ? `${describe(weather)}, ${Math.round(weather.temp)}°C` : 'weather unavailable'} · sun ${(alt * 180 / Math.PI).toFixed(0)}°`;
     liveBtn.style.display = live ? 'none' : '';
@@ -292,6 +302,7 @@ async function main() {
     }
   };
   const inspector = new Inspector(vox, scene, manifest.origin[2], () => { dirty = true; });
+  const agentView = new AgentView(() => traffic, () => agents, fx, controls, camera, () => { dirty = true; });
   const raycaster = new THREE.Raycaster();
   let down: { x: number; y: number; t: number } | null = null;
   renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button === 0) down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
@@ -307,6 +318,9 @@ async function main() {
     clearTimeout(clickTimer);
     clickTimer = setTimeout(() => {
       raycaster.setFromCamera(ndc, camera);
+      // a vehicle first (who drives it), else the voxel under the cursor
+      if (trafficOn && agentView.pick(raycaster.ray)) { inspector.clear(); telemetry.event('inspect-vehicle', {}); return; }
+      agentView.clear();
       inspector.pick(raycaster.ray).then(() => telemetry.event('inspect', {}));
     }, walk.active ? 0 : 250);
   });
@@ -356,7 +370,8 @@ async function main() {
     if (e.key === 'm' || e.key === 'M') setTilt(!tiltOn);
     if (e.key === 'r' || e.key === 'R') setRoads(!roads?.visible);
     if (e.key === 't' || e.key === 'T') setTraffic(!trafficOn);
-    if (e.key === 'Escape') inspector.clear();
+    if (e.key === 'Escape') { inspector.clear(); agentView.clear(); }
+    if (e.key === 'f' || e.key === 'F') agentView.setFollow(!agentView.isFollowing);
     dirty = true;
   });
   let dirty = true; // something outside camera/tiles changed: draw the next tick
@@ -398,9 +413,13 @@ async function main() {
       controls.target.lerpVectors(targetAnim.from, targetAnim.to, e);
       if (k >= 1) targetAnim = null;
     }
+    if (!walk.active) agentView.update(agentTime());   // (follow moves camera and orbit point)
     if (walk.active) walk.update(interval / 1000);
     else controls.update();
-    if (trafficOn && traffic) traffic.update(Math.min(interval, 100) / 1000);
+    if (trafficOn && traffic) {
+      agents?.update(agentTime(), day);
+      traffic.update(Math.min(interval, 100) / 1000);
+    }
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
@@ -499,7 +518,7 @@ async function main() {
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
     renderer, scene, cityScene, deferred, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
-    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; },
+    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, agentTime,
     whenIdle: () => lod.whenIdle(),
     info: () => ({ backend, ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
