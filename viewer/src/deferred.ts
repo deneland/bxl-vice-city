@@ -47,7 +47,7 @@ export class Deferred {
   readonly city: THREE.RenderTarget;
   readonly fwd: THREE.RenderTarget;
   readonly glow: THREE.RenderTarget;
-  private cityMRT = mrt({ output, emissive: vec4(0), normal: vec4(0, 1, 0, 0) });
+  private cityMRT = mrt({ output, emissive: vec4(0), normal: vec4(0.5, 1, 0.5, 0) });   // (normal stored x 0.5 + 0.5)
   private restore: THREE.QuadMesh;
   private pipeline: THREE.RenderPipeline;
   private composite: any;
@@ -77,6 +77,9 @@ export class Deferred {
     const opts = { type: THREE.HalfFloatType, depthBuffer: true };
     this.city = new THREE.RenderTarget(size.x, size.y, { ...opts, count: GBUF.length });
     GBUF.forEach((n, i) => { this.city.textures[i].name = n; });
+    // normals are axis-aligned (-1 / 0 / 1) and the glass share is 0..1: 8 bits store them exactly
+    // (encoded x 0.5 + 0.5; 4 bytes less per pixel to write and read than half floats)
+    this.city.textures[2].type = THREE.UnsignedByteType;
     (this.city as any).label = 'gbuffer';   // (names for the GPU pass timings, main.ts)
     this.city.depthTexture = new THREE.DepthTexture(size.x, size.y, THREE.FloatType);   // (32-bit: copyable)
     this.fwd = new THREE.RenderTarget(size.x, size.y, opts);
@@ -110,7 +113,8 @@ export class Deferred {
     // --- resolve: light the city ---
     const alb = texture(this.city.textures[0], uv());
     const emi = texture(this.city.textures[1], uv());
-    const nrm = texture(this.city.textures[2], uv());
+    const nrmTex = texture(this.city.textures[2], uv());
+    const nrm = vec4(nrmTex.xyz.mul(2).sub(1), nrmTex.w);   // (stored x 0.5 + 0.5)
     const depth = texture(this.city.depthTexture, uv()).x;
     const dist = perspectiveDepthToViewZ(depth, this.near, this.far).negate();
     const world = this.stat ? this.camWorld.mul(vec4(getViewPosition(uv(), depth, this.projInv), 1)).xyz : null;

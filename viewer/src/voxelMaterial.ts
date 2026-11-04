@@ -122,7 +122,7 @@ export function createVoxelMaterial(voxelSize: number, baseSize: number, atlas: 
   // normal + how much the voxel is a window. Night factor and lit share are applied when resolving.
   m.mrtNode = mrt({
     emissive: vec4(col.mul(lampLight.add(sign.mul(1.5))).mul(ao).mul(colourView), hash(cell)),
-    normal: vec4(normal, glass.mul(isFacade).mul(colourView)),
+    normal: vec4(normal.mul(0.5).add(0.5), glass.mul(isFacade).mul(colourView)),   // (8-bit target: x 0.5 + 0.5)
   });
   return m;
 }
