@@ -4,7 +4,9 @@
 Edges are split at every node shared by two or more ways. Per edge: start/end node, kind, one-way,
 speed (km/h), lanes, the centreline as voxel coordinates (x east, y north, z = ground surface),
 resampled every SAMPLE m, the road rank (priority) and traffic controls along it. One-way edges point
-in the driving direction. Nodes: x, y, z and 1 if the intersection itself carries traffic signals.
+in the driving direction. Nodes: x, y, z, 1 if the intersection itself carries traffic signals, and 1
+if it is where an edge leaves the region (entry / exit for through traffic). Edges are clipped to the
+region. Double tram tracks get a direction (trams keep right); single track stays two-way.
 
 Usage: uv run python roads.py [roi-name] [--refetch]
 Map data © OpenStreetMap contributors, ODbL.
@@ -121,6 +123,88 @@ def consolidate(edges, node_xy, node_sig, vs):
     return out, xy, sig
 
 
+def edge_length(pts, vs):
+    p = np.array(pts).reshape(-1, 3)[:, :2] * vs
+    return np.r_[0, np.cumsum(np.hypot(*np.diff(p, axis=0).T))]
+
+
+def clip(edges, node_xy, node_sig, size, vs):
+    """Keep only the parts of edges inside the region; where an edge leaves it, a boundary node."""
+    boundary = [0] * len(node_xy)
+    out = []
+    for e in edges:
+        p = np.array(e[6]).reshape(-1, 3)
+        inside = (p[:, 0] >= 1) & (p[:, 1] >= 1) & (p[:, 0] < size[0] - 1) & (p[:, 1] < size[1] - 1)
+        if inside.all():
+            out.append(e)
+            continue
+        cum = edge_length(e[6], vs)
+        i = 0
+        while i < len(p):
+            if not inside[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(p) and inside[j + 1]:
+                j += 1
+            if j > i:
+                ends = []
+                for k, orig in ((i, e[0]), (j, e[1])):
+                    if k in (0, len(p) - 1):
+                        ends.append(orig)
+                    else:                                    # new boundary node
+                        node_xy.append([round(float(c), 1) for c in p[k]])
+                        node_sig.append(0)
+                        boundary.append(1)
+                        ends.append(len(node_xy) - 1)
+                ctl = [[round(m - cum[i], 1), c, d] for m, c, d in e[8] if cum[i] <= m <= cum[j]]
+                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl])
+            i = j + 1
+    print(f"clipped to the region: {len(edges)} -> {len(out)} edges, {sum(boundary)} boundary nodes")
+    return out, node_xy, node_sig, boundary
+
+
+def tram_directions(edges, vs):
+    """OSM maps both tracks of a tram line but not their direction: on double track, trams keep right
+    (the other track is on their left). Single track stays two-way."""
+    trams = [e for e in edges if e[2] == KIND["tram"] and not e[3]]
+    pts = {id(e): np.array(e[6]).reshape(-1, 3)[:, :2] for e in trams}
+    n = 0
+    for e in trams:
+        p = pts[id(e)]
+        if len(p) < 3:
+            continue
+        k = len(p) // 2
+        P, D = p[k], p[k + 1] - p[k - 1]
+        D = D / (np.linalg.norm(D) or 1)
+        best = None
+        for o in trams:
+            if o is e:
+                continue
+            q = pts[id(o)]
+            d = np.hypot(*(q - P).T)
+            i = int(np.argmin(d))
+            if not (1.5 / vs <= d[i] <= 5.0 / vs) or len(q) < 2:
+                continue
+            Do = q[min(i + 1, len(q) - 1)] - q[max(i - 1, 0)]
+            if abs(np.dot(Do, D)) / (np.linalg.norm(Do) or 1) < 0.8:
+                continue
+            if best is None or d[i] < best[0]:
+                best = (d[i], q[i])
+        if best is None:
+            continue
+        rel = best[1] - P
+        left = D[0] * rel[1] - D[1] * rel[0] > 0           # other track on the left (x east, y north)
+        if not left:                                       # reverse: travel the other way
+            L = edge_length(e[6], vs)[-1]
+            e[0], e[1] = e[1], e[0]
+            e[6] = [c for i in range(len(e[6]) - 3, -1, -3) for c in e[6][i:i + 3]]
+            e[8] = sorted([[round(L - m, 1), c, -d] for m, c, d in e[8]])
+        e[3] = 1
+        n += 1
+    print(f"tram tracks: {n} of {len(trams)} given a direction (double track)")
+
+
 def build():
     els = json.loads(RAW.read_text())["elements"]
     nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
@@ -208,8 +292,10 @@ def build():
                           [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl])
             stats[kind] += d[-1]
     edges, node_xy, node_sig = consolidate(edges, node_xy, node_sig, vs)
+    edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
+    tram_directions(edges, vs)
     out = {"build": m.man["build"],
-           "nodes": [[*(round(float(c), 1) for c in xyz), sig] for xyz, sig in zip(node_xy, node_sig)],
+           "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
            "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
                                       "rank", "controls [m, 1 signals|2 give way|3 stop, dir]"]}
     OUT.parent.mkdir(parents=True, exist_ok=True)

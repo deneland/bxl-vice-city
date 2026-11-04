@@ -12,8 +12,12 @@
 //  lights      OSM traffic signals: intersections cycle two approach groups; pedestrian-crossing
 //              signals turn red now and then; drawn as small coloured boxes at the stop line
 //
+//  trips       each car drives a trip: from the kerb (or the region edge: through traffic) to a destination
+//              (kerb or region edge), routed by A* on the directed lane graph (one-ways built in; left
+//              turns and U-turns cost extra); at the destination it pulls over and a new trip starts
+//
 // Trams and trains use the same model on their own tracks (they ignore road signals and do not
-// interact with cars yet). Vehicles choose their next lane at random, ahead of time.
+// interact with cars yet) and choose their next track at random.
 import * as THREE from 'three/webgpu';
 import { CONTROL, KIND, type Lane } from './roads';
 
@@ -24,7 +28,9 @@ const LOOK = 90;             // m looked ahead for obstacles and curves
 const APPROACH = 30;         // m: signals / signs this close to a lane's end belong to the junction
 const PATIENCE = 6;          // s waiting at a junction before ignoring priority (if nothing is in the way)
 const NO_ROOM_PATIENCE = 8;  // s before entering even without room after the junction
-const STUCK = 45;            // s without moving: the vehicle is taken off and starts again elsewhere
+const STUCK = 45;            // s without moving: the vehicle is taken off and starts a new trip
+const THROUGH = 0.3;         // share of trips that start / end at the region edge
+const TRIM = 9;              // m: lanes end this far before the intersection; curves turn in that space
 
 interface Kind { len: number; wb: number; over: number; h: number; w: number; seg: number; gap: number;
   amax: number; b: number; T: number; s0: number }
@@ -68,6 +74,8 @@ interface Vehicle {
   grant: Path | null;          // junction curve it may enter
   inJunction: Path | null;     // junction curve it occupies (until its rear has left it)
   wait: number;                // s spent waiting for a junction
+  trip: Path[];                // cars: lanes still to drive after the route planned so far
+  dest: { p: Path; s: number } | null;   // cars: where to pull over (null: leave the region)
   arrive: number;              // when it started approaching its next junction (first come, first served)
   first: number;               // first instance (box) index
   stuck: number;               // s without moving
@@ -124,10 +132,21 @@ function makeCurve(a: Path, b: Path): Path {
   const p0 = sample(a, a.end, new THREE.Vector3()), p3 = sample(b, b.start, new THREE.Vector3());
   const da = heading(a, a.end), db = heading(b, b.start);
   const chord = p0.distanceTo(p3);
-  // handles at least ~ the turning radius: a car never has to turn tighter than it can
-  const k = Math.max(chord * 0.45, a.kind === KIND.road ? MIN_RADIUS * 0.6 : 1);
-  const p1 = p0.clone().add(new THREE.Vector3(da.x, 0, da.y).multiplyScalar(k));
-  const p2 = p3.clone().sub(new THREE.Vector3(db.x, 0, db.y).multiplyScalar(k));
+  // a turn: where the two lane lines meet (x), the curve approximates a circular arc tangent to both
+  // (Bézier handle = 4/3 tan(θ/4) R, tangent length = R tan(θ/2)); straight on / U-turn: plain handles
+  const theta = Math.acos(Math.max(-1, Math.min(1, da.dot(db))));
+  const den = da.x * db.y - da.y * db.x;
+  let k0 = Math.max(chord * 0.45, a.kind === KIND.road ? MIN_RADIUS * 0.6 : 1), k3 = k0;
+  if (Math.abs(den) > 0.05 && theta > 0.15 && theta < 2.6) {
+    const rx = p3.x - p0.x, rz = p3.z - p0.z;
+    const ta = (rx * db.y - rz * db.x) / den, tb = (rx * da.y - rz * da.x) / den;   // p0 + ta·da = p3 + tb·db
+    if (ta > 0 && tb < 0 && ta < 3 * chord && -tb < 3 * chord) {
+      const h = (4 / 3) * Math.tan(theta / 4) / Math.tan(theta / 2);
+      k0 = ta * h; k3 = -tb * h;
+    }
+  }
+  const p1 = p0.clone().add(new THREE.Vector3(da.x, 0, da.y).multiplyScalar(k0));
+  const p2 = p3.clone().sub(new THREE.Vector3(db.x, 0, db.y).multiplyScalar(k3));
   const N = 12, pts = new Float32Array((N + 1) * 3), q = new THREE.Vector3();
   for (let i = 0; i <= N; i++) {
     const t = i / N, u = 1 - t;
@@ -151,6 +170,40 @@ function conflict(a: Path, b: Path) {
   return false;
 }
 
+/** binary min-heap (A* open list) */
+class Heap<T> {
+  private k: number[] = []; private v: T[] = [];
+  get size() { return this.k.length; }
+  push(key: number, val: T) {
+    const { k, v } = this;
+    let i = k.length;
+    k.push(key); v.push(val);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (k[p] <= key) break;
+      k[i] = k[p]; v[i] = v[p]; i = p;
+    }
+    k[i] = key; v[i] = val;
+  }
+  pop(): T | undefined {
+    const { k, v } = this;
+    if (!k.length) return undefined;
+    const top = v[0], lk = k.pop()!, lv = v.pop()!;
+    if (k.length) {
+      let i = 0;
+      for (;;) {
+        let c = 2 * i + 1;
+        if (c >= k.length) break;
+        if (c + 1 < k.length && k[c + 1] < k[c]) c++;
+        if (k[c] >= lk) break;
+        k[i] = k[c]; v[i] = v[c]; i = c;
+      }
+      k[i] = lk; v[i] = lv;
+    }
+    return top;
+  }
+}
+
 function signalState(sig: Signal, t: number) {
   const tt = (t + sig.offset) % sig.cycle;
   for (const [g0, g1] of sig.phases) {
@@ -171,14 +224,16 @@ export class Traffic {
   private time = Math.random() * 1000;
 
   /** material: lit like the city (deferred.ts litMaterial); instance colours are the paint */
+  /** boundary: is this node where the network leaves the region (entry / exit for through traffic)? */
   constructor(lanes: Lane[], counts = { car: 400, tram: 12, train: 3 },
-    material: THREE.Material = new THREE.MeshStandardNodeMaterial({ roughness: 0.55, metalness: 0.1 })) {
+    material: THREE.Material = new THREE.MeshStandardNodeMaterial({ roughness: 0.55, metalness: 0.1 }),
+    private boundary: (node: number) => boolean = () => false) {
     // --- paths: lanes trimmed back from the junctions, so the curves have room to turn ---
     const incoming = new Map<number, Path[]>();
     for (const l of lanes) {
       const p = makePath(l.pts, l.speed, l.kind);
       p.lane = l;
-      const trim = Math.min(l.kind === KIND.road ? 6 : 3, p.length * 0.3);
+      const trim = Math.min(l.kind === KIND.road ? TRIM : 3, p.length * 0.35);
       p.start = trim; p.end = p.length - trim;
       this.paths.push(p);
       if (!this.byNode.has(l.from)) this.byNode.set(l.from, []);
@@ -216,6 +271,12 @@ export class Traffic {
       this.signals.push(...groups);
       for (const p of roads) p.approach!.signal = groups[Math.abs(p.approach!.dir.dot(ref)) > 0.6 ? 0 : 1];
     }
+    // --- trip ends: kerbside (weighted by length) and region-edge entries / exits ---
+    const roads = this.paths.filter((p) => p.kind === KIND.road && p.end - p.start > 12);
+    this.kerb = roads;
+    this.kerbTotal = roads.reduce((a, p) => a + p.end - p.start, 0);
+    this.entries = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.from) && p.end - p.start > 2);
+    this.exits = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.to));
     // --- vehicles ---
     const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
     const plan: [string, Path[], number][] = [
@@ -229,8 +290,8 @@ export class Traffic {
         const ag = type === 'car' ? 0.75 + 0.65 * Math.random() ** 1.5 : 1;
         const v: Vehicle = { t, kind: pool[0].kind, route: [], hist: [], s: 0, v: 0, ag,
           f: type === 'car' ? 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() : 0.95,
-          grant: null, inJunction: null, wait: 0, arrive: 0, first: instances, stuck: 0 };
-        this.place(v, pool);
+          grant: null, inJunction: null, wait: 0, arrive: 0, first: instances, stuck: 0, trip: [], dest: null };
+        if (type === 'car') this.newTrip(v, true); else this.place(v, pool);
         this.vehicles.push(v);
         instances += t.seg;
       }
@@ -277,18 +338,95 @@ export class Traffic {
     this.plan(v);
   }
 
-  /** extend the route with random next lanes (and the curves joining them) */
+  private kerb: Path[] = []; private kerbTotal = 0;
+  private entries: Path[] = []; private exits: Path[] = [];
+  trips = 0; failed = 0;
+
+  private kerbSpot(): { p: Path; s: number } {
+    let r = Math.random() * this.kerbTotal;
+    for (const p of this.kerb) { r -= p.end - p.start; if (r <= 0) return { p, s: p.end + r }; }
+    const p = this.kerb[0];
+    return { p, s: (p.start + p.end) / 2 };
+  }
+
+  /** start a new trip: from the kerb or the region edge, to the kerb or the region edge */
+  private newTrip(v: Vehicle, initial = false) {
+    if (v.kind !== KIND.road) { this.place(v); return; }
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const fromEdge = !initial && this.entries.length && Math.random() < THROUGH;
+      const o = fromEdge ? { p: this.entries[Math.floor(Math.random() * this.entries.length)], s: 0 } : this.kerbSpot();
+      if (fromEdge) o.s = o.p.start;
+      // keep clear of vehicles already there
+      if (o.p.occ.some((y) => y !== v && Math.abs(y.s - o.s) < 10)) continue;
+      const toEdge = this.exits.length && Math.random() < THROUGH;
+      const dest = toEdge ? null : this.kerbSpot();
+      const goal = toEdge ? this.exits[Math.floor(Math.random() * this.exits.length)] : dest!.p;
+      if (goal === o.p && (!dest || dest.s <= o.s + 20)) continue;
+      const lanes = this.route(o.p, goal);
+      if (!lanes) { this.failed++; continue; }
+      if (v.inJunction) v.inJunction.junction?.occ.delete(v);
+      v.inJunction = null; v.grant = null; v.wait = 0; v.stuck = 0;
+      v.route = [o.p]; v.hist = []; v.s = o.s; v.v = fromEdge || initial ? o.p.speed * 0.6 : 0;   // from the kerb: pull out
+      v.trip = lanes.slice(1); v.dest = dest;
+      this.trips++;
+      this.plan(v);
+      return;
+    }
+    this.place(v);       // nothing found: anywhere, no destination (rare)
+    v.trip = []; v.dest = null;
+  }
+
+  /** A* over lanes (directed: one-ways included), cost = travel time + turn penalties */
+  private route(from: Path, to: Path): Path[] | null {
+    const goal = sample(to, to.end, new THREE.Vector3());
+    const cost = new Map<Path, number>([[from, 0]]), prev = new Map<Path, Path>();
+    const open = new Heap<Path>();
+    open.push(0, from);
+    const pos = new THREE.Vector3(), done = new Set<Path>();
+    while (open.size) {
+      const a = open.pop()!;
+      if (done.has(a)) continue;
+      done.add(a);
+      if (a === to) {
+        const out = [a];
+        for (let p = prev.get(a); p; p = prev.get(p)) out.unshift(p);
+        return out;
+      }
+      const da = heading(a, a.end);
+      for (const b of this.byNode.get(a.lane!.to) ?? []) {
+        if (b.kind !== a.kind || b.end - b.start < 0.5) continue;
+        const db = heading(b, b.start);
+        const turn = Math.atan2(da.x * db.y - da.y * db.x, da.dot(db));   // > 0: right (x east, z south)
+        const pen = b.lane!.edge === a.lane!.edge ? 60 : turn < -0.5 ? 4 : turn > 0.5 ? 1.5 : 0;
+        const c = cost.get(a)! + (b.end - b.start + 10) / b.speed + pen;
+        if (c < (cost.get(b) ?? Infinity)) {
+          cost.set(b, c); prev.set(b, a);
+          sample(b, b.end, pos);
+          open.push(c + pos.distanceTo(goal) / 14, b);
+        }
+      }
+    }
+    return null;
+  }
+
+  /** extend the route (cars: along their trip; trams, trains: random) with the curves joining lanes */
   private plan(v: Vehicle) {
     let ahead = v.route[0].end - v.s;
     for (let i = 1; i < v.route.length; i++) ahead += v.route[i].end - v.route[i].start;
     while (ahead < PLAN) {
       const last = v.route[v.route.length - 1];
       if (!last.lane) return;   // (always ends on a lane)
-      const opts = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1);
-      const fwd = opts.filter((n) => n.lane!.edge !== last.lane!.edge);
-      const pick = fwd.length ? fwd : opts;         // dead end: turn around
-      if (!pick.length) return;                     // leaves the network: handled when it gets there
-      const next = pick[Math.floor(Math.random() * pick.length)];
+      let next: Path | undefined;
+      if (v.kind === KIND.road) {
+        next = v.trip.shift();
+        if (!next) return;                          // the trip ends on this lane
+      } else {
+        const opts = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1);
+        const fwd = opts.filter((n) => n.lane!.edge !== last.lane!.edge);
+        const pick = fwd.length ? fwd : opts;       // dead end: turn around
+        if (!pick.length) return;                   // leaves the network: handled when it gets there
+        next = pick[Math.floor(Math.random() * pick.length)];
+      }
       let curve = last.next.get(next);
       if (!curve) {
         curve = makeCurve(last, next);
@@ -431,6 +569,8 @@ export class Traffic {
           for (const x of p.crossings)
             if (x.s > from && x.sig.state !== GREEN && d + x.s < gap
               && (x.sig.state === RED || d + x.s > (v.v * v.v) / (2 * t.b * 1.5))) { gap = d + x.s; vLead = 0; v.block = 'crossing'; v.blockBy = null; }
+        // destination: pull over at the kerb spot
+        if (v.dest && p === v.dest.p && i === v.route.length - 1 && d + v.dest.s < gap) { gap = d + v.dest.s + t.s0; vLead = 0; }
         d += p.end - (v.route[i + 1]?.start ?? 0);
       }
       // IDM acceleration
@@ -441,7 +581,11 @@ export class Traffic {
       v.v = Math.max(0, vv + Math.max(a, -9) * dt);
       v.wait = v.v < 0.5 && v.route.some((p, k) => k > 0 && p.junction && v.grant !== p) ? v.wait + dt : 0;
       v.stuck = v.v < 0.2 ? v.stuck + dt : 0;
-      if (v.stuck > STUCK) { this.place(v); v.stuck = 0; continue; }       // gridlock safety valve
+      if (v.stuck > STUCK) { this.newTrip(v); continue; }                  // gridlock safety valve
+      if (v.dest && v.route.length === 1 && v.route[0] === v.dest.p && v.s > v.dest.s - 2 && v.v < 1) {
+        this.newTrip(v);                                                    // arrived: park, next trip
+        continue;
+      }
       v.s += v.v * dt;
       this.advance(v);
     }
@@ -478,7 +622,7 @@ export class Traffic {
       const over = v.s - v.route[0].end;
       v.hist.unshift(v.route.shift()!);
       if (v.hist.length > 6) v.hist.pop();
-      if (!v.route.length) { this.place(v); return; }      // left the network: start again elsewhere
+      if (!v.route.length) { this.newTrip(v); return; }    // left the region (or the network): next trip
       const p = v.route[0];
       v.s = p.start + over;
       if (p.junction) {                                     // entering a junction curve

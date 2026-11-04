@@ -4,7 +4,7 @@
 import * as THREE from 'three/webgpu';
 
 export interface RoadNetwork {
-  nodes: [number, number, number, number][];            // voxel coords: x east, y north, z ground surface; signals
+  nodes: [number, number, number, number, number][];    // voxel coords: x east, y north, z ground; signals; region edge
   // from, to, kind, oneway, km/h, lanes, xyz..., rank, controls [m from start, code, direction]
   edges: [number, number, number, number, number, number, number[], number, [number, number, number][]][];
 }

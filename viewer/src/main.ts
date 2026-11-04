@@ -165,7 +165,8 @@ async function main() {
       const n = await network;
       if (!n) { trafficOn = false; return; }
       traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: 12, train: 3 },
-        deferred.litMaterial((w) => lampLightAt(w, 0.8).mul(night)));   // lit like the city, lamps at night
+        deferred.litMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
+        (node) => n.net.nodes[node]?.[4] === 1);                        // region edge: through traffic
       traffic.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
       fx.add(traffic.mesh, traffic.lights);
     }
