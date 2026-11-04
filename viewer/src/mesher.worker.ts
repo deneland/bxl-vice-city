@@ -1,19 +1,29 @@
-// Turns one chunk of sparse voxels into packed visible faces.
+// Turns one chunk of sparse voxels into merged visible faces ("runs").
 //
 // Input voxel record (8 bytes): x+1, y+1, z, r, g, b, class, flags
 //   x/y are chunk-local with a 1-voxel apron (0 and CH+1 are neighbours' voxels).
-// Output per face:
-//   a: Float32 x2  [ x | y<<6 | z<<12 | dir<<20 ,  ao | class<<8 | fill<<16 | label<<17 ]
-//      | photo<<21   (all < 2^24 so they are exact in float32)
-//   c: Uint8 x4    [ r, g, b, 255 ]
+//
+// Every visible face is found as before (one per exposed voxel side, skirts at tile edges, ambient
+// occlusion per corner). Then consecutive faces of the same direction are merged into one quad: side faces in vertical runs (walls), top / bottom faces in runs along x. A wall of
+// 20 voxels is one quad instead of 20. Each face keeps its own colour and occlusion: the quad points to a
+// run of texels (one per face) that the fragment shader reads (voxelMaterial.ts), so it looks the same.
+//
+// Output:
+//   q: Float32 x3 per quad  [ x | y<<6 | z<<12 | dir<<20 ,  len<<8 ,  first texel (tile-local) ]
+//      (first face of the run; all < 2^24 so exact in float32)
+//   t: 32 bits per face, in run order: colour r, g, b 6 bits each (sRGB), ambient occlusion 8 bits (2 per
+//      corner), label 4 bits, photo 1 bit; as bytes:
+//        [ r | g<<6 ,  g>>2 | b<<4 ,  b>>4 | ao<<2 ,  ao>>6 | label<<2 | photo<<6 ]
 // dir: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z (up), 5 -z (down)   (voxel space, z up)
+// Runs go along z for side faces (dir 0-3) and along x for dir 4/5, at most 255 faces.
 
 export interface MeshRequest { id: number; buf: ArrayBuffer; ch: number; nz: number }
-export interface MeshResult { id: number; a: Float32Array; c: Uint8Array; faces: number }
+export interface MeshResult { id: number; q: Float32Array; t: Uint8Array; quads: number; faces: number }
 
 const FLAG_FILL = 1;
 const FLAG_APRON = 2;
 const SKIRT = 8;   // voxels below a column's top that get side faces along the tile edge
+const MAXRUN = 255;
 
 // unit vectors per axis
 const E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
@@ -39,8 +49,11 @@ self.onmessage = (ev: MessageEvent<MeshRequest>) => {
     if (v[o + 2] > top[k]) top[k] = v[o + 2];
   }
 
-  const a = new Float32Array(n * 6 * 2);
-  const c = new Uint8Array(n * 6 * 4);
+  // --- 1. all visible faces ---
+  const cap = n * 6;
+  const key = new Float64Array(cap);     // sort key: direction, then the cross coordinates, then the run coordinate
+  const fp = new Uint32Array(cap);       // x | y<<6 | z<<12 | dir<<20
+  const ft = new Uint8Array(cap * 4);
   let f = 0;
   const p = [0, 0, 0];
   for (let i = 0; i < n; i++) {
@@ -72,15 +85,42 @@ self.onmessage = (ev: MessageEvent<MeshRequest>) => {
           ao |= lvl << ((aa + 2 * b) * 2);
         }
       }
-      a[f * 2] = (x - 1) | ((y - 1) << 6) | (z << 12) | (dir << 20);
-      a[f * 2 + 1] = ao | (v[o + 6] << 8) | ((flags & FLAG_FILL) << 16) | ((flags >> 4) << 17) | (((flags >> 3) & 1) << 21);
-      c[f * 4] = v[o + 3];
-      c[f * 4 + 1] = v[o + 4];
-      c[f * 4 + 2] = v[o + 5];
-      c[f * 4 + 3] = 255;
+      const X = x - 1, Y = y - 1;
+      fp[f] = X | (Y << 6) | (z << 12) | (dir << 20);
+      // runs: side faces along z, top / bottom faces along x; consecutive faces have consecutive keys
+      key[f] = dir < 4 ? ((dir * 64 + X) * 64 + Y) * 512 + z : ((dir * 512 + z) * 64 + Y) * 128 + X;   // (gaps: runs never wrap into the next row)
+      // texel: colour 6+6+6 bits, occlusion 8, label 4, photo 1 (see the header)
+      const r6 = v[o + 3] >> 2, g6 = v[o + 4] >> 2, b6 = v[o + 5] >> 2, lab = flags >> 4, photo = (flags >> 3) & 1;
+      ft[f * 4] = r6 | ((g6 & 3) << 6);
+      ft[f * 4 + 1] = (g6 >> 2) | ((b6 & 15) << 4);
+      ft[f * 4 + 2] = (b6 >> 4) | ((ao & 63) << 2);
+      ft[f * 4 + 3] = (ao >> 6) | (lab << 2) | (photo << 6);
       f++;
     }
   }
-  const out: MeshResult = { id, a: a.slice(0, f * 2), c: c.slice(0, f * 4), faces: f };
-  (self as unknown as Worker).postMessage(out, [out.a.buffer, out.c.buffer]);
+
+  // --- 2. merge runs ---
+  const order = new Uint32Array(f);
+  for (let i = 0; i < f; i++) order[i] = i;
+  order.sort((a, b) => key[a] - key[b]);
+  const q = new Float32Array(f * 3);
+  const t = new Uint8Array(f * 4);
+  let quads = 0;
+  for (let k = 0; k < f;) {
+    const first = order[k];
+    let len = 1;
+    while (k + len < f && len < MAXRUN) {
+      const nxt = order[k + len];
+      if (key[nxt] !== key[first] + len) break;
+      len++;
+    }
+    q[quads * 3] = fp[first];
+    q[quads * 3 + 1] = len << 8;
+    q[quads * 3 + 2] = k;   // its faces' texels are k .. k+len-1 (written below in sorted order)
+    for (let j = 0; j < len; j++) t.set(ft.subarray(order[k + j] * 4, order[k + j] * 4 + 4), (k + j) * 4);
+    quads++;
+    k += len;
+  }
+  const out: MeshResult = { id, q: q.slice(0, quads * 3), t: t.slice(0, f * 4), quads, faces: f };
+  (self as unknown as Worker).postMessage(out, [out.q.buffer, out.t.buffer]);
 };

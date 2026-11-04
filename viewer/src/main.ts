@@ -311,8 +311,8 @@ async function main() {
   if (!wPreset) setInterval(updateWeather, 10 * 60e3);
 
   // --- level-of-detail tiles ------------------------------------------------
-  const ERR = Number(params.get('err') ?? 12);          // max on-screen size of one voxel, px
-  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR);
+  const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
+  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR, renderer);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
   lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions
   const t0 = performance.now();
@@ -613,7 +613,7 @@ async function main() {
       (lastTickRendered && avg ? `${backend} · ${(1000 / avg).toFixed(0)} fps · avg ${avg.toFixed(1)} ms · p99 ${p99.toFixed(1)} ms` : `${backend} · idle, nothing to draw`) +
       ` · ${rendered} frames drawn (city ${cityRenders}), ${skipped} skipped` +
       (GPU_TIMING ? ` · gpu ${gpuMs.toFixed(2)} ms` : '') + '\n' +
-      `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces · ` +
+      `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces (${(lod.stats.quads / 1e6).toFixed(2)}M quads) · ` +
       `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
       ` (${(lod.stats.residentFaces / 1e6).toFixed(1)}M faces)` +
       `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +

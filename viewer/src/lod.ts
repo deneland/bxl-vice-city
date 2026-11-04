@@ -12,18 +12,79 @@ import type { MeshRequest, MeshResult } from './mesher.worker';
 export interface TileInfo { file: string; tx: number; ty: number; count: number; zmin: number; zmax: number }
 export interface LevelInfo { level: number; voxelSize: number; size: [number, number, number]; voxels: number; faces: number; tiles: TileInfo[] }
 
+/** Face data (colour, class) of all resident tiles in one texture: each tile owns a range of rows. Merged
+ *  quads (mesher.worker.ts) index it by face; new tiles are copied in on the GPU. */
+export class FaceAtlas {
+  static readonly W = 2048;
+  readonly tex: THREE.Texture;
+  private target: THREE.RenderTarget | null = null;
+  private free: [number, number][];   // [first row, rows], sorted by row
+  constructor(webgpu: boolean, readonly rows = 8192) {
+    // allocated on the GPU without CPU data. WebGPU: a render target's texture (a DataTexture without
+    // data makes its upload throw); WebGL: a DataTexture (copies into render-target textures do not
+    // arrive there; three warns once about the empty upload, harmless)
+    if (webgpu) {
+      this.target = new THREE.RenderTarget(FaceAtlas.W, rows, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat,
+        depthBuffer: false, generateMipmaps: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+      this.tex = this.target.texture;
+    } else {
+      const t = new THREE.DataTexture(null, FaceAtlas.W, rows, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.minFilter = t.magFilter = THREE.NearestFilter;
+      t.generateMipmaps = false;
+      t.needsUpdate = true;   // (allocates it; without this three binds a shared placeholder)
+      this.tex = t;
+    }
+    this.free = [[0, rows]];
+  }
+  private ready = false;
+  get capacity() { return this.rows * FaceAtlas.W; }
+  /** first row of a range for n texels (first fit), or -1 */
+  alloc(n: number) {
+    const need = Math.max(1, Math.ceil(n / FaceAtlas.W));
+    for (let i = 0; i < this.free.length; i++) {
+      const [r, c] = this.free[i];
+      if (c < need) continue;
+      if (c === need) this.free.splice(i, 1); else this.free[i] = [r + need, c - need];
+      return r;
+    }
+    return -1;
+  }
+  release(row: number, n: number) {
+    const rows = Math.max(1, Math.ceil(n / FaceAtlas.W));
+    let i = 0;
+    while (i < this.free.length && this.free[i][0] < row) i++;
+    this.free.splice(i, 0, [row, rows]);
+    if (i + 1 < this.free.length && this.free[i][0] + this.free[i][1] === this.free[i + 1][0]) {
+      this.free[i][1] += this.free[i + 1][1]; this.free.splice(i + 1, 1);
+    }
+    if (i > 0 && this.free[i - 1][0] + this.free[i - 1][1] === this.free[i][0]) {
+      this.free[i - 1][1] += this.free[i][1]; this.free.splice(i, 1);
+    }
+  }
+  upload(renderer: THREE.WebGPURenderer, row: number, data: Uint8Array) {
+    if (!this.ready) { if (this.target) renderer.initRenderTarget(this.target); this.ready = true; }
+    const rows = Math.max(1, Math.ceil(data.length / 4 / FaceAtlas.W));
+    const full = new Uint8Array(rows * FaceAtlas.W * 4);
+    full.set(data);
+    const src = new THREE.DataTexture(full, FaceAtlas.W, rows, THREE.RGBAFormat, THREE.UnsignedByteType);
+    src.needsUpdate = true;
+    renderer.copyTextureToTexture(src, this.tex, null, new THREE.Vector2(0, row));
+    src.dispose();
+  }
+}
+
 interface Node {
   id: number; L: number; info: TileInfo; vs: number;
   children: Node[];
   state: 'idle' | 'queued' | 'loading' | 'ready';
-  mesh: THREE.Mesh | null; faces: number;
+  mesh: THREE.Mesh | null; faces: number; quads: number; row: number;   // row: first atlas row (-1: none)
   box: THREE.Box3;      // world space
   diag: number;         // box diagonal
   prio: number;
   used: number;         // frame number when last visited
 }
 
-export interface LodStats { perLevel: number[]; faces: number; loading: number; ready: number; total: number; residentFaces: number; evicted: number }
+export interface LodStats { perLevel: number[]; faces: number; quads: number; loading: number; ready: number; total: number; residentFaces: number; evicted: number }
 
 export class TileManager {
   private nodes: Node[] = [];
@@ -36,11 +97,13 @@ export class TileManager {
   private materials: THREE.Material[];
   private idleWaiters: (() => void)[] = [];
   private tmp = new THREE.Vector3();
-  stats: LodStats = { perLevel: [], faces: 0, loading: 0, ready: 0, total: 0, residentFaces: 0, evicted: 0 };
+  stats: LodStats = { perLevel: [], faces: 0, quads: 0, loading: 0, ready: 0, total: 0, residentFaces: 0, evicted: 0 };
   private frame = 0;
   private resident = 0;   // faces held in memory
+  private quadsResident = 0;
+  readonly atlas: FaceAtlas;
   private evicted = 0;
-  /** keep at most this many faces meshed (12 bytes each on the GPU); least recently used go first */
+  /** keep at most this many faces meshed (4 bytes each in the atlas + 12 per merged quad); least recently used go first */
   budgetFaces = 16_000_000;
   errPx: number;
   /** optional per-tile error limit (px) from its distance range, e.g. larger where depth of field blurs */
@@ -50,12 +113,14 @@ export class TileManager {
 
   constructor(
     private base: string, private tileSize: number, private levels: LevelInfo[],
-    private group: THREE.Group, private shadows: boolean, errPx: number, maxInflight = 16,
+    private group: THREE.Group, private shadows: boolean, errPx: number, private renderer: THREE.WebGPURenderer,
+    maxInflight = 16,
   ) {
+    this.atlas = new FaceAtlas(!!(renderer.backend as any).isWebGPUBackend);
     this.errPx = errPx;
     this.maxInflight = maxInflight;
     group.updateMatrixWorld(true);
-    this.materials = levels.map((l) => createVoxelMaterial(l.voxelSize, levels[0].voxelSize));
+    this.materials = levels.map((l) => createVoxelMaterial(l.voxelSize, levels[0].voxelSize, this.atlas.tex));
     const byKey = new Map<string, Node>();
     for (const lv of levels) {
       for (const t of lv.tiles) {
@@ -65,7 +130,7 @@ export class TileManager {
           new THREE.Vector3((t.tx + 1) * s, (t.zmax + 1) * lv.voxelSize, -t.ty * s),
         ).applyMatrix4(group.matrixWorld);
         const n: Node = { id: this.nodes.length, L: lv.level, info: t, vs: lv.voxelSize, children: [],
-          state: 'idle', mesh: null, faces: 0, box, diag: box.getSize(new THREE.Vector3()).length(), prio: 0, used: 0 };
+          state: 'idle', mesh: null, faces: 0, quads: 0, row: -1, box, diag: box.getSize(new THREE.Vector3()).length(), prio: 0, used: 0 };
         this.nodes.push(n);
         byKey.set(`${lv.level}/${t.tx}/${t.ty}`, n);
       }
@@ -104,7 +169,7 @@ export class TileManager {
     const cam = camera.getWorldPosition(this.tmp);
     const show = new Set<Node>();
     const perLevel = this.levels.map(() => 0);
-    let faces = 0;
+    let faces = 0, quads = 0;
 
     this.meshArrived = false;
     const frame = ++this.frame;
@@ -126,7 +191,7 @@ export class TileManager {
       }
       show.add(n);
       perLevel[n.L]++;
-      faces += n.faces;
+      faces += n.faces; quads += n.quads;
     };
     for (const r of this.roots) if (r.state === 'ready') visit(r);
 
@@ -137,7 +202,7 @@ export class TileManager {
     this.evict();
     this.pump();
 
-    this.stats = { perLevel, faces, loading: this.inflight + this.queue.length,
+    this.stats = { perLevel, faces, quads, loading: this.inflight + this.queue.length,
       ready: this.nodes.filter((n) => n.state === 'ready').length, total: this.nodes.length,
       residentFaces: this.resident, evicted: this.evicted };
     if (!this.inflight && !this.queue.length && this.roots.every((r) => r.state === 'ready') && this.idleWaiters.length) {
@@ -147,15 +212,17 @@ export class TileManager {
     return changed;
   }
 
-  private evict() {
-    if (this.resident <= this.budgetFaces) return;
+  private evict(target = this.budgetFaces) {
+    if (this.resident <= target) return;
     const cand = this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame)
       .sort((a, b) => a.used - b.used);
     for (const n of cand) {
-      if (this.resident <= this.budgetFaces * 0.85) break;
+      if (this.resident <= target * 0.85) break;
       if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh = null; }
+      if (n.row >= 0) { this.atlas.release(n.row, n.faces); n.row = -1; }
       this.resident -= n.faces;
-      n.faces = 0;
+      this.quadsResident -= n.quads;
+      n.faces = 0; n.quads = 0;
       n.state = 'idle';
       this.evicted++;
     }
@@ -180,20 +247,31 @@ export class TileManager {
     }
   }
 
-  private onMesh({ id, a, c, faces }: MeshResult) {
+  private onMesh({ id, q, t, quads, faces }: MeshResult) {
     const n = this.nodes[id];
     this.inflight--;
+    if (faces) {
+      // room in the face atlas: free least recently used tiles if needed
+      let row = this.atlas.alloc(faces);
+      if (row < 0) { this.evict(Math.min(this.budgetFaces, this.resident) * 0.8); row = this.atlas.alloc(faces); }
+      if (row < 0) { n.state = 'idle'; return; }   // (still full: asked for again later)
+      this.atlas.upload(this.renderer, row, t);
+      n.row = row;
+      const base = row * FaceAtlas.W;
+      for (let i = 2; i < q.length; i += 3) q[i] += base;
+    }
     n.state = 'ready';
     this.meshArrived = true;
     n.faces = faces;
+    n.quads = quads;
     this.resident += faces;
+    this.quadsResident += quads;
     if (!faces) return;
     const g = new THREE.InstancedBufferGeometry();
     g.index = voxelGeometryBase.index;
     g.setAttribute('position', voxelGeometryBase.getAttribute('position'));
-    g.setAttribute('packed', new THREE.InstancedBufferAttribute(a, 2));
-    g.setAttribute('rgba', new THREE.InstancedBufferAttribute(c, 4, true));
-    g.instanceCount = faces;
+    g.setAttribute('quad', new THREE.InstancedBufferAttribute(q, 3));
+    g.instanceCount = quads;
     // bounds in tile-local coords (the shader's positionNode is invisible to three)
     const s = this.tileSize * n.vs;
     g.boundingBox = new THREE.Box3(

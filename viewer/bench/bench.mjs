@@ -296,8 +296,10 @@ if (GPU_FACTOR > 1 || CPU_THROTTLE > 1) {
   // The frame costs roughly max(cpu, gpu) when the two overlap; 16.7 ms = 60 fps, 33 ms = 30 fps.
   console.log(`\naverage-laptop estimate (CPU throttled ${CPU_THROTTLE}x; GPU time x${GPU_FACTOR} at full clocks, scaled by the clocks seen):`);
   for (const r of results) {
-    const k = gpuFactor(r.clocks), g = (r.gpu?.p95 ?? 0) * k, c = r.cpu.p95, f = Math.max(g, c);
-    console.log(r.name.padEnd(12), `cpu p95 ${c.toFixed(1)}  gpu p95 ~${g.toFixed(1)} (x${k.toFixed(1)}, ${r.clocks?.gr ?? '?'}/${r.clocks?.mem ?? '?'} MHz)  -> ~${(1000 / Math.max(f, 1e-3)).toFixed(0)} fps`,
+    // GPU: the average (headless Chromium composites with a GPU readback each frame; its stalls land in
+    // random passes' timer queries, so GPU p95 is noise here). CPU: p95.
+    const k = gpuFactor(r.clocks), g = (r.gpu?.avg ?? 0) * k, c = r.cpu.p95, f = Math.max(g, c);
+    console.log(r.name.padEnd(12), `cpu p95 ${c.toFixed(1)}  gpu avg ~${g.toFixed(1)} (x${k.toFixed(1)}, ${r.clocks?.gr ?? '?'}/${r.clocks?.mem ?? '?'} MHz)  -> ~${(1000 / Math.max(f, 1e-3)).toFixed(0)} fps`,
       f <= 16.7 ? 'smooth' : f <= 33 ? 'playable' : 'TOO SLOW');
   }
 }

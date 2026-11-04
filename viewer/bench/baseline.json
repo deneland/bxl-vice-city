@@ -1,216 +1,2666 @@
 {
- "stamp": "2026-11-03T10-07-59-549Z",
- "url": "http://127.0.0.1:5173/?telemetry=0&gpu=1",
+ "laptop": true,
+ "cpuThrottle": 3,
+ "gpuFactor": 14,
+ "gpuBusyBefore": 38,
+ "gpuBusyAfter": 13,
+ "stamp": "2026-11-04T15-09-04-745Z",
+ "url": "http://127.0.0.1:5173/?telemetry=0,gpu=1,continuous=1,dynres=0,time=8.5,date=2026-11-04,weather=clear,",
  "size": [
-  1600,
-  1000
+  1920,
+  1080
  ],
  "env": {
   "backend": "WebGL2",
   "gpu": "ANGLE (NVIDIA, Vulkan 1.4.303 (NVIDIA NVIDIA GeForce RTX 3090 (0x00002204)), NVIDIA)",
   "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
-  "mem": 124
+  "mem": 434
  },
  "load": {
-  "readyMs": 1557,
+  "readyMs": 4708,
   "backend": "WebGL2",
-  "loaded": 256,
-  "chunks": 256,
-  "totalFaces": 7891928,
-  "loadMs": 840.6000000014901,
-  "drawCalls": 155,
-  "triangles": 9411953,
-  "wallMs": 1561
+  "perLevel": [
+   68,
+   87,
+   86,
+   76,
+   40,
+   2,
+   0
+  ],
+  "faces": 8118907,
+  "quads": 3374168,
+  "loading": 0,
+  "ready": 480,
+  "total": 21853,
+  "residentFaces": 10058116,
+  "evicted": 0,
+  "loadMs": 4324.10000000149,
+  "rendered": 127,
+  "cityRenders": 54,
+  "shadowRenders": 2,
+  "gpuMs": 1.8554879999999998,
+  "drawCalls": 494,
+  "triangles": 9308763,
+  "wallMs": 4713
  },
  "results": [
   {
    "name": "overview",
    "path": null,
    "interval": {
-    "avg": 8.96,
-    "p50": 8.5,
-    "p95": 12.7,
-    "p99": 14.4,
-    "max": 15
+    "avg": 20.67,
+    "p50": 20.5,
+    "p95": 27.5,
+    "p99": 30.6,
+    "max": 33.4
+   },
+   "hitches": {
+    "over33": 1,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 1.06,
-    "p50": 1,
-    "p95": 1.5,
-    "p99": 2.2,
-    "max": 3.6
+    "avg": 8.54,
+    "p50": 8.5,
+    "p95": 11,
+    "p99": 13.2,
+    "max": 15.4
    },
    "gpu": {
-    "avg": 3.71,
-    "p50": 3.48,
-    "p95": 5.8,
-    "p99": 5.94,
-    "max": 5.97
+    "avg": 1.24,
+    "p50": 0.47,
+    "p95": 4.5,
+    "p99": 5.85,
+    "max": 6.13
    },
-   "drawCalls": 157,
-   "trianglesM": 9.49
+   "drawCalls": 25,
+   "trianglesM": 0.62,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     68,
+     87,
+     86,
+     76,
+     40,
+     2,
+     0
+    ],
+    "faces": 8118907,
+    "quads": 3374168,
+    "loading": 0,
+    "ready": 500,
+    "total": 21853,
+    "residentFaces": 10283264,
+    "evicted": 4506
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.09,
+     "p95": 3.9,
+     "max": 5.7
+    },
+    "transit": {
+     "avg": 0.04,
+     "p95": 0.2,
+     "max": 0.6
+    },
+    "traffic": {
+     "avg": 3.19,
+     "p95": 4.6,
+     "max": 7
+    },
+    "peds": {
+     "avg": 0.09,
+     "p95": 0.4,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 0.5
+    },
+    "fleet": {
+     "avg": 0.61,
+     "p95": 0.9,
+     "max": 4.1
+    },
+    "shadowDyn": {
+     "avg": 0.86,
+     "p95": 1.5,
+     "max": 2.8
+    },
+    "present": {
+     "avg": 1.55,
+     "p95": 2.4,
+     "max": 3.8
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.06,
+     "p95": 0.13,
+     "max": 0.21
+    },
+    "Mesh>fwd": {
+     "avg": 0.15,
+     "p95": 1.01,
+     "max": 2.98
+    },
+    "forward>fwd": {
+     "avg": 0.75,
+     "p95": 4.17,
+     "max": 5.92
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0.01,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.27,
+     "p95": 0.99,
+     "max": 4.94
+    }
+   },
+   "spikes": [],
+   "heapMB": 1103,
+   "sim": {
+    "agents": 99930,
+    "detailed": 156,
+    "timeline": 862,
+    "parkedShown": 1516,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 1795,
+    "failed": 89,
+    "promoMs": 1253,
+    "vehicles": 213,
+    "walking": 21
+   },
+   "top": null
   },
   {
    "name": "whole-roi",
    "path": null,
    "interval": {
-    "avg": 11.84,
-    "p50": 11.4,
-    "p95": 15,
-    "p99": 16.1,
-    "max": 20.1
+    "avg": 20.62,
+    "p50": 20.7,
+    "p95": 27.5,
+    "p99": 30.3,
+    "max": 31.8
+   },
+   "hitches": {
+    "over33": 0,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 1.49,
-    "p50": 1.4,
-    "p95": 2.3,
-    "p99": 3.4,
-    "max": 3.9
+    "avg": 8.37,
+    "p50": 8.2,
+    "p95": 11.4,
+    "p99": 13.8,
+    "max": 14.2
    },
    "gpu": {
-    "avg": 5.77,
-    "p50": 5.33,
-    "p95": 8.46,
-    "p99": 9.98,
-    "max": 10.2
+    "avg": 2,
+    "p50": 1.42,
+    "p95": 4.96,
+    "p99": 6.66,
+    "max": 7.87
    },
-   "drawCalls": 241,
-   "trianglesM": 14.81
+   "drawCalls": 17,
+   "trianglesM": 0.85,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     0,
+     0,
+     72,
+     74,
+     47,
+     1,
+     0
+    ],
+    "faces": 3296782,
+    "quads": 1624353,
+    "loading": 0,
+    "ready": 504,
+    "total": 21853,
+    "residentFaces": 10347753,
+    "evicted": 4506
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.09,
+     "p95": 3.8,
+     "max": 6.5
+    },
+    "transit": {
+     "avg": 0.03,
+     "p95": 0.2,
+     "max": 0.5
+    },
+    "traffic": {
+     "avg": 3.15,
+     "p95": 4.7,
+     "max": 6.8
+    },
+    "peds": {
+     "avg": 0.09,
+     "p95": 0.4,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 0.5
+    },
+    "fleet": {
+     "avg": 0.75,
+     "p95": 1,
+     "max": 2.9
+    },
+    "shadowDyn": {
+     "avg": 0.71,
+     "p95": 1.3,
+     "max": 1.9
+    },
+    "present": {
+     "avg": 1.45,
+     "p95": 2.4,
+     "max": 6
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.05,
+     "p95": 0.11,
+     "max": 0.28
+    },
+    "Mesh>fwd": {
+     "avg": 0.2,
+     "p95": 1.42,
+     "max": 5.61
+    },
+    "forward>fwd": {
+     "avg": 1.6,
+     "p95": 4.75,
+     "max": 9.61
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.02
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.16,
+     "p95": 0.16,
+     "max": 1.74
+    }
+   },
+   "spikes": [],
+   "heapMB": 1103,
+   "sim": {
+    "agents": 99930,
+    "detailed": 167,
+    "timeline": 862,
+    "parkedShown": 1515,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 1893,
+    "failed": 92,
+    "promoMs": 1415,
+    "vehicles": 222,
+    "walking": 23
+   },
+   "top": null
   },
   {
    "name": "rooftops",
    "path": null,
    "interval": {
-    "avg": 6.47,
-    "p50": 6,
-    "p95": 9.3,
-    "p99": 9.8,
-    "max": 10.3
+    "avg": 21.2,
+    "p50": 21.1,
+    "p95": 28.8,
+    "p99": 33.6,
+    "max": 34.7
+   },
+   "hitches": {
+    "over33": 4,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 0.62,
-    "p50": 0.6,
-    "p95": 0.9,
-    "p99": 0.9,
-    "max": 1.3
+    "avg": 8.36,
+    "p50": 8.2,
+    "p95": 11.1,
+    "p99": 12.8,
+    "max": 13.5
    },
    "gpu": {
-    "avg": 2.01,
-    "p50": 1.89,
-    "p95": 3.11,
-    "p99": 3.13,
-    "max": 3.14
+    "avg": 1.04,
+    "p50": 0.36,
+    "p95": 3.91,
+    "p99": 5.16,
+    "max": 5.44
    },
-   "drawCalls": 86,
-   "trianglesM": 5.01
+   "drawCalls": 19,
+   "trianglesM": 0.49,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     104,
+     90,
+     71,
+     79,
+     42,
+     1,
+     0
+    ],
+    "faces": 8860054,
+    "quads": 3702208,
+    "loading": 0,
+    "ready": 608,
+    "total": 21853,
+    "residentFaces": 13181103,
+    "evicted": 4506
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.22,
+     "p95": 3.9,
+     "max": 5.4
+    },
+    "transit": {
+     "avg": 0.03,
+     "p95": 0.2,
+     "max": 0.6
+    },
+    "traffic": {
+     "avg": 3.14,
+     "p95": 4.6,
+     "max": 6
+    },
+    "peds": {
+     "avg": 0.11,
+     "p95": 0.5,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 0.5
+    },
+    "fleet": {
+     "avg": 0.41,
+     "p95": 0.7,
+     "max": 1
+    },
+    "shadowDyn": {
+     "avg": 0.97,
+     "p95": 1.6,
+     "max": 2
+    },
+    "present": {
+     "avg": 1.25,
+     "p95": 2,
+     "max": 3.2
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.06,
+     "p95": 0.14,
+     "max": 0.23
+    },
+    "Mesh>fwd": {
+     "avg": 0.17,
+     "p95": 1.3,
+     "max": 4.07
+    },
+    "forward>fwd": {
+     "avg": 0.59,
+     "p95": 2.96,
+     "max": 5.23
+    },
+    "glow>glow": {
+     "avg": 0.02,
+     "p95": 0.01,
+     "max": 3.95
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.2,
+     "p95": 0.16,
+     "max": 3.37
+    }
+   },
+   "spikes": [],
+   "heapMB": 1148,
+   "sim": {
+    "agents": 99930,
+    "detailed": 164,
+    "timeline": 895,
+    "parkedShown": 1515,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2005,
+    "failed": 95,
+    "promoMs": 1602,
+    "vehicles": 217,
+    "walking": 24
+   },
+   "top": null
   },
   {
    "name": "street",
    "path": null,
    "interval": {
-    "avg": 6.43,
-    "p50": 6,
-    "p95": 9.2,
-    "p99": 10.7,
-    "max": 12.2
+    "avg": 21.48,
+    "p50": 21.5,
+    "p95": 27.9,
+    "p99": 32.2,
+    "max": 36.3
+   },
+   "hitches": {
+    "over33": 2,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 0.66,
-    "p50": 0.6,
-    "p95": 1,
-    "p99": 1.5,
-    "max": 1.5
+    "avg": 9.08,
+    "p50": 9,
+    "p95": 12.2,
+    "p99": 14,
+    "max": 14.2
    },
    "gpu": {
-    "avg": 1.78,
-    "p50": 1.67,
-    "p95": 2.69,
-    "p99": 2.91,
-    "max": 2.93
+    "avg": 2.37,
+    "p50": 1.9,
+    "p95": 5.62,
+    "p99": 8.35,
+    "max": 8.76
    },
-   "drawCalls": 70,
-   "trianglesM": 4.54
+   "drawCalls": 25,
+   "trianglesM": 0.74,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     112,
+     76,
+     70,
+     92,
+     43,
+     0,
+     0
+    ],
+    "faces": 8978848,
+    "quads": 3816979,
+    "loading": 0,
+    "ready": 654,
+    "total": 21853,
+    "residentFaces": 14496674,
+    "evicted": 4506
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.23,
+     "p95": 4,
+     "max": 6.4
+    },
+    "transit": {
+     "avg": 0.04,
+     "p95": 0.1,
+     "max": 0.7
+    },
+    "traffic": {
+     "avg": 3.2,
+     "p95": 4.9,
+     "max": 6.9
+    },
+    "peds": {
+     "avg": 0.12,
+     "p95": 0.5,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 0.5
+    },
+    "fleet": {
+     "avg": 0.58,
+     "p95": 0.9,
+     "max": 2.6
+    },
+    "shadowDyn": {
+     "avg": 1,
+     "p95": 1.7,
+     "max": 2.4
+    },
+    "present": {
+     "avg": 1.67,
+     "p95": 2.6,
+     "max": 4
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.06,
+     "p95": 0.14,
+     "max": 0.24
+    },
+    "Mesh>fwd": {
+     "avg": 0.18,
+     "p95": 0.56,
+     "max": 8.94
+    },
+    "forward>fwd": {
+     "avg": 1.58,
+     "p95": 5.54,
+     "max": 8.55
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.59,
+     "p95": 3.35,
+     "max": 7.11
+    }
+   },
+   "spikes": [],
+   "heapMB": 1159,
+   "sim": {
+    "agents": 99930,
+    "detailed": 170,
+    "timeline": 905,
+    "parkedShown": 1515,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2120,
+    "failed": 97,
+    "promoMs": 1787,
+    "vehicles": 222,
+    "walking": 25
+   },
+   "top": null
+  },
+  {
+   "name": "region",
+   "path": null,
+   "interval": {
+    "avg": 20.06,
+    "p50": 19.6,
+    "p95": 27.8,
+    "p99": 30.8,
+    "max": 32.2
+   },
+   "hitches": {
+    "over33": 0,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
+   },
+   "cpu": {
+    "avg": 7.53,
+    "p50": 7.4,
+    "p95": 9.9,
+    "p99": 13,
+    "max": 16.8
+   },
+   "gpu": {
+    "avg": 1.69,
+    "p50": 0.83,
+    "p95": 6.56,
+    "p99": 8.77,
+    "max": 9.03
+   },
+   "drawCalls": 6,
+   "trianglesM": 0.34,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     0,
+     0,
+     0,
+     0,
+     60,
+     5,
+     0
+    ],
+    "faces": 600136,
+    "quads": 341302,
+    "loading": 0,
+    "ready": 654,
+    "total": 21853,
+    "residentFaces": 14496674,
+    "evicted": 4506
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.31,
+     "p95": 4,
+     "max": 7.1
+    },
+    "transit": {
+     "avg": 0.05,
+     "p95": 0.3,
+     "max": 0.7
+    },
+    "traffic": {
+     "avg": 3.26,
+     "p95": 4.8,
+     "max": 9.6
+    },
+    "peds": {
+     "avg": 0.11,
+     "p95": 0.5,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 1.1
+    },
+    "fleet": {
+     "avg": 0.25,
+     "p95": 0.6,
+     "max": 3.2
+    },
+    "shadowDyn": {
+     "avg": 0.7,
+     "p95": 1.3,
+     "max": 1.7
+    },
+    "present": {
+     "avg": 0.7,
+     "p95": 1.2,
+     "max": 2
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.05,
+     "p95": 0.1,
+     "max": 0.18
+    },
+    "Mesh>fwd": {
+     "avg": 0.44,
+     "p95": 4.69,
+     "max": 8.79
+    },
+    "forward>fwd": {
+     "avg": 0.66,
+     "p95": 3.64,
+     "max": 8.53
+    },
+    "glow>glow": {
+     "avg": 0.01,
+     "p95": 0.01,
+     "max": 1.7
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.49,
+     "p95": 3.55,
+     "max": 6.36
+    }
+   },
+   "spikes": [],
+   "heapMB": 1171,
+   "sim": {
+    "agents": 99930,
+    "detailed": 174,
+    "timeline": 912,
+    "parkedShown": 1514,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2231,
+    "failed": 99,
+    "promoMs": 1970,
+    "vehicles": 224,
+    "walking": 26
+   },
+   "top": null
+  },
+  {
+   "name": "horizon",
+   "path": null,
+   "interval": {
+    "avg": 21.52,
+    "p50": 20.8,
+    "p95": 29.4,
+    "p99": 35.5,
+    "max": 37.8
+   },
+   "hitches": {
+    "over33": 5,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
+   },
+   "cpu": {
+    "avg": 8.79,
+    "p50": 8.3,
+    "p95": 11.9,
+    "p99": 15,
+    "max": 17.9
+   },
+   "gpu": {
+    "avg": 2.35,
+    "p50": 1.92,
+    "p95": 5.52,
+    "p99": 6.72,
+    "max": 6.76
+   },
+   "drawCalls": 14,
+   "trianglesM": 0.94,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     96,
+     80,
+     78,
+     86,
+     44,
+     0,
+     0
+    ],
+    "faces": 8863021,
+    "quads": 3706698,
+    "loading": 0,
+    "ready": 591,
+    "total": 21853,
+    "residentFaces": 12758066,
+    "evicted": 4669
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.01,
+     "p95": 3.1,
+     "max": 5.8
+    },
+    "transit": {
+     "avg": 0.03,
+     "p95": 0.2,
+     "max": 0.5
+    },
+    "traffic": {
+     "avg": 3.29,
+     "p95": 5,
+     "max": 7.9
+    },
+    "peds": {
+     "avg": 0.14,
+     "p95": 0.5,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.5
+    },
+    "fleet": {
+     "avg": 0.81,
+     "p95": 1.3,
+     "max": 5.4
+    },
+    "shadowDyn": {
+     "avg": 0.78,
+     "p95": 1.4,
+     "max": 2.4
+    },
+    "present": {
+     "avg": 1.5,
+     "p95": 2.5,
+     "max": 4.4
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.05,
+     "p95": 0.1,
+     "max": 0.25
+    },
+    "Mesh>fwd": {
+     "avg": 0.18,
+     "p95": 1.44,
+     "max": 3.74
+    },
+    "forward>fwd": {
+     "avg": 1.8,
+     "p95": 5.33,
+     "max": 7.49
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.02
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.35,
+     "p95": 1.55,
+     "max": 5.79
+    }
+   },
+   "spikes": [],
+   "heapMB": 767,
+   "sim": {
+    "agents": 99930,
+    "detailed": 162,
+    "timeline": 960,
+    "parkedShown": 1420,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2290,
+    "failed": 106,
+    "promoMs": 2067,
+    "vehicles": 208,
+    "walking": 30
+   },
+   "top": null
   },
   {
    "name": "orbit",
    "path": "orbit",
    "interval": {
-    "avg": 9.46,
-    "p50": 9,
-    "p95": 13.4,
-    "p99": 14.5,
-    "max": 16.2
+    "avg": 23.7,
+    "p50": 22.2,
+    "p95": 41.2,
+    "p99": 57.8,
+    "max": 75.6
+   },
+   "hitches": {
+    "over33": 29,
+    "over50": 4,
+    "over100": 0,
+    "longTasks": 5,
+    "longestTask": 74
    },
    "cpu": {
-    "avg": 1.14,
-    "p50": 1.1,
-    "p95": 1.9,
-    "p99": 2.7,
-    "max": 3.1
+    "avg": 13.2,
+    "p50": 12.1,
+    "p95": 20.2,
+    "p99": 47.6,
+    "max": 67.6
    },
    "gpu": {
-    "avg": 3.9,
-    "p50": 3.73,
-    "p95": 5.65,
-    "p99": 7.8,
-    "max": 7.97
+    "avg": 2.57,
+    "p50": 2.23,
+    "p95": 5.58,
+    "p99": 7.6,
+    "max": 8.04
    },
-   "drawCalls": 157,
-   "trianglesM": 9.78
+   "drawCalls": 123,
+   "trianglesM": 2.58,
+   "clocks": {
+    "gr": 1944,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1830,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     8,
+     42,
+     45,
+     34,
+     24,
+     11,
+     0
+    ],
+    "faces": 3255971,
+    "quads": 1414703,
+    "loading": 0,
+    "ready": 488,
+    "total": 21853,
+    "residentFaces": 11257702,
+    "evicted": 5196
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.24,
+     "p95": 4.2,
+     "max": 6.4
+    },
+    "transit": {
+     "avg": 0.5,
+     "p95": 0.4,
+     "max": 56.7
+    },
+    "traffic": {
+     "avg": 3.16,
+     "p95": 4.9,
+     "max": 34.5
+    },
+    "peds": {
+     "avg": 0.12,
+     "p95": 0.5,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.98,
+     "p95": 2.9,
+     "max": 4.7
+    },
+    "fleet": {
+     "avg": 0.62,
+     "p95": 1,
+     "max": 2.6
+    },
+    "shadowDyn": {
+     "avg": 0.56,
+     "p95": 1.1,
+     "max": 2.6
+    },
+    "present": {
+     "avg": 1.37,
+     "p95": 2.4,
+     "max": 3.8
+    },
+    "city": {
+     "avg": 3.2,
+     "p95": 5.6,
+     "max": 7.9
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.35,
+     "p95": 2.62,
+     "max": 4.62
+    },
+    "Mesh>fwd": {
+     "avg": 0.18,
+     "p95": 0.64,
+     "max": 9.91
+    },
+    "forward>fwd": {
+     "avg": 1.13,
+     "p95": 4.53,
+     "max": 7.03
+    },
+    "glow>glow": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 1.07
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.2,
+     "p95": 0.63,
+     "max": 2.74
+    },
+    "city>gbuffer": {
+     "avg": 0.8,
+     "p95": 0.91,
+     "max": 1.52
+    }
+   },
+   "spikes": [
+    {
+     "t": 171451,
+     "total": 58,
+     "parts": {
+      "agents": 2.2,
+      "transit": 50.4,
+      "traffic": 2.2,
+      "present": 1.5
+     }
+    },
+    {
+     "t": 173473,
+     "total": 66,
+     "parts": {
+      "agents": 2,
+      "transit": 56.3,
+      "traffic": 2.3,
+      "city": 2.6,
+      "present": 1.1
+     }
+    },
+    {
+     "t": 173549,
+     "total": 67,
+     "parts": {
+      "agents": 1.7,
+      "transit": 56.7,
+      "traffic": 2.2,
+      "city": 3.5,
+      "present": 1.1
+     }
+    },
+    {
+     "t": 176493,
+     "total": 48,
+     "parts": {
+      "agents": 2.5,
+      "traffic": 34.5,
+      "lod": 4.4,
+      "city": 3.6
+     }
+    }
+   ],
+   "heapMB": 854,
+   "sim": {
+    "agents": 99930,
+    "detailed": 178,
+    "timeline": 971,
+    "parkedShown": 1513,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2432,
+    "failed": 108,
+    "promoMs": 2280,
+    "vehicles": 223,
+    "walking": 31
+   },
+   "top": null
   },
   {
    "name": "pan",
    "path": "pan",
    "interval": {
-    "avg": 7.72,
-    "p50": 7.2,
-    "p95": 11.2,
-    "p99": 15.4,
-    "max": 17.9
+    "avg": 17.48,
+    "p50": 16.5,
+    "p95": 23.7,
+    "p99": 29.9,
+    "max": 37.3
+   },
+   "hitches": {
+    "over33": 1,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 0.84,
-    "p50": 0.8,
-    "p95": 1.3,
-    "p99": 1.8,
-    "max": 2.2
+    "avg": 11.87,
+    "p50": 11.4,
+    "p95": 16.2,
+    "p99": 19.5,
+    "max": 28.8
    },
    "gpu": {
-    "avg": 2.52,
-    "p50": 2.5,
-    "p95": 3.9,
-    "p99": 5.08,
-    "max": 5.08
+    "avg": 1.92,
+    "p50": 1.52,
+    "p95": 4.4,
+    "p99": 4.7,
+    "max": 5.13
    },
-   "drawCalls": 100,
-   "trianglesM": 6.13
+   "drawCalls": 126,
+   "trianglesM": 2.52,
+   "clocks": {
+    "gr": 1962,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1935,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     36,
+     43,
+     43,
+     42,
+     22,
+     11,
+     0
+    ],
+    "faces": 4578881,
+    "quads": 2141560,
+    "loading": 0,
+    "ready": 584,
+    "total": 21853,
+    "residentFaces": 14050605,
+    "evicted": 5196
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.27,
+     "p95": 4.1,
+     "max": 9.3
+    },
+    "transit": {
+     "avg": 0.05,
+     "p95": 0.3,
+     "max": 0.6
+    },
+    "traffic": {
+     "avg": 3.22,
+     "p95": 5.1,
+     "max": 6.6
+    },
+    "peds": {
+     "avg": 0.19,
+     "p95": 0.6,
+     "max": 0.8
+    },
+    "lod": {
+     "avg": 0.65,
+     "p95": 1.5,
+     "max": 4.3
+    },
+    "fleet": {
+     "avg": 0.52,
+     "p95": 0.8,
+     "max": 3.4
+    },
+    "shadowDyn": {
+     "avg": 0.62,
+     "p95": 1.3,
+     "max": 2
+    },
+    "present": {
+     "avg": 1.29,
+     "p95": 2.3,
+     "max": 3.3
+    },
+    "city": {
+     "avg": 2.95,
+     "p95": 4.8,
+     "max": 7.6
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.3,
+     "p95": 1.79,
+     "max": 4.08
+    },
+    "Mesh>fwd": {
+     "avg": 0.06,
+     "p95": 0.05,
+     "max": 1.76
+    },
+    "forward>fwd": {
+     "avg": 0.5,
+     "p95": 3.27,
+     "max": 3.71
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.26,
+     "p95": 0.91,
+     "max": 4.14
+    },
+    "city>gbuffer": {
+     "avg": 0.8,
+     "p95": 0.87,
+     "max": 0.94
+    }
+   },
+   "spikes": [
+    {
+     "t": 182767,
+     "total": 28,
+     "parts": {
+      "agents": 7.7,
+      "traffic": 6.3,
+      "lod": 2.3,
+      "fleet": 1.1,
+      "city": 7.6,
+      "present": 2.1
+     }
+    }
+   ],
+   "heapMB": 876,
+   "sim": {
+    "agents": 99930,
+    "detailed": 193,
+    "timeline": 978,
+    "parkedShown": 1067,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2560,
+    "failed": 116,
+    "promoMs": 2488,
+    "vehicles": 242,
+    "walking": 27
+   },
+   "top": null
   },
   {
    "name": "dolly",
    "path": "dolly",
    "interval": {
-    "avg": 9.72,
-    "p50": 9.7,
-    "p95": 14.8,
-    "p99": 16.4,
-    "max": 21.1
+    "avg": 16.9,
+    "p50": 16,
+    "p95": 23.7,
+    "p99": 27.4,
+    "max": 30.3
+   },
+   "hitches": {
+    "over33": 0,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
    },
    "cpu": {
-    "avg": 1.17,
-    "p50": 1.1,
-    "p95": 2.1,
-    "p99": 3.2,
-    "max": 3.7
+    "avg": 11,
+    "p50": 10.6,
+    "p95": 15.4,
+    "p99": 17.7,
+    "max": 21.7
    },
    "gpu": {
-    "avg": 3.77,
-    "p50": 4.04,
-    "p95": 6.39,
-    "p99": 9.01,
-    "max": 9.08
+    "avg": 2.55,
+    "p50": 1.96,
+    "p95": 5.67,
+    "p99": 7.39,
+    "max": 7.96
    },
-   "drawCalls": 151,
-   "trianglesM": 9.37
+   "drawCalls": 65,
+   "trianglesM": 1.58,
+   "clocks": {
+    "gr": 1964,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1950,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     56,
+     46,
+     41,
+     46,
+     27,
+     8,
+     0
+    ],
+    "faces": 4909223,
+    "quads": 2047319,
+    "loading": 0,
+    "ready": 608,
+    "total": 21853,
+    "residentFaces": 14731515,
+    "evicted": 5196
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.09,
+     "p95": 3.3,
+     "max": 8
+    },
+    "transit": {
+     "avg": 0.04,
+     "p95": 0.2,
+     "max": 0.6
+    },
+    "traffic": {
+     "avg": 3.52,
+     "p95": 5.5,
+     "max": 9
+    },
+    "peds": {
+     "avg": 0.15,
+     "p95": 0.5,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 0.62,
+     "p95": 1.4,
+     "max": 2.3
+    },
+    "fleet": {
+     "avg": 0.6,
+     "p95": 1,
+     "max": 2.1
+    },
+    "shadowDyn": {
+     "avg": 0.44,
+     "p95": 1,
+     "max": 2.1
+    },
+    "present": {
+     "avg": 1.26,
+     "p95": 2.2,
+     "max": 4.3
+    },
+    "city": {
+     "avg": 1.94,
+     "p95": 3.8,
+     "max": 5.4
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.31,
+     "p95": 1.35,
+     "max": 7.47
+    },
+    "Mesh>fwd": {
+     "avg": 0.15,
+     "p95": 1.03,
+     "max": 4.16
+    },
+    "forward>fwd": {
+     "avg": 1.41,
+     "p95": 4.79,
+     "max": 6.18
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.27,
+     "p95": 0.73,
+     "max": 5.2
+    },
+    "city>shadowCity": {
+     "avg": 1.31,
+     "p95": 1.31,
+     "max": 1.31
+    },
+    "city>gbuffer": {
+     "avg": 0.44,
+     "p95": 0.53,
+     "max": 0.62
+    }
+   },
+   "spikes": [],
+   "heapMB": 894,
+   "sim": {
+    "agents": 99930,
+    "detailed": 204,
+    "timeline": 963,
+    "parkedShown": 1512,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2640,
+    "failed": 117,
+    "promoMs": 2597,
+    "vehicles": 254,
+    "walking": 26
+   },
+   "top": null
+  },
+  {
+   "name": "street-sim",
+   "path": null,
+   "interval": {
+    "avg": 16.71,
+    "p50": 15.8,
+    "p95": 23.6,
+    "p99": 30.6,
+    "max": 34.9
+   },
+   "hitches": {
+    "over33": 2,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
+   },
+   "cpu": {
+    "avg": 9.69,
+    "p50": 9,
+    "p95": 13.8,
+    "p99": 18.5,
+    "max": 21.7
+   },
+   "gpu": {
+    "avg": 2.13,
+    "p50": 1.65,
+    "p95": 5.8,
+    "p99": 7.24,
+    "max": 8.89
+   },
+   "drawCalls": 24,
+   "trianglesM": 0.74,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     56,
+     42,
+     42,
+     46,
+     27,
+     8,
+     0
+    ],
+    "faces": 4873867,
+    "quads": 2059628,
+    "loading": 0,
+    "ready": 608,
+    "total": 21853,
+    "residentFaces": 14731515,
+    "evicted": 5196
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.17,
+     "p95": 3.6,
+     "max": 5.2
+    },
+    "transit": {
+     "avg": 0.04,
+     "p95": 0.2,
+     "max": 0.6
+    },
+    "traffic": {
+     "avg": 3.83,
+     "p95": 6.1,
+     "max": 11
+    },
+    "peds": {
+     "avg": 0.12,
+     "p95": 0.5,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 0.6
+    },
+    "fleet": {
+     "avg": 0.58,
+     "p95": 0.9,
+     "max": 2.3
+    },
+    "shadowDyn": {
+     "avg": 1.05,
+     "p95": 1.9,
+     "max": 3.3
+    },
+    "present": {
+     "avg": 1.74,
+     "p95": 3.2,
+     "max": 5.2
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.07,
+     "p95": 0.14,
+     "max": 0.43
+    },
+    "Mesh>fwd": {
+     "avg": 0.32,
+     "p95": 2.38,
+     "max": 6.42
+    },
+    "forward>fwd": {
+     "avg": 1.36,
+     "p95": 5.44,
+     "max": 8.67
+    },
+    "glow>glow": {
+     "avg": 0.02,
+     "p95": 0,
+     "max": 1.63
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.46,
+     "p95": 3.03,
+     "max": 5.58
+    }
+   },
+   "spikes": [],
+   "heapMB": 885,
+   "sim": {
+    "agents": 99930,
+    "detailed": 205,
+    "timeline": 987,
+    "parkedShown": 1512,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2723,
+    "failed": 122,
+    "promoMs": 2721,
+    "vehicles": 254,
+    "walking": 26
+   },
+   "top": null
+  },
+  {
+   "name": "schaerbeek",
+   "path": null,
+   "interval": {
+    "avg": 15.68,
+    "p50": 15,
+    "p95": 21.8,
+    "p99": 27,
+    "max": 34.1
+   },
+   "hitches": {
+    "over33": 1,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 0,
+    "longestTask": 0
+   },
+   "cpu": {
+    "avg": 8.53,
+    "p50": 8.3,
+    "p95": 12.1,
+    "p99": 15.4,
+    "max": 22.3
+   },
+   "gpu": {
+    "avg": 0.79,
+    "p50": 0.71,
+    "p95": 1.97,
+    "p99": 2.69,
+    "max": 2.82
+   },
+   "drawCalls": 6,
+   "trianglesM": 0.34,
+   "clocks": {
+    "gr": 1965,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1965,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     16,
+     2
+    ],
+    "faces": 110372,
+    "quads": 54532,
+    "loading": 0,
+    "ready": 608,
+    "total": 21853,
+    "residentFaces": 14731515,
+    "evicted": 5196
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.59,
+     "p95": 4.7,
+     "max": 12
+    },
+    "transit": {
+     "avg": 0.03,
+     "p95": 0.1,
+     "max": 0.4
+    },
+    "traffic": {
+     "avg": 3.95,
+     "p95": 6.7,
+     "max": 10.2
+    },
+    "peds": {
+     "avg": 0.09,
+     "p95": 0.4,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.3
+    },
+    "fleet": {
+     "avg": 0.22,
+     "p95": 0.6,
+     "max": 1.1
+    },
+    "shadowDyn": {
+     "avg": 0.78,
+     "p95": 1.4,
+     "max": 3.1
+    },
+    "present": {
+     "avg": 0.81,
+     "p95": 1.4,
+     "max": 5.3
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.05,
+     "p95": 0.11,
+     "max": 0.23
+    },
+    "Mesh>fwd": {
+     "avg": 0.19,
+     "p95": 1.21,
+     "max": 2.6
+    },
+    "forward>fwd": {
+     "avg": 0.32,
+     "p95": 1.25,
+     "max": 2.46
+    },
+    "glow>glow": {
+     "avg": 0.01,
+     "p95": 0.01,
+     "max": 0.65
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.23,
+     "p95": 1.19,
+     "max": 1.9
+    }
+   },
+   "spikes": [],
+   "heapMB": 890,
+   "sim": {
+    "agents": 99930,
+    "detailed": 206,
+    "timeline": 997,
+    "parkedShown": 647,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 2924,
+    "failed": 136,
+    "promoMs": 3090,
+    "vehicles": 261,
+    "walking": 19
+   },
+   "top": null
+  },
+  {
+   "name": "flyover",
+   "path": "pan",
+   "interval": {
+    "avg": 28.34,
+    "p50": 24.5,
+    "p95": 52,
+    "p99": 79.4,
+    "max": 127.1
+   },
+   "hitches": {
+    "over33": 77,
+    "over50": 19,
+    "over100": 1,
+    "longTasks": 4,
+    "longestTask": 117
+   },
+   "cpu": {
+    "avg": 16.72,
+    "p50": 14.2,
+    "p95": 30.6,
+    "p99": 53.3,
+    "max": 113.8
+   },
+   "gpu": {
+    "avg": 3.16,
+    "p50": 2.96,
+    "p95": 6.53,
+    "p99": 7.76,
+    "max": 15.43
+   },
+   "drawCalls": 105,
+   "trianglesM": 2.31,
+   "clocks": {
+    "gr": 1912,
+    "mem": 9751,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1785,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     8,
+     30,
+     24,
+     16,
+     10,
+     12,
+     2
+    ],
+    "faces": 2125427,
+    "quads": 1007581,
+    "loading": 4,
+    "ready": 471,
+    "total": 21853,
+    "residentFaces": 10872331,
+    "evicted": 5921
+   },
+   "sections": {
+    "agents": {
+     "avg": 3.23,
+     "p95": 6.2,
+     "max": 18.8
+    },
+    "transit": {
+     "avg": 0.34,
+     "p95": 0.4,
+     "max": 104.1
+    },
+    "traffic": {
+     "avg": 4.01,
+     "p95": 7.8,
+     "max": 12.9
+    },
+    "peds": {
+     "avg": 0.13,
+     "p95": 0.5,
+     "max": 0.7
+    },
+    "lod": {
+     "avg": 1.68,
+     "p95": 5,
+     "max": 64.7
+    },
+    "fleet": {
+     "avg": 0.57,
+     "p95": 1,
+     "max": 6.6
+    },
+    "shadowDyn": {
+     "avg": 0.65,
+     "p95": 1.5,
+     "max": 3.5
+    },
+    "present": {
+     "avg": 1.64,
+     "p95": 3.3,
+     "max": 6.5
+    },
+    "city": {
+     "avg": 3.8,
+     "p95": 8,
+     "max": 10.9
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.53,
+     "p95": 4.25,
+     "max": 7.67
+    },
+    "Mesh>fwd": {
+     "avg": 0.2,
+     "p95": 1.34,
+     "max": 4.41
+    },
+    "forward>fwd": {
+     "avg": 1.13,
+     "p95": 3.97,
+     "max": 6.82
+    },
+    "glow>glow": {
+     "avg": 0.01,
+     "p95": 0,
+     "max": 1.24
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.25,
+     "p95": 0.82,
+     "max": 3.78
+    },
+    "city>gbuffer": {
+     "avg": 0.85,
+     "p95": 1.22,
+     "max": 2.11
+    }
+   },
+   "spikes": [
+    {
+     "t": 213969,
+     "total": 30,
+     "parts": {
+      "agents": 7.7,
+      "traffic": 8.5,
+      "lod": 2.3,
+      "fleet": 1.1,
+      "city": 6.2,
+      "present": 2.4
+     }
+    },
+    {
+     "t": 214100,
+     "total": 29,
+     "parts": {
+      "agents": 2.3,
+      "traffic": 8.5,
+      "lod": 5.2,
+      "fleet": 2.5,
+      "city": 7.8,
+      "present": 2
+     }
+    },
+    {
+     "t": 214140,
+     "total": 26,
+     "parts": {
+      "agents": 2,
+      "traffic": 7.8,
+      "lod": 3.5,
+      "city": 7.5,
+      "present": 3.1
+     }
+    },
+    {
+     "t": 214188,
+     "total": 28,
+     "parts": {
+      "agents": 3.7,
+      "traffic": 6,
+      "lod": 7.1,
+      "city": 8.1,
+      "present": 1.5
+     }
+    },
+    {
+     "t": 214309,
+     "total": 36,
+     "parts": {
+      "agents": 4,
+      "traffic": 7.6,
+      "lod": 7.1,
+      "city": 10.9,
+      "present": 4.4
+     }
+    },
+    {
+     "t": 214403,
+     "total": 25,
+     "parts": {
+      "agents": 3.8,
+      "traffic": 7.1,
+      "lod": 4.8,
+      "city": 6,
+      "present": 2
+     }
+    },
+    {
+     "t": 214671,
+     "total": 33,
+     "parts": {
+      "agents": 2,
+      "traffic": 12.9,
+      "lod": 2.4,
+      "city": 8,
+      "shadowDyn": 1.7,
+      "present": 4.9
+     }
+    },
+    {
+     "t": 214717,
+     "total": 31,
+     "parts": {
+      "agents": 2.2,
+      "traffic": 9.3,
+      "lod": 2.7,
+      "city": 8.6,
+      "shadowDyn": 1.5,
+      "present": 5.4
+     }
+    },
+    {
+     "t": 214763,
+     "total": 31,
+     "parts": {
+      "agents": 4.5,
+      "traffic": 7.8,
+      "lod": 3.1,
+      "city": 9,
+      "present": 4.9
+     }
+    },
+    {
+     "t": 214811,
+     "total": 38,
+     "parts": {
+      "agents": 8.8,
+      "traffic": 12.5,
+      "lod": 2.1,
+      "fleet": 1.3,
+      "city": 7.9,
+      "present": 4.1
+     }
+    },
+    {
+     "t": 214871,
+     "total": 27,
+     "parts": {
+      "agents": 5.1,
+      "traffic": 10.5,
+      "lod": 3.9,
+      "city": 4.3,
+      "present": 2.2
+     }
+    },
+    {
+     "t": 215387,
+     "total": 35,
+     "parts": {
+      "agents": 4.7,
+      "traffic": 8.8,
+      "lod": 6,
+      "city": 10.5,
+      "present": 2.9
+     }
+    },
+    {
+     "t": 215538,
+     "total": 35,
+     "parts": {
+      "agents": 5.4,
+      "traffic": 10.7,
+      "lod": 2.5,
+      "city": 9.9,
+      "present": 4.3
+     }
+    },
+    {
+     "t": 215690,
+     "total": 43,
+     "parts": {
+      "agents": 5,
+      "traffic": 11.4,
+      "lod": 10.6,
+      "fleet": 1.7,
+      "city": 7.3,
+      "shadowDyn": 1.4,
+      "present": 5.1
+     }
+    },
+    {
+     "t": 215792,
+     "total": 29,
+     "parts": {
+      "agents": 3.4,
+      "traffic": 6.5,
+      "lod": 5,
+      "fleet": 2.2,
+      "city": 7.3,
+      "present": 3.3
+     }
+    },
+    {
+     "t": 215858,
+     "total": 28,
+     "parts": {
+      "agents": 2.2,
+      "traffic": 7.4,
+      "lod": 6.6,
+      "city": 7.4,
+      "present": 2.2
+     }
+    },
+    {
+     "t": 216007,
+     "total": 26,
+     "parts": {
+      "agents": 13.1,
+      "traffic": 4.1,
+      "city": 4,
+      "present": 2.4
+     }
+    },
+    {
+     "t": 216041,
+     "total": 26,
+     "parts": {
+      "agents": 6.3,
+      "traffic": 5.2,
+      "lod": 7.7,
+      "city": 3.5,
+      "present": 1.3
+     }
+    },
+    {
+     "t": 216295,
+     "total": 27,
+     "parts": {
+      "agents": 5,
+      "traffic": 5,
+      "lod": 5.2,
+      "city": 6.2,
+      "shadowDyn": 1.3,
+      "present": 3.1
+     }
+    },
+    {
+     "t": 216354,
+     "total": 26,
+     "parts": {
+      "agents": 5.1,
+      "traffic": 6.7,
+      "lod": 1.5,
+      "city": 8.4,
+      "shadowDyn": 1.1,
+      "present": 2.2
+     }
+    },
+    {
+     "t": 216444,
+     "total": 28,
+     "parts": {
+      "agents": 2,
+      "traffic": 6.4,
+      "lod": 1.3,
+      "city": 8.1,
+      "shadowDyn": 3.5,
+      "present": 5.2
+     }
+    },
+    {
+     "t": 216551,
+     "total": 91,
+     "parts": {
+      "agents": 9.1,
+      "traffic": 9,
+      "lod": 64.7,
+      "city": 5.1,
+      "present": 2.4
+     }
+    },
+    {
+     "t": 216713,
+     "total": 25,
+     "parts": {
+      "agents": 3.2,
+      "traffic": 4.1,
+      "lod": 6.9,
+      "city": 4.4,
+      "shadowDyn": 2.3,
+      "present": 4.3
+     }
+    },
+    {
+     "t": 216843,
+     "total": 33,
+     "parts": {
+      "agents": 9.4,
+      "traffic": 9.3,
+      "lod": 2.6,
+      "city": 6,
+      "shadowDyn": 1.5,
+      "present": 2.7
+     }
+    },
+    {
+     "t": 216919,
+     "total": 29,
+     "parts": {
+      "agents": 2,
+      "traffic": 10.5,
+      "fleet": 3,
+      "city": 9.2,
+      "shadowDyn": 1.3,
+      "present": 2.2
+     }
+    },
+    {
+     "t": 217067,
+     "total": 53,
+     "parts": {
+      "agents": 18.8,
+      "traffic": 9.5,
+      "lod": 7.6,
+      "city": 6.8,
+      "shadowDyn": 2.5,
+      "present": 6.5
+     }
+    },
+    {
+     "t": 217105,
+     "total": 26,
+     "parts": {
+      "agents": 5.5,
+      "traffic": 5.1,
+      "lod": 1.3,
+      "city": 8.6,
+      "shadowDyn": 1.4,
+      "present": 2.6
+     }
+    },
+    {
+     "t": 217161,
+     "total": 30,
+     "parts": {
+      "agents": 6.1,
+      "traffic": 5.2,
+      "lod": 4.4,
+      "city": 6.8,
+      "shadowDyn": 1.8,
+      "present": 4.6
+     }
+    },
+    {
+     "t": 217297,
+     "total": 31,
+     "parts": {
+      "agents": 8.2,
+      "traffic": 5.2,
+      "lod": 3.5,
+      "fleet": 1.7,
+      "city": 8.3,
+      "present": 1.9
+     }
+    },
+    {
+     "t": 218115,
+     "total": 35,
+     "parts": {
+      "agents": 3.9,
+      "traffic": 5.1,
+      "lod": 7.3,
+      "fleet": 6.6,
+      "city": 6,
+      "shadowDyn": 1.8,
+      "present": 4.1
+     }
+    },
+    {
+     "t": 218245,
+     "total": 114,
+     "parts": {
+      "agents": 2.2,
+      "transit": 104.1,
+      "traffic": 2.3,
+      "lod": 1.7,
+      "city": 1.8
+     }
+    },
+    {
+     "t": 218688,
+     "total": 28,
+     "parts": {
+      "agents": 5.1,
+      "traffic": 6.3,
+      "lod": 5.4,
+      "city": 5.6,
+      "present": 3.6
+     }
+    },
+    {
+     "t": 218986,
+     "total": 29,
+     "parts": {
+      "agents": 5.7,
+      "traffic": 7.5,
+      "lod": 1.1,
+      "city": 8,
+      "shadowDyn": 1.9,
+      "present": 3.7
+     }
+    }
+   ],
+   "heapMB": 979,
+   "sim": {
+    "agents": 99930,
+    "detailed": 94,
+    "timeline": 1126,
+    "parkedShown": 880,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 3232,
+    "failed": 148,
+    "promoMs": 3512,
+    "vehicles": 141,
+    "walking": 29
+   },
+   "top": null
+  },
+  {
+   "name": "jump-meiser",
+   "path": "jump",
+   "interval": {
+    "avg": 12.1,
+    "p50": 11.7,
+    "p95": 16.6,
+    "p99": 18.6,
+    "max": 19
+   },
+   "hitches": {
+    "over33": 0,
+    "over50": 0,
+    "over100": 0,
+    "longTasks": 1,
+    "longestTask": 51
+   },
+   "cpu": {
+    "avg": 7.34,
+    "p50": 7.1,
+    "p95": 10,
+    "p99": 11,
+    "max": 11.7
+   },
+   "gpu": {
+    "avg": 1.22,
+    "p50": 0.31,
+    "p95": 5.07,
+    "p99": 7.64,
+    "max": 7.88
+   },
+   "drawCalls": 29,
+   "trianglesM": 0.64,
+   "clocks": {
+    "gr": 1878,
+    "mem": 9701,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1605,
+    "grMaxSeen": 1965
+   },
+   "lod": {
+    "perLevel": [
+     32,
+     28,
+     31,
+     14,
+     10,
+     12,
+     2
+    ],
+    "faces": 2993729,
+    "quads": 1469087,
+    "loading": 0,
+    "ready": 619,
+    "total": 21853,
+    "residentFaces": 14063236,
+    "evicted": 5921
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.17,
+     "p95": 2.9,
+     "max": 14.6
+    },
+    "transit": {
+     "avg": 0.04,
+     "p95": 0.2,
+     "max": 0.5
+    },
+    "traffic": {
+     "avg": 2.11,
+     "p95": 3.9,
+     "max": 7.5
+    },
+    "peds": {
+     "avg": 0.08,
+     "p95": 0.5,
+     "max": 0.6
+    },
+    "lod": {
+     "avg": 0.05,
+     "p95": 0.1,
+     "max": 4.5
+    },
+    "fleet": {
+     "avg": 0.46,
+     "p95": 0.8,
+     "max": 1.2
+    },
+    "shadowDyn": {
+     "avg": 1.07,
+     "p95": 1.8,
+     "max": 2.5
+    },
+    "present": {
+     "avg": 1.47,
+     "p95": 2.4,
+     "max": 4
+    },
+    "city": {
+     "avg": 0.08,
+     "p95": 0,
+     "max": 17
+    },
+    "shadowCity": {
+     "avg": 0.06,
+     "p95": 0,
+     "max": 22.5
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.11,
+     "p95": 0.15,
+     "max": 4.92
+    },
+    "Mesh>fwd": {
+     "avg": 0.17,
+     "p95": 1.27,
+     "max": 4.72
+    },
+    "forward>fwd": {
+     "avg": 0.62,
+     "p95": 4.61,
+     "max": 7.42
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.39,
+     "p95": 2.27,
+     "max": 7.71
+    },
+    "city>gbuffer": {
+     "avg": 0.62,
+     "p95": 0.84,
+     "max": 2.04
+    }
+   },
+   "spikes": [
+    {
+     "t": 223687,
+     "total": 34,
+     "parts": {
+      "agents": 7.5,
+      "traffic": 2,
+      "lod": 4.5,
+      "city": 17,
+      "shadowDyn": 1.1,
+      "present": 1.7
+     }
+    },
+    {
+     "t": 223924,
+     "total": 36,
+     "parts": {
+      "agents": 3,
+      "traffic": 2.5,
+      "lod": 1.5,
+      "city": 4.7,
+      "shadowCity": 22.5
+     }
+    }
+   ],
+   "heapMB": 1025,
+   "sim": {
+    "agents": 99930,
+    "detailed": 53,
+    "timeline": 1171,
+    "parkedShown": 879,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 3401,
+    "failed": 151,
+    "promoMs": 3689,
+    "vehicles": 105,
+    "walking": 23
+   },
+   "top": null
+  },
+  {
+   "name": "jump-street",
+   "path": "jump",
+   "interval": {
+    "avg": 13.23,
+    "p50": 12.6,
+    "p95": 18.5,
+    "p99": 19.8,
+    "max": 74
+   },
+   "hitches": {
+    "over33": 1,
+    "over50": 1,
+    "over100": 0,
+    "longTasks": 2,
+    "longestTask": 74
+   },
+   "cpu": {
+    "avg": 8.34,
+    "p50": 8,
+    "p95": 12,
+    "p99": 13.6,
+    "max": 69.5
+   },
+   "gpu": {
+    "avg": 1.99,
+    "p50": 1.37,
+    "p95": 5.34,
+    "p99": 8.76,
+    "max": 24.92
+   },
+   "drawCalls": 24,
+   "trianglesM": 0.56,
+   "clocks": {
+    "gr": 1721,
+    "mem": 9626,
+    "grMax": 2130,
+    "memMax": 9751,
+    "grMin": 1620,
+    "grMaxSeen": 1815
+   },
+   "lod": {
+    "perLevel": [
+     36,
+     27,
+     31,
+     34,
+     25,
+     11,
+     0
+    ],
+    "faces": 3110757,
+    "quads": 1423688,
+    "loading": 0,
+    "ready": 563,
+    "total": 21853,
+    "residentFaces": 12143453,
+    "evicted": 6117
+   },
+   "sections": {
+    "agents": {
+     "avg": 2.76,
+     "p95": 5.2,
+     "max": 55.9
+    },
+    "transit": {
+     "avg": 0.21,
+     "p95": 0.3,
+     "max": 63.6
+    },
+    "traffic": {
+     "avg": 2.78,
+     "p95": 4.9,
+     "max": 10
+    },
+    "peds": {
+     "avg": 0.07,
+     "p95": 0.4,
+     "max": 0.5
+    },
+    "lod": {
+     "avg": 0.22,
+     "p95": 1.3,
+     "max": 11.1
+    },
+    "fleet": {
+     "avg": 0.41,
+     "p95": 0.7,
+     "max": 3.7
+    },
+    "shadowDyn": {
+     "avg": 0.78,
+     "p95": 1.4,
+     "max": 2.4
+    },
+    "present": {
+     "avg": 1.42,
+     "p95": 2.5,
+     "max": 9.1
+    },
+    "city": {
+     "avg": 0.2,
+     "p95": 0,
+     "max": 8.9
+    },
+    "shadowCity": {
+     "avg": 0.07,
+     "p95": 0,
+     "max": 22.1
+    }
+   },
+   "gpuPasses": {
+    "forward>shadowDyn": {
+     "avg": 0.1,
+     "p95": 0.13,
+     "max": 6.53
+    },
+    "Mesh>fwd": {
+     "avg": 0.41,
+     "p95": 3.47,
+     "max": 8.52
+    },
+    "forward>fwd": {
+     "avg": 1.18,
+     "p95": 4.29,
+     "max": 6.32
+    },
+    "glow>glow": {
+     "avg": 0,
+     "p95": 0.01,
+     "max": 0.01
+    },
+    "Render Pipeline>screen": {
+     "avg": 0.16,
+     "p95": 0.12,
+     "max": 4.15
+    },
+    "city>gbuffer": {
+     "avg": 0.73,
+     "p95": 1.4,
+     "max": 1.44
+    },
+    "city>shadowCity": {
+     "avg": 23.11,
+     "p95": 23.11,
+     "max": 23.11
+    }
+   },
+   "spikes": [
+    {
+     "t": 230260,
+     "total": 33,
+     "parts": {
+      "agents": 6.2,
+      "traffic": 3.8,
+      "lod": 11.1,
+      "fleet": 1.8,
+      "city": 6.5,
+      "present": 3
+     }
+    },
+    {
+     "t": 230442,
+     "total": 62,
+     "parts": {
+      "agents": 55.9,
+      "traffic": 2.2,
+      "present": 1.8
+     }
+    },
+    {
+     "t": 230975,
+     "total": 37,
+     "parts": {
+      "agents": 2,
+      "traffic": 2.6,
+      "lod": 1.5,
+      "city": 6.4,
+      "shadowCity": 22.1,
+      "present": 1.7
+     }
+    },
+    {
+     "t": 233481,
+     "total": 70,
+     "parts": {
+      "agents": 2.1,
+      "transit": 63.6,
+      "traffic": 1.9
+     }
+    }
+   ],
+   "heapMB": 1066,
+   "sim": {
+    "agents": 99930,
+    "detailed": 107,
+    "timeline": 1121,
+    "parkedShown": 509,
+    "replanning": 0,
+    "jumps": 2,
+    "promoted": 3546,
+    "failed": 159,
+    "promoMs": 4001,
+    "vehicles": 168,
+    "walking": 13
+   },
+   "top": null
   }
  ],
  "errors": []
