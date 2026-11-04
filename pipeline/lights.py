@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 from pyproj import Transformer
 
+from model import Model
+
 ROOT = Path(__file__).resolve().parent.parent
 CFG = tomllib.loads((ROOT / "config.toml").read_text())
 ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -25,7 +27,6 @@ ROI_NAME = ARGS[0] if ARGS else CFG["default"]
 ROI = CFG["roi"][ROI_NAME]
 RAW = ROOT / "data/raw" / f"mapillary_lights_{ROI_NAME}.json"
 CAL = ROOT / "data/cache/streetview" / ROI_NAME / "calibration.json"
-TILES = ROOT / "viewer/public/tiles" / ROI_NAME
 OUT = ROOT / "viewer/public/lights" / f"{ROI_NAME}.json"
 
 QUERY = 250.0      # m per API request
@@ -67,32 +68,6 @@ def fetch():
     print(f"{len(feats)} street-light features")
 
 
-class Model:
-    """L0 voxel classes, tile by tile on demand."""
-    def __init__(self):
-        self.man = json.loads((TILES / "manifest.json").read_text())
-        L0 = self.man["levels"][0]
-        self.vs, self.size = L0["voxelSize"], L0["size"]
-        self.files = {(t["tx"], t["ty"]): t["file"] for t in L0["tiles"]}
-        self.cache = {}
-
-    def tile(self, tx, ty):
-        if (tx, ty) not in self.cache:
-            occ = np.zeros((64, 64, self.size[2]), np.uint8)
-            f = self.files.get((tx, ty))
-            if f:
-                v = np.frombuffer((TILES / f).read_bytes(), np.uint8).reshape(-1, 8)
-                v = v[(v[:, 7] & 2) == 0]
-                occ[v[:, 0] - 1, v[:, 1] - 1, v[:, 2]] = np.maximum(v[:, 6], 1)
-            self.cache[(tx, ty)] = occ
-        return self.cache[(tx, ty)]
-
-    def column(self, x, y):
-        if not (0 <= x < self.size[0] and 0 <= y < self.size[1]):
-            return None
-        return self.tile(x // 64, y // 64)[x % 64, y % 64]
-
-
 def snap():
     feats = json.loads(RAW.read_text())
     cal = json.loads(CAL.read_text())
@@ -109,7 +84,7 @@ def snap():
         used |= near
         lamps.append(xy[near].mean(0))
 
-    m = Model()
+    m = Model(ROI_NAME)
     X0, Y0 = m.man["origin"][:2]
     vs, r = m.vs, int(round(SEARCH / m.vs))
     out, on_pole = [], 0

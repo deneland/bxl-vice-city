@@ -3,13 +3,16 @@ import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
 import { TELEMETRY, telemetry } from './telemetry';
 import { LABELS, viewMode } from './voxelMaterial';
-import { gridOrigin, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
+import { buildLanes, loadRoads, roadOverlay } from './roads';
+import { Traffic } from './traffic';
+import { baseVoxel, gridOrigin, lampLightAt, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
 import { Walk } from './walk';
 import { Inspector } from './inspect';
 import { lighting, sunDirection, sunPosition } from './sun';
 import { applyWeather, describe, fetchWeather, Precipitation, presetWeather, type Weather } from './weather';
-import { blurPx, createTiltShift, DEPTH_RATIO, focalLength, focusDistance } from './tiltshift';
+import { blurPx, DEPTH_RATIO, focalLength, focusDistance } from './tiltshift';
+import { Deferred, DYNAMIC_SHADOW_LAYER } from './deferred';
 
 telemetry.start();
 
@@ -22,7 +25,7 @@ export interface View { pos: Vec3; target: Vec3 }
 
 const params = new URLSearchParams(location.search);
 const ROI = params.get('roi') ?? 'schaerbeek';
-const SHADOWS = params.get('shadows') === '1';
+const SHADOWS = params.get('shadows') !== '0';   // ?shadows=0 to turn off
 // render every animation frame (benchmarks); default: only when something changed
 const CONTINUOUS = params.get('continuous') === '1';
 const GPU_TIMING = params.get('gpu') !== '0' && (TELEMETRY || params.get('gpu') === '1');
@@ -60,21 +63,27 @@ async function main() {
   const homeVY = (manifest.home[1] - manifest.origin[1]) / VS;
   const groundGuess = 20; // voxels above z0, refined once chunks arrive
 
-  const renderer = new THREE.WebGPURenderer({ antialias: true, trackTimestamp: GPU_TIMING });
+  const renderer = new THREE.WebGPURenderer({ antialias: false, trackTimestamp: GPU_TIMING });  // FXAA in deferred.ts
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
-  renderer.shadowMap.enabled = SHADOWS;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
   const backend = (renderer.backend as any).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
   telemetry.setEnv({ backend, gpu: await gpuName(renderer), shadows: SHADOWS, gpuTiming: GPU_TIMING,
     pixelRatio: renderer.getPixelRatio() });
 
+  renderer.info.autoReset = false;   // several render calls per frame; reset once per frame below
+  // two scenes: the static city (cached G-buffer) and the forward layer (lights, fog, moving and
+  // transparent things); see deferred.ts
+  const cityScene = new THREE.Scene();
   const scene = new THREE.Scene();
-  scene.background = SKY.clone();
+  const sky = SKY.clone();
   scene.fog = new THREE.Fog(SKY.clone(), 700, 2600);
+  // shadows (on by default, ?shadows=0 off): our own two-layer shadow maps in deferred.ts; the box covers the region from any sun direction
+  const deferred = new Deferred(renderer, SHADOWS ? { half: (Math.hypot(L0.size[0], L0.size[1]) * VS) / 2 + 60 } : undefined);
+  let cityDirty = true; // the city G-buffer must be redrawn (view mode, size)
 
   const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 6000);
   camera.position.set(-110, 120, 150);
@@ -107,32 +116,64 @@ async function main() {
   const hemi = new THREE.HemisphereLight(0xdfeeff, 0x5a5040, 1.6);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff1dc, 3.2);
-  if (SHADOWS) {
-    sun.castShadow = true;
-    // the shadow box is centred on the region and must cover it from any sun direction
-    const half = (Math.hypot(L0.size[0], L0.size[1]) * VS) / 2 + 60;
-    Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, near: 1, far: 4000 });
-    sun.shadow.mapSize.set(4096, 4096);
-    sun.shadow.bias = -0.0005;
-    sun.shadow.normalBias = 0.3;
-  }
   scene.add(sun, sun.target);
 
   const world = new THREE.Group();
   // put the home tile's lowest surface at y≈0 (known from the manifest, before loading)
   const homeTile = L0.tiles.find((t) => t.tx === Math.floor(homeVX / CH) && t.ty === Math.floor(homeVY / CH));
   world.position.set(-homeVX * VS, -(homeTile?.zmin ?? groundGuess) * VS, homeVY * VS);
-  scene.add(world);
+  cityScene.add(world);
+  // same frame for the forward layer (lamps, roads overlay, traffic)
+  const fx = new THREE.Group();
+  fx.position.copy(world.position);
+  scene.add(fx);
+  const glowScene = new THREE.Scene();   // additive light: lamp glows
+  const glowFx = new THREE.Group();
+  glowFx.position.copy(world.position);
+  glowScene.add(glowFx);
   // region centre in the scene: sun target, so the shadow box covers everything
   world.updateMatrixWorld();
   sun.target.position.set((L0.size[0] / 2) * VS + world.position.x, 0, -(L0.size[1] / 2) * VS + world.position.z);
   gridOrigin.value.copy(world.position);
+  baseVoxel.value = VS;
   let lamps: THREE.Object3D | null = null;
-  loadLamps(`lights/${ROI}.json`, world, VS, [L0.size[0], L0.size[1]]).then((m) => {
+  loadLamps(`lights/${ROI}.json`, glowFx, VS, [L0.size[0], L0.size[1]]).then((m) => {
     lamps = m;
     if (m) m.visible = night.value > 0.01;
     dirty = true;
   }).catch((e) => console.warn('street lights unavailable', e));
+  // movement network (OSM): debug overlay (R) and traffic (T)
+  const network = loadRoads(`roads/${ROI}.json`).then((net) => net && { net, lanes: buildLanes(net, VS) })
+    .catch((e) => { console.warn('road network unavailable', e); return null; });
+  let roads: THREE.Object3D | null = null;
+  const setRoads = async (on: boolean) => {
+    if (on && !roads) {
+      const n = await network;
+      if (!n) return;
+      roads = roadOverlay(n.net, n.lanes, VS);
+      fx.add(roads);
+    }
+    if (roads) roads.visible = on;
+    dirty = true;
+  };
+  if (params.get('roads') === '1') setRoads(true);
+  let traffic: Traffic | null = null;
+  let trafficOn = false;
+  const setTraffic = async (on: boolean) => {
+    trafficOn = on;
+    if (on && !traffic) {
+      const n = await network;
+      if (!n) { trafficOn = false; return; }
+      traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: 12, train: 3 },
+        deferred.litMaterial((w) => lampLightAt(w, 0.8).mul(night)));   // lit like the city, lamps at night
+      traffic.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
+      fx.add(traffic.mesh);
+    }
+    if (traffic) traffic.mesh.visible = trafficOn;
+    dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
+    dirty = true;
+  };
+  if (params.get('traffic') !== '0') setTraffic(true);
 
   // --- time of day + weather: live over Schaerbeek, or chosen with the slider ---------
   const timeInput = document.getElementById('time') as HTMLInputElement;
@@ -174,7 +215,7 @@ async function main() {
     night.value = nightFor(alt * 180 / Math.PI);
     windowsLit.value = litShare(hours);
     if (lamps) lamps.visible = night.value > 0.01;
-    (scene.background as THREE.Color).copy(l.sky);
+    sky.copy(l.sky);
     scene.fog!.color.copy(l.sky);
     document.body.style.background = '#' + l.sky.getHexString();
     const hh = Math.floor(hours), mm = Math.round((hours - hh) * 60);
@@ -281,11 +322,10 @@ async function main() {
   });
 
   // --- tilt-shift ----------------------------------------------------------
-  let tilt: THREE.RenderPipeline | null = null;
   let tiltOn = false;
   const setTilt = (on: boolean) => {
     tiltOn = on;
-    if (on && !tilt) tilt = createTiltShift(renderer, scene, camera);
+    deferred.setTilt(on);
     lod.errAt = on ? blurPx : null;   // blurred areas need less detail
     dirty = true;
   };
@@ -297,6 +337,7 @@ async function main() {
   const setMode = (labels: boolean) => {
     viewMode.value = labels ? 1 : 0;
     legend.style.display = labels ? 'block' : 'none';
+    cityDirty = true;
     telemetry.event('view-mode', { mode: labels ? 'classes' : 'colour' });
   };
   setMode(params.get('mode') === 'labels');
@@ -309,6 +350,8 @@ async function main() {
     if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
     if (e.key === 'v' || e.key === 'V') toggleWalk();
     if (e.key === 'm' || e.key === 'M') setTilt(!tiltOn);
+    if (e.key === 'r' || e.key === 'R') setRoads(!roads?.visible);
+    if (e.key === 't' || e.key === 'T') setTraffic(!trafficOn);
     if (e.key === 'Escape') inspector.clear();
     dirty = true;
   });
@@ -318,9 +361,12 @@ async function main() {
   setTilt(params.get('tilt') === '1');
   window.addEventListener('resize', () => {
     dirty = true;
+    cityDirty = true;
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    const s = renderer.getDrawingBufferSize(new THREE.Vector2());
+    deferred.setSize(s.x, s.y);
   });
 
   telemetry.setState(() => ({
@@ -335,7 +381,9 @@ async function main() {
   const lastCam = new THREE.Matrix4();
   let last = performance.now(), hudAt = 0, gpuMs = 0, gpuInFlight = false;
   let flashUntil = 0;
-  let lastTickRendered = false, rendered = 0, skipped = 0;
+  let lastTickRendered = false, rendered = 0, skipped = 0, cityRenders = 0, shadowRenders = 0;
+  const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
+  let shadowTiles = true, dynShadowDirty = true;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
@@ -348,6 +396,7 @@ async function main() {
     }
     if (walk.active) walk.update(interval / 1000);
     else controls.update();
+    if (trafficOn && traffic) traffic.update(Math.min(interval, 100) / 1000);
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
@@ -359,7 +408,8 @@ async function main() {
       focalLength.value = d * DEPTH_RATIO;
     }
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
-    if (!(CONTINUOUS || precipOn || moving || tilesChanged || dirty || snapshotRequested)) {
+    const cityChanged = CONTINUOUS || moving || tilesChanged || cityDirty;
+    if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested)) {
       // nothing changed: draw nothing, the GPU stays idle
       lastTickRendered = false;
       skipped++;
@@ -368,8 +418,29 @@ async function main() {
       return;
     }
     dirty = false;
-    if (tiltOn && tilt) tilt.render();
-    else renderer.render(scene, camera);
+    renderer.info.reset();
+    if (cityChanged) {   // the expensive part: only when the city on screen changed
+      deferred.renderCity(cityScene, camera);
+      cityDirty = false;
+      cityRenders++;
+    }
+    deferred.sync(camera, sun, hemi, scene.fog as THREE.Fog, sky);
+    if (deferred.shadows) {
+      // city shadows: when the sun moved noticeably, or other tiles were loaded (once loading settles)
+      if (tilesChanged) shadowTiles = true;
+      const sunMoved = deferred.sunDir.value.angleTo(shadowSun) > 0.005;
+      if (sunMoved || (shadowTiles && !moving && !lod.stats.loading)) {
+        deferred.renderStaticShadow(cityScene, sun.target.position);
+        shadowSun.copy(deferred.sunDir.value);
+        shadowTiles = false;
+        shadowRenders++;
+      }
+      if (trafficOn || dynShadowDirty) {   // vehicles, around what you look at
+        deferred.renderDynamicShadow(scene, walk.active ? camera.position : controls.target);
+        dynShadowDirty = trafficOn;
+      }
+    }
+    deferred.present(scene, glowScene, camera);
     rendered++;
     const cpu = performance.now() - now;
     // a frame interval only means something if the previous tick also rendered
@@ -411,7 +482,7 @@ async function main() {
     const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0;
     hud.textContent =
       (lastTickRendered && avg ? `${backend} · ${(1000 / avg).toFixed(0)} fps · avg ${avg.toFixed(1)} ms · p99 ${p99.toFixed(1)} ms` : `${backend} · idle, nothing to draw`) +
-      ` · ${rendered} frames drawn, ${skipped} skipped` +
+      ` · ${rendered} frames drawn (city ${cityRenders}), ${skipped} skipped` +
       (GPU_TIMING ? ` · gpu ${gpuMs.toFixed(2)} ms` : '') + '\n' +
       `tiles ${lod.stats.perLevel.map((n, l) => `L${l}:${n}`).join(' ')} · ${(lod.stats.faces / 1e6).toFixed(2)}M faces · ` +
       `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
@@ -423,10 +494,10 @@ async function main() {
 
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
-    renderer, scene, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
-    setTime, setTilt, toggleWalk,
+    renderer, scene, cityScene, deferred, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
+    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; },
     whenIdle: () => lod.whenIdle(),
-    info: () => ({ backend, ...lod.stats, loadMs,
+    info: () => ({ backend, ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
   };
 }

@@ -2,10 +2,10 @@
 // shader expands a unit quad into the right face from packed attributes.
 import * as THREE from 'three/webgpu';
 import {
-  attribute, float, floor, hash, mod, mix, positionGeometry, positionWorld, pow, select, smoothstep, uniform, varying,
+  attribute, float, floor, hash, mod, mix, mrt, positionGeometry, positionWorld, pow, select, smoothstep, uniform, varying,
   vec2, vec3, vec4,
 } from 'three/tsl';
-import { LAMP_COLOR, gridOrigin, gridSize, lampMap, night, windowsLit } from './nightlights';
+import { gridOrigin, lampLightAt } from './nightlights';
 
 // semantic class per voxel (pipeline voxelize.py SEM_*: LiDAR class refined by street-level labels)
 export const LABELS: [number, string, number][] = [
@@ -33,8 +33,8 @@ const axisVec = (i: any) =>
   vec3(select(i.equal(0), 1, 0), select(i.equal(1), 1, 0), select(i.equal(2), 1, 0));
 
 export function createVoxelMaterial(voxelSize: number, baseSize = voxelSize) {
-  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.92, metalness: 0 });
-  m.flatShading = true;
+  // unlit: writes the G-buffer (deferred.ts lights it); `output` is the albedo
+  const m = new THREE.MeshBasicNodeMaterial({ fog: false });
 
   const packed = attribute('packed', 'vec2');
   const rgba = attribute('rgba', 'vec4');
@@ -75,25 +75,28 @@ export function createVoxelMaterial(voxelSize: number, baseSize = voxelSize) {
   // --- night lights (see nightlights.ts) ---
   // street lamps: light map over the ground plan, fading out above lamp height
   const rel = positionWorld.sub(gridOrigin);                             // metres from voxel (0,0,0)
-  const lm = lampMap.sample(vec2(rel.x, rel.z.negate()).div(gridSize));
-  const above = rel.y.sub(lm.g.mul(255 * baseSize));
-  const fall = float(1).sub(smoothstep(2.5, 9, above)).mul(smoothstep(-1, 0, above));
   const up = select(dir.equal(4), float(1), float(0.6));
-  const lampLight = varying(up, 'vUp').mul(lm.r).mul(fall).mul(1.6);
+  const lampLight = lampLightAt(positionWorld, varying(up, 'vUp'));
   // lit windows: dark (glass) photo-coloured facade voxels, per window cell (1.5 m wide, 3 m floor) on or off
   const isFacade = varying(select(label.equal(1).and(bits(packed.y, 21, 1).equal(1)).and(dir.lessThan(4)), 1, 0), 'vFacade');
   const xAxis = varying(select(axis.equal(0), 1, 0), 'vXAxis');                // face normal along east-west
   const v = rel.div(baseSize).mul(vec3(1, 1, -1));                            // L0 voxels: x east, y up, z north
   const along = mix(v.x, v.z, xAxis), across = mix(v.z, v.x, xAxis);
   const cell = floor(along.div(3)).add(floor(v.y.sub(0.01).div(6)).mul(101)).add(floor(across.add(0.5).div(2)).mul(7919));
-  const lit = select(hash(cell).lessThan(windowsLit), 1, 0);
   const glass = float(1).sub(smoothstep(0.18, 0.32, lum));                    // photo colour is dark: window
-  const warm = select(hash(cell.add(17)).lessThan(0.8), vec3(1.0, 0.62, 0.3), vec3(0.55, 0.7, 1.0));
-  const windowLight = warm.mul(lit).mul(glass).mul(isFacade).mul(1.4);
   // shop signs glow
   const sign = varying(select(label.equal(2), 1, 0), 'vSign');
-  const lampCol = vec3(LAMP_COLOR.r, LAMP_COLOR.g, LAMP_COLOR.b);
-  m.emissiveNode = col.mul(lampCol.mul(lampLight).add(sign.mul(1.5))).mul(ao).add(windowLight).mul(night)
-    .mul(float(1).sub(viewMode));
+  const colourView = float(1).sub(viewMode);
+  // face normal in scene space (dir: 0 +x, 1 -x, 2 north = -z, 3 south = +z, 4 up, 5 down)
+  const normal = varying(vec3(
+    select(dir.equal(0), 1, select(dir.equal(1), -1, 0)),
+    select(dir.equal(4), 1, select(dir.equal(5), -1, 0)),
+    select(dir.equal(2), -1, select(dir.equal(3), 1, 0))), 'vNormal');
+  // G-buffer (deferred.ts): emissive at full night strength + the window cell's random code;
+  // normal + how much the voxel is a window. Night factor and lit share are applied when resolving.
+  m.mrtNode = mrt({
+    emissive: vec4(col.mul(lampLight.add(sign.mul(1.5))).mul(ao).mul(colourView), hash(cell)),
+    normal: vec4(normal, glass.mul(isFacade).mul(colourView)),
+  });
   return m;
 }

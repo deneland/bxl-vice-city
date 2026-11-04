@@ -3,7 +3,8 @@
 // Lit windows and shop signs are emissive terms in voxelMaterial.ts driven by the uniforms here.
 import * as THREE from 'three/webgpu';
 import {
-  cameraProjectionMatrix, exp, float, modelViewMatrix, positionGeometry, texture, uniform, vec3, vec4, attribute,
+  cameraProjectionMatrix, exp, float, modelViewMatrix, positionGeometry, smoothstep, texture, uniform, vec2, vec3, vec4,
+  attribute,
 } from 'three/tsl';
 
 /** 0 by day, 1 at night: lamps and windows fade in around sunset */
@@ -17,6 +18,18 @@ export const gridSize = uniform(new THREE.Vector2(1, 1));
 /** light map: r = lamp light on the ground (0..1), g = ground height of the nearest lamps (voxels / 255) */
 export const lampMap = texture(new THREE.DataTexture(new Uint8Array(4), 1, 1));
 export const LAMP_COLOR = new THREE.Color(1.0, 0.72, 0.42);   // warm white (linear)
+/** L0 voxel size (m), for the ground heights in the light map */
+export const baseVoxel = uniform(0.5);
+
+/** street-lamp light (at full night strength, multiply by albedo) at a scene position; `up` 1 for
+ *  upward-facing surfaces, less for walls */
+export function lampLightAt(world: any, up: any) {
+  const rel = world.sub(gridOrigin);                                       // metres from voxel (0,0,0)
+  const lm = lampMap.sample(vec2(rel.x, rel.z.negate()).div(gridSize));
+  const above = rel.y.sub(lm.g.mul(baseVoxel.mul(255)));                   // height above the lamps' ground
+  const fall = float(1).sub(smoothstep(2.5, 9, above)).mul(smoothstep(-1, 0, above));
+  return vec3(LAMP_COLOR.r, LAMP_COLOR.g, LAMP_COLOR.b).mul(lm.r.mul(fall).mul(up).mul(1.6));
+}
 
 const POOL = 14;   // m; radius of a lamp's light on the ground
 
@@ -69,6 +82,7 @@ export async function loadLamps(url: string, world: THREE.Object3D, vs: number, 
   lamps.forEach(([x, y, , zh], i) => centers.set([(x + 0.5) * vs, (zh + 0.5) * vs, -(y + 0.5) * vs], i * 3));
   g.setAttribute('center', new THREE.InstancedBufferAttribute(centers, 3));
   g.instanceCount = lamps.length;
+  // drawn in the additive glow layer (deferred.ts)
   const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
   const SIZE = 3;   // m
   const view = modelViewMatrix.mul(vec4(attribute('center', 'vec3'), 1));

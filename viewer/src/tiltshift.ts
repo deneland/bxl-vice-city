@@ -1,8 +1,6 @@
 // Miniature look: very shallow depth of field focused on what you look at, plus a little extra
-// saturation. A real city photographed with the depth of field of a macro lens reads as a scale model.
-import * as THREE from 'three/webgpu';
-import { pass, saturation, uniform, vec4 } from 'three/tsl';
-import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
+// saturation (applied in deferred.ts). A real city photographed with the depth of field of a macro lens reads as a scale model.
+import { uniform } from 'three/tsl';
 
 /** distance from the camera to the sharp plane, metres (set every frame) */
 export const focusDistance = uniform(100);
@@ -21,13 +19,4 @@ export function blurPx(dmin: number, dmax: number) {
   const gap = Math.min(Math.abs(dmin - f), Math.abs(dmax - f));
   const t = Math.min(1, gap / fl), coc = t * t * (3 - 2 * t);
   return 4 * BOKEH * coc;
-}
-
-export function createTiltShift(renderer: THREE.WebGPURenderer, scene: THREE.Scene, camera: THREE.Camera) {
-  const scenePass = pass(scene, camera, { samples: 4 });
-  const col = scenePass.getTextureNode('output');
-  const blurred: any = dof(col, scenePass.getViewZNode(), focusDistance, focalLength, BOKEH);
-  const pipeline = new THREE.RenderPipeline(renderer);
-  pipeline.outputNode = vec4(saturation(blurred.rgb, 1.3), 1);
-  return pipeline;
 }

@@ -1,0 +1,155 @@
+"""Movement network from OpenStreetMap: drivable roads, tram and rail tracks as a graph
+(intersections + edges), with heights from the voxel ground -> viewer/public/roads/<roi>.json.
+
+Edges are split at every node shared by two or more ways. Per edge: start/end node, kind, one-way,
+speed (km/h), lanes, and the centreline as voxel coordinates (x east, y north, z = ground surface),
+resampled every SAMPLE m. One-way edges point in the driving direction.
+
+Usage: uv run python roads.py [roi-name] [--refetch]
+Map data © OpenStreetMap contributors, ODbL.
+"""
+import json
+import sys
+import time
+import tomllib
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import numpy as np
+from pyproj import Transformer
+
+from model import Model
+
+ROOT = Path(__file__).resolve().parent.parent
+CFG = tomllib.loads((ROOT / "config.toml").read_text())
+ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
+ROI_NAME = ARGS[0] if ARGS else CFG["default"]
+ROI = CFG["roi"][ROI_NAME]
+RAW = ROOT / "data/raw" / f"osm_roads_{ROI_NAME}.json"
+OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
+
+ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
+         "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
+KIND = {"road": 0, "tram": 1, "rail": 2}
+DEFAULT_SPEED = {"living_street": 20, "primary": 50, "trunk": 50, "motorway": 90}   # else 30 (Brussels zone 30)
+SAMPLE = 2.0      # m between height samples
+MARGIN = 20.0     # m around the region
+
+to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
+to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
+
+
+def fetch():
+    corners = [to_wgs.transform(x, y) for x in (ROI["xmin"] - MARGIN, ROI["xmax"] + MARGIN)
+               for y in (ROI["ymin"] - MARGIN, ROI["ymax"] + MARGIN)]
+    lo = (min(c[1] for c in corners), min(c[0] for c in corners))
+    hi = (max(c[1] for c in corners), max(c[0] for c in corners))
+    bb = f"{lo[0]:.6f},{lo[1]:.6f},{hi[0]:.6f},{hi[1]:.6f}"
+    q = (f'[out:json][timeout:120];(way["highway"~"^({"|".join(ROADS)})$"]({bb});'
+         f'way["railway"~"^(tram|rail|light_rail)$"]({bb}););out body;>;out skel qt;')
+    req = urllib.request.Request("https://overpass-api.de/api/interpreter",
+                                 data=urllib.parse.urlencode({"data": q}).encode(),
+                                 headers={"User-Agent": "bxl-vice-voxel/0.1"})
+    for i in range(5):            # the public Overpass server is often briefly overloaded (502/504)
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                RAW.write_bytes(r.read())
+            return
+        except Exception as e:
+            print(f"overpass: {e}; retrying")
+            time.sleep(10 * (i + 1))
+    raise SystemExit("overpass unavailable")
+
+
+def speed(t):
+    s = t.get("maxspeed", "")
+    if s.isdigit():
+        return int(s)
+    if t.get("railway") == "tram":
+        return 30
+    if t.get("railway"):
+        return 60
+    return DEFAULT_SPEED.get(t.get("highway", "").replace("_link", ""), 30)
+
+
+def build():
+    els = json.loads(RAW.read_text())["elements"]
+    nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    ways = [e for e in els if e["type"] == "way" and e["tags"].get("tunnel") not in ("yes", "building_passage")
+            and e["tags"].get("access") not in ("no", "private") and e["tags"].get("service") is None]
+    use = {}
+    for w in ways:
+        for n in w["nodes"]:
+            use[n] = use.get(n, 0) + 1
+
+    m = Model(ROI_NAME)
+    X0, Y0 = m.man["origin"][:2]
+    vs = m.vs
+
+    def ground(px, py, bridge):
+        """ground surface (voxels) at a point: median over a small patch of the top ground voxel per column
+        (bridges: top of anything solid)"""
+        cx, cy = int(px), int(py)
+        zs = []
+        for dx in (-2, 0, 2):
+            for dy in (-2, 0, 2):
+                c = m.column(cx + dx, cy + dy)
+                if c is None:
+                    continue
+                k = np.flatnonzero(c != 0 if bridge else c == 2)
+                if len(k):
+                    zs.append(k.max() + 1)
+        return float(np.median(zs)) if zs else np.nan
+
+    node_ix, node_xy = {}, []
+    edges, stats = [], {"road": 0, "tram": 0, "rail": 0}
+    for w in ways:
+        t = w["tags"]
+        kind = "road" if "highway" in t else ("tram" if t["railway"] == "tram" else "rail")
+        ow = t.get("oneway")
+        oneway = 1 if ow in ("yes", "1", "true", "-1") or t.get("junction") == "roundabout" else 0
+        ids = w["nodes"][::-1] if ow == "-1" else w["nodes"]
+        bridge = t.get("bridge") not in (None, "no") or t.get("layer", "0") not in ("0", "-1", "-2")
+        lanes = int(t["lanes"]) if t.get("lanes", "").isdigit() else (1 if oneway else 2)
+        # split at shared nodes
+        cuts = [0] + [i for i in range(1, len(ids) - 1) if use[ids[i]] > 1] + [len(ids) - 1]
+        for a, b in zip(cuts, cuts[1:]):
+            seg = ids[a:b + 1]
+            xy = np.array([nodes[n] for n in seg])
+            v = (xy - [X0, Y0]) / vs                       # voxel coordinates
+            inside = (v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])
+            if not inside.any():
+                continue
+            # resample every SAMPLE m
+            d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
+            n = max(1, int(np.ceil(d[-1] / SAMPLE)))
+            s = np.unique(np.r_[np.linspace(0, d[-1], n + 1), d])
+            p = np.c_[np.interp(s, d, v[:, 0]), np.interp(s, d, v[:, 1])]
+            z = np.array([ground(px, py, bridge) for px, py in p])
+            if np.isnan(z).all():
+                continue
+            ok = ~np.isnan(z)
+            z = np.interp(np.arange(len(z)), np.flatnonzero(ok), z[ok])
+            z = np.convolve(np.pad(z, 2, mode="edge"), np.ones(5) / 5, mode="valid")    # smooth kerb steps
+            for nid in (seg[0], seg[-1]):
+                if nid not in node_ix:
+                    node_ix[nid] = len(node_xy)
+                    node_xy.append(None)
+            node_xy[node_ix[seg[0]]] = [*p[0], z[0]]
+            node_xy[node_ix[seg[-1]]] = [*p[-1], z[-1]]
+            edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
+                          [round(float(c), 1) for c in np.c_[p, z].ravel()]])
+            stats[kind] += d[-1]
+    out = {"build": m.man["build"], "nodes": [[round(float(c), 1) for c in xyz] for xyz in node_xy],
+           "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz..."]}
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(out, separators=(",", ":")))
+    print(f"{len(node_xy)} nodes, {len(edges)} edges; road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "
+          f"rail {stats['rail'] / 1000:.1f} km -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
+
+
+if __name__ == "__main__":
+    if "--refetch" in sys.argv or not RAW.exists():
+        fetch()
+    build()
