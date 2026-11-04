@@ -10,15 +10,23 @@ Works in 256 m blocks so memory does not grow with the region:
             b. per column: ground height (class 2, holes filled from nearest) and building top
             c. buildings and terrain made solid, only the visible shell is kept
             d. wall voxels coloured from nearby facade points; loose facade voxels absorbed
-               (then: parked vehicles from geometry; isolated clusters with < SPECK_POINTS points dropped)
-            e. levels L0..L3 (0.5..4 m) built and written as 64x64-column tiles; the
+            e. parked vehicles found in the geometry: removed (their footprints and colours kept for
+               parking.py / vehicles.py), the road under them coloured like the open road around
+            f. tidy: low loose clutter dropped; in the street zones (roads.py network) also what is left
+               of 2021's traffic on the carriageway and clutter on the pavements
+            g. isolated specks (clusters backed by < SPECK_POINTS points) dropped
+            then levels L0..L3 (0.5..4 m) built and written as 64x64-column tiles; the
                margin supplies each tile's 1-voxel apron across block seams
   pass 3  levels above L3 (one tile spans several blocks) built from the collected L3 voxels
 
 Tile (tx,ty) at level L has children (2tx..2tx+1, 2ty..2ty+1) at L-1.
 
-Usage: uv run python voxelize.py [roi-name] [--jobs=N] [--no-photo]   (default region from config.toml)
+Usage: uv run python voxelize.py [roi-name] [--jobs=N] [--no-photo] [--keep-vehicles] [--no-tidy]
+                                 [--no-street-tidy]   (default region from config.toml)
   merges data/cache/streetview/<roi>/layer.npz (streetview.py) when present
+  --keep-vehicles   leave 2021's parked cars in the geometry
+  --no-tidy         keep low loose clutter and floating specks; --no-street-tidy: no street zones
+  SPECK_POINTS=n    (environment) speck threshold in LiDAR points; 0: keep specks
 
 Builds into <name>.building and swaps it in at the end, so a running viewer never
 sees a half-written build; the manifest carries a build id for cache busting.
@@ -306,7 +314,7 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
         return np.zeros(len(key), bool)
     drop = m & (pts[vl] < SPECK_POINTS)
     st["specks"] += int(drop.sum())
-    if STREET_TIDY:   # small clusters floating in the air (birds, cable bits, scanner noise)
+    if TIDY:   # small clusters floating in the air (birds, cable bits, scanner noise)
         nvox = np.bincount(vl[m], minlength=n + 1)
         h = vz - ground[vy, vx]
         hmin = np.full(n + 1, 1 << 30)
@@ -319,8 +327,56 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
     return drop
 
 
+def tidy_candidates(akey, acls, aflag, ground, is_bld, gx0, gy0, GW, GH, st):
+    """voxels of a block to drop unless the street photos recognise them:
+      - low (<= TIDY_H) unclassified voxels not part of a taller structure nor attached to a building
+      - (street tidy) in the carriageway: unclassified up to ROAD_H unless part of something reaching above it
+        (trees, lamp posts, poles); on pavements: low clutter also next to the facades (bikes, bins)"""
+    ax, ay, az = akey % GW, (akey // GW) % GH, akey // (GW * GH)
+    u = (acls == C_UNCLASSIFIED) & (aflag & FLAG_FILL == 0)
+    h = az - ground[ay, ax]
+    low = u & (h <= TIDY_H)
+    labels = None
+
+    def reaching_above(sel, hmin):
+        """of the voxels in sel: part of a 26-connected unclassified structure reaching above hmin"""
+        nonlocal labels
+        if labels is None:   # (one labelling per block for both questions)
+            uz0 = int(az[u].min())
+            grid = np.zeros((int(az[u].max()) - uz0 + 1, GH, GW), bool)
+            grid[az[u] - uz0, ay[u], ax[u]] = True
+            labels = (*ndimage.label(grid, structure=np.ones((3, 3, 3))), uz0)
+        lab, n, uz0 = labels
+        tall = np.zeros(n + 1, bool)
+        hi = u & (h > hmin)
+        tall[lab[az[hi] - uz0, ay[hi], ax[hi]]] = True
+        tall[0] = False
+        return tall[lab[az[sel] - uz0, ay[sel], ax[sel]]]
+
+    part_of_tall = np.zeros(len(akey), bool)
+    if low.any():
+        part_of_tall[low] = reaching_above(low, TIDY_H)
+        cand = low & ~part_of_tall & ~ndimage.binary_dilation(is_bld, iterations=2)[ay, ax]
+    else:
+        cand = low
+    zb = zones_block(gx0, gy0, GW, GH)
+    if zb is not None and u.any():
+        zone = zb[ay, ax]
+        rz = u & (zone == Z_ROAD) & (h <= ROAD_H)
+        if rz.any():
+            road_c = np.zeros(len(akey), bool)
+            road_c[np.flatnonzero(rz)[~reaching_above(rz, ROAD_H + 1)]] = True
+            st["street_road"] = st.get("street_road", 0) + int(road_c.sum())
+            cand = cand | road_c
+        if low.any():
+            pv = low & ~part_of_tall & (zone == Z_PAVE) & ~cand
+            st["street_pave"] = st.get("street_pave", 0) + int(pv.sum())
+            cand = cand | pv
+    return cand
+
+
 def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: float, st: dict) -> Vox:
-    """Steps a-d on one block (+margin). Returns L0 voxels in global column coords."""
+    """Steps a-g on one block (+margin). Returns L0 voxels in global column coords."""
     x, y, z = p["x"].astype(np.float64), p["y"].astype(np.float64), p["z"].astype(np.float64)
     rgb = np.stack([p["r"], p["g"], p["b"]], 1)
     cls = p["c"]
@@ -478,63 +534,20 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     aflag = np.concatenate([np.zeros(len(vkey), np.uint8), fflag[new]])
     acnt = np.concatenate([cnt, np.full(int(new.sum()), 1 << 20)])   # fill voxels: solid by construction
 
-    # (--tidy) low, loose unclassified voxels: candidates to drop unless the photos recognise them
-    cand = None
-    if TIDY:
-        ax, ay, az = akey % GW, (akey // GW) % GH, akey // (GW * GH)
-        u = (acls == C_UNCLASSIFIED) & (aflag & FLAG_FILL == 0)
-        low = u & (az - ground[ay, ax] <= TIDY_H)
-        # parts of taller structures: 26-connected unclassified voxels reaching above TIDY_H
-        if low.any():
-            uz0 = int(az[u].min()); nzz = int(az[u].max()) - uz0 + 1
-            gridu = np.zeros((nzz, GH, GW), bool)
-            gridu[az[u] - uz0, ay[u], ax[u]] = True
-            labu, nu = ndimage.label(gridu, structure=np.ones((3, 3, 3)))
-            tall = np.zeros(nu + 1, bool)
-            hi = u & (az - ground[ay, ax] > TIDY_H)
-            tall[labu[az[hi] - uz0, ay[hi], ax[hi]]] = True
-            tall[0] = False
-            part_of_tall = np.zeros(len(akey), bool)
-            part_of_tall[low] = tall[labu[az[low] - uz0, ay[low], ax[low]]]
-            attached = ndimage.binary_dilation(is_bld, iterations=2)[ay, ax]
-            cand = low & ~part_of_tall & ~attached
-        else:
-            cand = low
-        zb = zones_block(gx0, gy0, GW, GH)
-        if zb is not None and u.any():
-            zone = zb[ay, ax]
-            # carriageway: up to ROAD_H, unless part of something reaching above it (trees, lamp posts, poles)
-            rz = u & (zone == Z_ROAD) & (az - ground[ay, ax] <= ROAD_H)
-            if rz.any():
-                uz0 = int(az[u].min()); nzz = int(az[u].max()) - uz0 + 1
-                gridu = np.zeros((nzz, GH, GW), bool)
-                gridu[az[u] - uz0, ay[u], ax[u]] = True
-                labu, nu = ndimage.label(gridu, structure=np.ones((3, 3, 3)))
-                tall2 = np.zeros(nu + 1, bool)
-                hi2 = u & (az - ground[ay, ax] > ROAD_H + 1)
-                tall2[labu[az[hi2] - uz0, ay[hi2], ax[hi2]]] = True
-                tall2[0] = False
-                keep = tall2[labu[az[rz] - uz0, ay[rz], ax[rz]]]
-                road_c = np.zeros(len(akey), bool)
-                road_c[np.flatnonzero(rz)[~keep]] = True
-                st["street_road"] = st.get("street_road", 0) + int(road_c.sum())
-                cand = cand | road_c
-            # pavements: low clutter also next to the facade (bikes, bins against walls)
-            if low.any():
-                pv = low & ~part_of_tall & (zone == Z_PAVE) & ~cand
-                st["street_pave"] = st.get("street_pave", 0) + int(pv.sum())
-                cand = cand | pv
-        if cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
-            cc = np.zeros((GH, GW), bool)
-            cc[ay[cand], ax[cand]] = True
-            ccd = ndimage.binary_dilation(cc, iterations=2)
-            open_r = has_ground & ~canopy & ~ccd
-            if open_r.any():
-                road = open_colour(gcol, open_r)
-                gs = (acls == C_GROUND) & ccd[ay, ax]
-                acol[gs] = road[ay[gs], ax[gs]]
+    # f. tidy: low, loose unclassified voxels are candidates to drop (unless the photos recognise them)
+    cand = tidy_candidates(akey, acls, aflag, ground, is_bld, gx0, gy0, GW, GH, st) if TIDY else None
+    if cand is not None and cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
+        ax, ay = akey % GW, (akey // GW) % GH
+        cc = np.zeros((GH, GW), bool)
+        cc[ay[cand], ax[cand]] = True
+        ccd = ndimage.binary_dilation(cc, iterations=2)
+        open_r = has_ground & ~canopy & ~ccd
+        if open_r.any():
+            road = open_colour(gcol, open_r)
+            gs = (acls == C_GROUND) & ccd[ay, ax]
+            acol[gs] = road[ay[gs], ax[gs]]
 
-    # f. isolated specks: small clusters (not counting the ground they stand on) backed by few points
+    # g. isolated specks: small clusters (not counting the ground they stand on) backed by few points
     drop = specks(akey, acls, acnt, ground, GW, GH, st)
     akey, acol, acls, aflag = akey[~drop], acol[~drop], acls[~drop], aflag[~drop]
     if cand is not None:
