@@ -104,6 +104,7 @@ interface Path {
   next: Map<Path, Path>;       // next lane -> junction curve
   approach: Approach | null;   // how this lane enters the junction at its end
   crossings: { s: number; sig: Signal }[];   // pedestrian-crossing lights along the lane
+  zebras: { s: number; key: number }[];      // mapped crosswalks along the lane (give way to people on them)
   // junction curves
   junction: Junction | null; from: Path | null; to: Path | null; turn: number;   // turn: heading change, rad
 }
@@ -118,7 +119,7 @@ export interface TransitRun {
   next: number;   // next stop to serve
 }
 
-interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null }
+interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null; lightS: number }   // lightS: where its light stands
 interface Junction { occ: Set<Vehicle>; conflicts: Map<Path, Map<Path, boolean>>; signalled: boolean }
 interface Signal { cycle: number; offset: number; phases: [number, number][]; state: number }   // phases: [from, to) green
 
@@ -177,7 +178,7 @@ function makePath(pts: Float32Array, speed: number, kind: number): Path {
     cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
   const length = cum[cum.length - 1];
   return { pts, cum, length, vmax: curveLimits(pts, cum), speed, kind, start: 0, end: length, occ: [],
-    lane: null, next: new Map(), approach: null, crossings: [], junction: null, from: null, to: null, turn: 0 };
+    lane: null, next: new Map(), approach: null, crossings: [], zebras: [], junction: null, from: null, to: null, turn: 0 };
 }
 
 /** travel direction (x, z) at s */
@@ -311,26 +312,23 @@ export class Traffic {
       incoming.get(l.to)!.push(p);
     }
     // --- junctions, approaches, signals ---
+    const signalledAt = new Set<number>();   // nodes of signalled junctions
     for (const ins of incoming.values()) {
       const j: Junction = { occ: new Set(), conflicts: new Map(), signalled: false };
       for (const p of ins) {
         const near = p.lane!.controls.filter((c) => c.s > p.length - APPROACH);
-        if (p.kind === KIND.road && near.some((c) => c.code === CONTROL.signals)) j.signalled = true;
+        // signalled: a light on the approach, or on the junction node itself (OSM maps both ways)
+        if (p.kind === KIND.road && (p.lane!.toSignal || near.some((c) => c.code === CONTROL.signals))) j.signalled = true;
+        const light = near.filter((c) => c.code === CONTROL.signals).pop();   // (the one nearest the junction)
         p.approach = { junction: j, rank: p.lane!.rank, dir: heading(p, p.end), signal: null,
-          yields: near.some((c) => c.code === CONTROL.giveWay || c.code === CONTROL.stop) };
-        // signals further from the junction: pedestrian crossings
-        if (p.kind === KIND.road)
-          for (const c of p.lane!.controls)
-            if (c.code === CONTROL.signals && c.s <= p.length - APPROACH && c.s > p.start + 5) {
-              const g = 35 + Math.random() * 35;
-              const sig: Signal = { cycle: g + 15, offset: Math.random() * 100, phases: [[0, g]], state: GREEN };
-              this.signals.push(sig);
-              p.crossings.push({ s: c.s, sig });
-            }
+          yields: near.some((c) => c.code === CONTROL.giveWay || c.code === CONTROL.stop),
+          lightS: light ? Math.min(light.s, p.end) : p.end };
       }
+      if (j.signalled) signalledAt.add(ins[0].lane!.to);
       if (!j.signalled) continue;
       // two groups of approaches by axis: green for one, then the other (3 s amber, 2 s all red)
       const roads = ins.filter((p) => p.kind === KIND.road);
+      if (!roads.length) continue;
       const ref = roads[0].approach!.dir;
       const g0 = 18 + Math.random() * 8, g1 = 15 + Math.random() * 8, cycle = g0 + g1 + 10, offset = Math.random() * 60;
       const groups: Signal[] = [
@@ -339,6 +337,26 @@ export class Traffic {
       ];
       this.signals.push(...groups);
       for (const p of roads) p.approach!.signal = groups[Math.abs(p.approach!.dir.dot(ref)) > 0.6 ? 0 : 1];
+    }
+    // signals along a lane, away from junctions: pedestrian-crossing lights. Not the ones just past a
+    // signalled junction (they run with its phases: cars that crossed on green used to stop there)
+    for (const p of this.paths) {
+      if (p.kind !== KIND.road) continue;
+      const after = signalledAt.has(p.lane!.from) ? p.start + 20 : p.start + 5;
+      for (const c of p.lane!.controls)
+        if (c.code === CONTROL.signals && c.s <= p.length - APPROACH && c.s > after) {
+          const g = 35 + Math.random() * 35;
+          const sig: Signal = { cycle: g + 15, offset: Math.random() * 100, phases: [[0, g]], state: GREEN };
+          this.signals.push(sig);
+          p.crossings.push({ s: c.s, sig });
+        }
+      // mapped crosswalks: cars give way to people on them (those in the junction's trimmed ends: at its edge)
+      for (const z of p.lane!.crosswalks) {
+        const zs = Math.min(Math.max(z.s, p.start + 0.5), p.end - 0.5);
+        p.zebras.push({ s: zs, key: z.key });
+        if (!this.zebraAt.has(z.key)) this.zebraAt.set(z.key, []);
+        this.zebraAt.get(z.key)!.push({ p, s: zs });
+      }
     }
     // --- trip ends: kerbside (weighted by length) and region-edge entries / exits ---
     const roads = this.paths.filter((p) => p.kind === KIND.road && p.end - p.start > 30 && !p.lane!.bikeOnly);
@@ -369,7 +387,7 @@ export class Traffic {
       return sample(p, s, new THREE.Vector3()).add(new THREE.Vector3(-h.y * d, 2.6, h.x * d));
     };
     for (const p of this.paths) {
-      if (p.approach?.signal) heads.push({ pos: right(p, p.end, 2.2), sig: p.approach.signal });
+      if (p.approach?.signal) heads.push({ pos: right(p, p.approach.lightS, 2.2), sig: p.approach.signal });   // (where OSM has it)
       for (const x of p.crossings) heads.push({ pos: right(p, x.s, 2.2), sig: x.sig });
     }
     this.lights = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.9, 0.35), new THREE.MeshBasicNodeMaterial(),
@@ -645,19 +663,17 @@ export class Traffic {
     return 0;
   }
 
-  private crossingBusy: ((edge: number, node: number) => boolean) | null = null;
-  /** pedestrians (pedestrians.ts): is someone crossing street `edge` at intersection `node`? */
-  setCrossings(busy: (edge: number, node: number) => boolean) { this.crossingBusy = busy; }
-  /** may a pedestrian start crossing street `edge` at `node`: no car turning into / out of it there,
-   *  none about to (granted, or close to the stop line and moving) */
-  crossingClear(edge: number, node: number) {
-    for (const v of this.vehicles) {
-      if (v.kind !== KIND.road) continue;
-      const c = v.inJunction ?? (v.grant as Path | null);
-      if (c && c.from!.lane!.to === node && (c.from!.lane!.edge === edge || c.to!.lane!.edge === edge)) return false;
-      const p = v.route[0];
-      if (p.lane && p.lane.edge === edge && p.lane.to === node && p.end - v.s < 12 && v.v > 1.5) return false;
-    }
+  /** someone is on (or stepping onto) the mapped crosswalk with this key (pedestrians.ts) */
+  private zebraBusy: ((key: number) => boolean) | null = null;
+  setZebras(busy: (key: number) => boolean) { this.zebraBusy = busy; }
+  private zebraAt = new Map<number, { p: Path; s: number }[]>();   // crosswalk key -> where it is on each lane
+  /** may a pedestrian step onto this crosswalk: no car about to pass over it that could not stop */
+  zebraClear(key: number) {
+    for (const { p, s } of this.zebraAt.get(key) ?? [])
+      for (const v of p.occ) {
+        const d = s - v.s;   // front bumper to the crosswalk
+        if (d > -v.t.total && d < 3 + (v.v * v.v) / (2 * v.t.b) + v.v * 0.8) return false;
+      }
     return true;
   }
 
@@ -983,8 +999,6 @@ export class Traffic {
       else if (this.occupied(j, x.v, x.c)) x.v.why = 'occupied';
       else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'committed';
       else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'no room';   // don't block the box
-      else if (this.crossingBusy && (this.crossingBusy(x.c.from!.lane!.edge, x.c.from!.lane!.to)
-        || this.crossingBusy(x.c.to!.lane!.edge, x.c.from!.lane!.to))) x.v.why = 'pedestrians';
       x.free = !x.v.why;
     }
     // pass 2: among the vehicles that could go, precedence (in order of arrival)
@@ -1043,6 +1057,12 @@ export class Traffic {
           for (const x of p.crossings)
             if (x.s > from && x.sig.state !== GREEN && d + x.s < gap
               && (x.sig.state === RED || d + x.s > (v.v * v.v) / (2 * t.b * 1.5))) { gap = d + x.s; vLead = 0; v.block = 'crossing'; v.blockBy = null; }
+        // mapped crosswalks with someone on them: stop before (unless too close to stop: drive on)
+        if (v.kind === KIND.road && this.zebraBusy)
+          for (const z of p.zebras)
+            if (z.s > from && d + z.s - 1 < gap && d + z.s > (v.v * v.v) / (2 * t.b * 1.5) + 1 && this.zebraBusy(z.key)) {
+              gap = d + z.s - 1; vLead = 0; v.block = 'crosswalk'; v.blockBy = null;
+            }
         // STIB: the next stop (wait there until the departure time)
         if (v.transit) {
           const st = v.transit.stops[v.transit.next];

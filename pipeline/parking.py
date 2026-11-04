@@ -34,7 +34,10 @@ VS = CFG["voxel"]["size"]
 
 PARALLEL = 5.4      # m of kerb per parked car (car + gap)
 PERP = 2.6          # m per perpendicular place
-JUNCTION = 8.0      # m kept clear at both ends of an edge (junctions, crossings)
+JUNCTION = 5.0      # m beyond the crossing street's kerb line kept clear (Belgian highway code: 5 m)
+CROSSWALK = 6.0     # m kept clear either side of a mapped crosswalk (5 m before it, plus its width)
+STOP_CLEAR = 15.0   # m kept clear around bus / tram stops (highway code: 15 m either side of the sign)
+TRANSIT = ROOT / "viewer/public/transit" / f"{ROI_NAME}.json"
 GAP = 25.0          # m: shorter stretches without a car between two cars are parking too (the 2021 scan
                     # labelled only part of the parked cars as vehicles); longer ones stay free (bus stops,
                     # driveways, schools)
@@ -80,20 +83,48 @@ def main():
         return out
 
     roads = json.loads(ROADS.read_text())
+    edges = roads["edges"]
+    # how far each junction's crossing streets reach: the kerb is ~1 m inside the pavement walking line
+    # (pavement offsets from the LiDAR facades, roads.py); degree-2 nodes are bends, not junctions
+    deg, reach = {}, {}
+    for e in edges:
+        if e[2] != 0:
+            continue
+        half = max(e[10]) - 1.0 if max(e[10]) > 0 else 5.0
+        for n in (e[0], e[1]):
+            deg[n] = deg.get(n, 0) + 1
+            reach.setdefault(n, []).append(half)
+    def margin(node, own_half):
+        if deg.get(node, 0) <= 2:
+            return 2.0
+        others = sorted(reach[node], reverse=True)
+        cross = others[0] if others[0] != own_half or len(others) == 1 else others[1]
+        return cross + JUNCTION
+    stops = np.array([[x, y] for x, y, *_ in json.loads(TRANSIT.read_text())["stops"]], float) if TRANSIT.exists() else np.zeros((0, 2))
     spots, rows, used = [], 0, 0
     offs = np.arange(1.5, 12.01, 0.5)                    # m from the centreline
-    for e in roads["edges"]:
+    for e in edges:
         if e[2] != 0:                                     # roads only
             continue
         oneway, pave = e[3], e[10]
+        osm = e[13] if len(e) > 13 else [0, 0]
         p = np.array(e[6], float).reshape(-1, 3)[:, :2]
         pts, d, L = resample(p, 1.0)                      # every voxel (0.5 m)
-        if pts is None or L * VS < 2 * JUNCTION + MIN_ROW:
+        own = max(pave) - 1.0 if max(pave) > 0 else 5.0
+        m0, m1 = margin(e[0], own), margin(e[1], own)
+        if pts is None or L * VS < m0 + m1 + MIN_ROW:
             continue
         left = np.stack([-d[:, 1], d[:, 0]], 1)           # x east, y north
         s_m = np.arange(len(pts)) * VS
-        inner = (s_m > JUNCTION) & (s_m < L * VS - JUNCTION)
+        inner = (s_m > m0) & (s_m < L * VS - m1)
+        for m, _ in (e[11] if len(e) > 11 else []):       # mapped crosswalks
+            inner &= np.abs(s_m - m) > CROSSWALK
+        if len(stops):                                    # bus / tram stops
+            near = np.min(np.hypot(*(pts[:, None, :] - stops[None, :, :]).transpose(2, 0, 1)), axis=1) * VS
+            inner &= near > STOP_CLEAR
         for side, sgn in ((0, 1.0), (1, -1.0)):
+            if osm[side] == 1:                            # OSM: no parking on this side
+                continue
             lim = pave[side] if pave[side] > 0 else 9.0   # the pavement (or ~9 m) bounds the parking side
             cand = offs[(offs >= LANE_CLEAR[1 if oneway else 0]) & (offs <= lim)]
             if not len(cand):
@@ -102,12 +133,16 @@ def main():
             q = pts[:, None, :] + sgn * left[:, None, :] * (cand[None, :, None] / VS)
             o = occ(q) & inner[:, None]
             prof = o.sum(0)
-            if prof.max() < MIN_ROW / VS:                 # nobody parks on this side
+            tagged = osm[side] >= 2                       # OSM: there is parking on this side
+            if prof.max() < MIN_ROW / VS and not tagged:  # nobody parks on this side
                 continue
-            k = int(np.argmax(prof))
-            line = cand[k]
+            if prof.max() >= MIN_ROW / VS:
+                k = int(np.argmax(prof))
+                line = cand[k]
+            else:                                         # tagged, no LiDAR evidence: ~2.2 m inside the pavement line
+                line = float(np.clip((pave[side] if pave[side] > 0 else 6.0) - 2.2, cand[0], cand[-1]))
             near = np.abs(cand - line) <= HALF
-            along = o[:, near].any(1)
+            along = o[:, near].any(1) if not tagged else inner.copy()
             # close gaps between parked cars; extend rows that end near the junction margins
             along = ndimage.binary_closing(np.pad(along, int(GAP / VS)), structure=np.ones(int(GAP / VS) + 1, bool))
             along = along[int(GAP / VS):-int(GAP / VS)] & inner
@@ -117,12 +152,17 @@ def main():
                 on = np.nonzero(along)[0]
                 if on[0] - lo < REACH / VS: along[lo:on[0]] = True
                 if hi - on[-1] < REACH / VS: along[on[-1]:hi + 1] = True
+            along &= inner                                 # (crosswalks and stops stay clear)
             deep = o.sum(1)                                # how far across the kerb the footprint reaches
             for a, b in runs(along):
                 length = (b - a) * VS
                 if length < MIN_ROW:
                     continue
                 perp = np.median(deep[a:b][deep[a:b] > 0]) * 0.5 > 3.6 if (deep[a:b] > 0).any() else False
+                if osm[side] >= 3:
+                    perp = True                           # OSM: diagonal / perpendicular (drawn perpendicular)
+                elif osm[side] == 2:
+                    perp = False
                 pitch = PERP if perp else PARALLEL
                 n = max(1, int(round(length / pitch)))
                 rows += 1

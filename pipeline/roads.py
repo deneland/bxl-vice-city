@@ -189,7 +189,9 @@ def consolidate(edges, node_xy, node_sig, vs):
                     parent.append(len(parent))
                 e[k] = copy[e[k]]
     for e in edges:
-        if e[2] == KIND["road"] and e[0] != e[1] and length(e) < MERGE:
+        # (never along a roundabout: its pieces between entries are often < MERGE, and merging them
+        # collapsed every small roundabout into one point where all its roads met)
+        if e[2] == KIND["road"] and e[0] != e[1] and length(e) < MERGE and not e[11]:
             parent[find(e[0])] = find(e[1])
     groups = {}
     for i in range(len(node_xy)):
@@ -204,7 +206,7 @@ def consolidate(edges, node_xy, node_sig, vs):
     out = []
     for e in edges:
         a, b = new_ix[e[0]], new_ix[e[1]]
-        if a == b and e[2] == KIND["road"] and length(e) < MERGE:
+        if a == b and e[2] == KIND["road"] and length(e) < MERGE and not e[11]:
             continue                                         # inside a merged intersection
         pts = list(e[6])
         pts[0:3] = [round(float(c), 1) for c in xy[a]]
@@ -249,7 +251,8 @@ def clip(edges, node_xy, node_sig, size, vs):
                         boundary.append(1)
                         ends.append(len(node_xy) - 1)
                 ctl = [[round(m - cum[i], 1), c, d] for m, c, d in e[8] if cum[i] <= m <= cum[j]]
-                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl, *e[9:]])
+                xw = [[round(m - cum[i], 1), c] for m, c in e[10] if cum[i] <= m <= cum[j]]   # (index 10 before pavements())
+                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl, e[9], xw, *e[11:]])
             i = j + 1
     print(f"clipped to the region: {len(edges)} -> {len(out)} edges, {sum(boundary)} boundary nodes")
     return out, node_xy, node_sig, boundary
@@ -333,7 +336,7 @@ def pavements(edges, m, vs):
     [left, right] in metres (left / right of the edge direction); 0: no facade found."""
     for e in edges:
         if e[2] != KIND["road"]:
-            e.append([0, 0])
+            e.insert(10, [0, 0])   # (index 10: crosswalks and the roundabout flag follow)
             continue
         p = np.array(e[6]).reshape(-1, 3)
         found = [[], []]
@@ -351,7 +354,7 @@ def pavements(edges, m, vs):
                     if (c[z0 + 2:z0 + 12] == BUILDING).any():
                         found[side].append(r * vs)
                         break
-        e.append([round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found])
+        e.insert(10, [round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found])
 
 
 def reverse(e, vs):
@@ -386,6 +389,36 @@ def road_along(e, edges, vs):
         if best:
             votes += 1 if best[1] > 0 else -1
     return None if votes == 0 else (1 if votes > 0 else -1)
+
+
+PARK_NO, PARK_PARALLEL, PARK_DIAGONAL, PARK_PERP = 1, 2, 3, 4
+
+
+def parking_sides(t, reversed_way):
+    """OSM kerbside parking per side [left, right] of the way's drawing direction (flipped for oneway=-1, whose
+    edge runs against it): 0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular. Both tagging schemes:
+    parking:<side>=lane|street_side|on_kerb|half_on_kerb|no + parking:<side>:orientation, and the older
+    parking:lane:<side>=parallel|diagonal|perpendicular|no_parking|no_stopping."""
+    def side(sd):
+        out = 0
+        for key in (f"parking:{sd}", "parking:both"):
+            v = t.get(key)
+            if v is None:
+                continue
+            if v in ("no", "no_parking", "no_stopping", "separate"):
+                return PARK_NO
+            o = t.get(f"{key}:orientation", "parallel")
+            return {"diagonal": PARK_DIAGONAL, "perpendicular": PARK_PERP}.get(o, PARK_PARALLEL)
+        for key in (f"parking:lane:{sd}", "parking:lane:both"):
+            v = t.get(key)
+            if v is None:
+                continue
+            if v in ("no", "no_parking", "no_stopping", "fire_lane", "separate"):
+                return PARK_NO
+            return {"diagonal": PARK_DIAGONAL, "perpendicular": PARK_PERP}.get(v, PARK_PARALLEL)
+        return out
+    l, r = side("left"), side("right")
+    return [r, l] if reversed_way else [l, r]
 
 
 def build():
@@ -467,7 +500,8 @@ def build():
             for i in range(1, len(seg) - 1):
                 c = control(seg[i])
                 if c:
-                    dtag = ntags[seg[i]].get("direction", "")
+                    # (traffic lights carry their direction as traffic_signals:direction; signs as direction)
+                    dtag = ntags[seg[i]].get("traffic_signals:direction") or ntags[seg[i]].get("direction", "")
                     dr = {"forward": 1, "backward": -1}.get(dtag, 0) * (-1 if ow == "-1" else 1)
                     ctl.append([round(float(d[i]), 1), c, dr])
             node_xy[node_ix[seg[0]]] = [*p[0], z[0]]
@@ -475,8 +509,19 @@ def build():
             rank = RANK.get(t.get("highway", "").replace("_link", ""), 0)
             cyc = " ".join(t.get(k, "") for k in ("cycleway", "cycleway:left", "cycleway:right", "cycleway:both"))
             contra = 1 if oneway and kind == "road" and (t.get("oneway:bicycle") == "no" or "opposite" in cyc) else 0
+            # mapped crosswalks along the edge: [m from the start, 1 signals | 2 marked (zebra) | 3 unmarked]
+            xw = []
+            if kind == "road":
+                for i in range(1, len(seg) - 1):
+                    nt = ntags.get(seg[i], {})
+                    if nt.get("highway") == "crossing" or "crossing" in nt:
+                        cr = nt.get("crossing", "")
+                        typ = 1 if cr == "traffic_signals" else 3 if cr in ("unmarked", "informal") or nt.get("crossing:markings") == "no" else 2
+                        xw.append([round(float(d[i]), 1), typ])
+            ring = 1 if t.get("junction") in ("roundabout", "circular") else 0
+            pk = parking_sides(t, ow == "-1") if kind == "road" else [0, 0]
             edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
-                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra])
+                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra, xw, ring, pk])
             stats[kind] += d[-1]
     edges, node_xy, node_sig = consolidate(edges, node_xy, node_sig, vs)
     edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
@@ -490,7 +535,9 @@ def build():
            "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
                                       "rank", "controls [m, 1 signals|2 give way|3 stop, dir]",
                                       "bikes both ways (one-way street open to cycling against the traffic)",
-                                      "pavement [left, right] m from the centreline (0: none found)"]}
+                                      "pavement [left, right] m from the centreline (0: none found)",
+                                      "crosswalks [[m, 1 signals|2 marked|3 unmarked]]", "roundabout",
+                                      "OSM parking [left, right]: 0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular"]}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":")))
     nctl = sum(len(e[8]) for e in edges)

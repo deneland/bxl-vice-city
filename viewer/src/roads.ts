@@ -6,8 +6,10 @@ import * as THREE from 'three/webgpu';
 export interface RoadNetwork {
   nodes: [number, number, number, number, number][];    // voxel coords: x east, y north, z ground; signals; region edge
   // from, to, kind, oneway, km/h, lanes, xyz..., rank, controls [m from start, code, direction],
-  // bikes both ways (contraflow cycling), pavement [left, right] m from the centreline (0: none found)
-  edges: [number, number, number, number, number, number, number[], number, [number, number, number][], number, [number, number]][];
+  // bikes both ways (contraflow cycling), pavement [left, right] m from the centreline (0: none found),
+  // mapped crosswalks [[m from start, 1 signals | 2 marked | 3 unmarked]], roundabout
+  edges: [number, number, number, number, number, number, number[], number, [number, number, number][], number, [number, number],
+    [number, number][]?, number?][];
   /** footpaths (parks, squares, pedestrian streets): [[node a, node b], xyz...] */
   paths?: [[number, number], number[]][];
 }
@@ -16,6 +18,8 @@ export interface RoadNetwork {
 export const CONTROL = { signals: 1, giveWay: 2, stop: 3 };
 
 export const KIND = { road: 0, tram: 1, rail: 2 };
+/** key of a mapped crosswalk: its edge and index along it (shared by pedestrians.ts and traffic.ts) */
+export const crosswalkKey = (edge: number, i: number) => edge * 1000 + i;
 const COLORS = [0xffd400, 0xff3dd0, 0x33d6ff];   // road, tram, rail
 const ONEWAY = 0xff7a00;
 const LANE_COLOR = 0xffffff;
@@ -34,6 +38,8 @@ export interface Lane {
   rank: number;                // road class: priority at unsigned intersections
   bikeOnly?: boolean;          // contraflow cycle lane in a one-way street
   controls: { s: number; code: number }[];   // signals / give way / stop along the lane, in driving direction
+  crosswalks: { s: number; key: number }[];  // mapped crosswalks along the lane (cars give way to people on them)
+  toSignal: boolean;           // the junction it leads to has a mapped traffic light on its node
 }
 
 export async function loadRoads(url: string): Promise<RoadNetwork | null> {
@@ -69,7 +75,7 @@ function reversed(p: number[]) {
 /** all lanes: forward along each edge, plus backward on two-way edges; roads keep right */
 export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
   const lanes: Lane[] = [];
-  net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl, contra], edge) => {
+  net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl, contra, , xw], edge) => {
     const p: number[] = [];
     for (let i = 0; i < raw.length; i += 3) p.push(...toScene(vs, raw[i], raw[i + 1], raw[i + 2]));
     let len = 0;
@@ -86,7 +92,10 @@ export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
       const length = cum[cum.length - 1];
       const controls = ctl.filter(([, , dr]) => dr === 0 || dr === sign)
         .map(([m, code]) => ({ s: (sign > 0 ? m : len - m) * (length / (len || 1)), code })).sort((x, y) => x.s - y.s);
-      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length, rank, controls, bikeOnly });
+      const crosswalks = (xw ?? []).map(([m], i) => ({ s: (sign > 0 ? m : len - m) * (length / (len || 1)), key: crosswalkKey(edge, i) }))
+        .sort((x, y) => x.s - y.s);
+      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length, rank, controls, crosswalks, bikeOnly,
+        toSignal: net.nodes[b]?.[3] === 1 });
     }
   });
   return lanes;

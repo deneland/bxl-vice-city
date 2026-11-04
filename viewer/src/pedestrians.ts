@@ -3,14 +3,13 @@
 // while someone crosses, cars may not enter that arm of the intersection (traffic.ts). Drawn as small
 // voxel people (0.125 m voxels) whose legs and arms swing in the vertex shader.
 import * as THREE from 'three/webgpu';
-import { KIND, type RoadNetwork } from './roads';
+import { crosswalkKey, KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
 
 const DEFAULT_PAVEMENT = [6, 6, 6, 7, 8.5, 9.5, 10];   // m from the centreline, by road rank (no facade found)
-const XK = 100000;   // crossing key: edge * XK + node
 const CROSS_PATIENCE = 25;   // s waiting for a gap before crossing anyway (cars then stop)
 
-interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: number | null; park?: boolean }   // cross: crossing key edge * XK + node
+interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: number | null; park?: boolean }   // cross: crosswalk key (roads.ts crosswalkKey)
 interface Walker {
   agent: unknown; segs: { seg: Seg; fwd: boolean }[]; k: number; s: number; v: number; dist: number;
   wait: number; crossing: number | null; idx: number; end: number;   // end: m to walk on the last segment
@@ -80,7 +79,9 @@ export class Pedestrians {
   private adj = new Map<number, { seg: Seg; fwd: boolean }[]>();   // graph vertex -> segments leaving it
   private walkers: Walker[] = [];
   private free: number[] = [];
-  private busy = new Map<number, number>();     // crossing key (edge * XK + node) -> people on it
+  private busy = new Map<number, number>();     // crosswalk key -> people on it
+  /** crosswalks linked into the walking network (mapped in OSM) */
+  crosswalks = 0;
   private grid = new Map<string, { seg: Seg; s: number; x: number; z: number }[]>();
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: unknown) => void) | null = null;
@@ -159,7 +160,7 @@ export class Pedestrians {
       }
     }
     yield;
-    // --- intersections: corner links between neighbouring streets, crossings over each street ---
+    // --- intersections: corner links between neighbouring streets (round the block corner) ---
     const inc = new Map<number, { ei: number; atStart: boolean; ang: number }[]>();
     net.edges.forEach((e, ei) => {
       if (e[2] !== KIND.road) return;
@@ -191,10 +192,50 @@ export class Pedestrians {
           const pa = endPoint(A.ei, leftOf(A), A.atStart), pb = endPoint(B.ei, rightOf(B), B.atStart);
           if (pa && pb && pa.p.distanceTo(pb.p) < 40) link(pa.v, pb.v, pa.p, pb.p, null);
         }
-        const l = endPoint(A.ei, 0, A.atStart), r = endPoint(A.ei, 1, A.atStart);   // across street A
-        if (l && r && l.p.distanceTo(r.p) < 40) link(l.v, r.v, l.p, r.p, A.ei * XK + node);
       }
     }
+    yield;
+    // pavements are split where crosswalks and footpaths join them (one pass, below)
+    const splits = new Map<Seg, { s: number; v: number }[]>();
+    const tmp = new THREE.Vector3();
+    const cut = (seg: Seg, s: number) => {   // a vertex on seg at s (its end, or a new one)
+      if (s < 0.3) return seg.a;
+      if (s > seg.len - 0.3) return seg.b;
+      const v = vid++;
+      if (!splits.has(seg)) splits.set(seg, []);
+      splits.get(seg)!.push({ s, v });
+      return v;
+    };
+    // --- crosswalks where OpenStreetMap has them (zebras, signalled, unmarked): across the street from one
+    // pavement to the other. (No crossing at every corner any more: people walk to the mapped ones.)
+    const nearestOn = (seg: Seg, q: THREE.Vector3) => {
+      let bs = 0, bd = Infinity;
+      for (let t = 0; t <= seg.len; t += 0.5) { at(seg, t, tmp); const d = (tmp.x - q.x) ** 2 + (tmp.z - q.z) ** 2; if (d < bd) { bd = d; bs = t; } }
+      return { s: bs, d: Math.sqrt(bd) };
+    };
+    let nX = 0;
+    net.edges.forEach((e, ei) => {
+      const xw = e[11];
+      if (e[2] !== KIND.road || !xw?.length) return;
+      const raw = e[6], n = raw.length / 3;
+      const cum = [0];
+      for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(raw[i * 3] - raw[i * 3 - 3], raw[i * 3 + 1] - raw[i * 3 - 2]) * vs);
+      xw.forEach(([m], i) => {
+        const L = sides.get(`${ei}:0`), R = sides.get(`${ei}:1`);
+        if (!L || !R) return;
+        let k = 1;
+        while (k < n - 1 && cum[k] < m) k++;
+        const f = Math.min(1, Math.max(0, (m - cum[k - 1]) / Math.max(1e-6, cum[k] - cum[k - 1])));
+        const q = new THREE.Vector3((raw[(k - 1) * 3] + (raw[k * 3] - raw[(k - 1) * 3]) * f) * vs, 0,
+          -(raw[(k - 1) * 3 + 1] + (raw[k * 3 + 1] - raw[(k - 1) * 3 + 1]) * f) * vs);
+        const l = nearestOn(L, q), r = nearestOn(R, q);
+        if (l.d > 25 || r.d > 25) return;   // (no pavement near: a crosswalk to nowhere)
+        const vl = cut(L, l.s), vr = cut(R, r.s);
+        link(vl, vr, at(L, l.s, new THREE.Vector3()), at(R, r.s, new THREE.Vector3()), crosswalkKey(ei, i));
+        nX++;
+      });
+    });
+    this.crosswalks = nX;
     yield;
     // --- footpaths (parks, squares): their own network, linked to the pavements where they end near one ---
     if (net.paths?.length) {
@@ -212,7 +253,6 @@ export class Pedestrians {
       }
       // nearest pavement points (sampled) for linking path ends
       const pave: { seg: Seg; s: number; x: number; y: number; z: number }[] = [];
-      const tmp = new THREE.Vector3();
       const PC = 15, paveGrid = new Map<string, typeof pave>();   // (spatial index: a commune has ~300k points)
       let nY = 0;
       for (const seg of this.segs) if (seg.cross === null && seg.pts.length > 6) {
@@ -225,7 +265,6 @@ export class Pedestrians {
           paveGrid.get(key)!.push(q);
         }
       }
-      const splits = new Map<Seg, { s: number; v: number }[]>();
       for (const seg of paths) {
         if (++nY % 1500 === 0) yield;
         for (const [v, s] of [[seg.a, 0], [seg.b, seg.len]] as const) {
@@ -236,14 +275,14 @@ export class Pedestrians {
           for (let i = gx - 1; i <= gx + 1; i++) for (let j = gz - 1; j <= gz + 1; j++)
             for (const q of paveGrid.get(`${i},${j}`) ?? []) { const d = (q.x - tmp.x) ** 2 + (q.z - tmp.z) ** 2; if (d < bd) { bd = d; best = q; } }
           if (!best) continue;
-          const nv = vid++;
-          if (!splits.has(best.seg)) splits.set(best.seg, []);
-          splits.get(best.seg)!.push({ s: best.s, v: nv });
+          const nv = cut(best.seg, best.s);
           link(v, nv, tmp.clone(), new THREE.Vector3(best.x, best.y, best.z), null);
         }
         this.segs.push(seg);
       }
-      // split pavements where paths join them
+    }
+    // split pavements where crosswalks and paths join them
+    {
       for (const [seg, cuts] of splits) {
         cuts.sort((x, y) => x.s - y.s);
         this.segs.splice(this.segs.indexOf(seg), 1);
@@ -276,7 +315,7 @@ export class Pedestrians {
         this.grid.get(key)!.push({ seg, s, x: tmp.x, z: tmp.z });
       }
     }
-    this.traffic?.setCrossings((edge, node) => (this.busy.get(edge * XK + node) ?? 0) > 0);
+    this.traffic?.setZebras((key) => (this.busy.get(key) ?? 0) > 0);
 
   }
 
@@ -504,8 +543,7 @@ export class Pedestrians {
         const stop = w.k === w.segs.length - 1 ? w.end : seg.len;
         // about to cross a street: wait for a gap (or until patience runs out; then cars wait)
         if (seg.cross !== null && w.crossing !== seg.cross) {
-          const edge = Math.floor(seg.cross / XK), node = seg.cross % XK;
-          const safe = !this.traffic || this.traffic.crossingClear(edge, node);
+          const safe = !this.traffic || this.traffic.zebraClear(seg.cross);   // (no car that could not stop)
           if (!safe && w.wait < CROSS_PATIENCE) { w.wait += dt; step = 0; break; }
           w.wait = 0; w.crossing = seg.cross;
           this.busy.set(seg.cross, (this.busy.get(seg.cross) ?? 0) + 1);
