@@ -5,8 +5,11 @@ import * as THREE from 'three/webgpu';
 
 export interface RoadNetwork {
   nodes: [number, number, number, number, number][];    // voxel coords: x east, y north, z ground; signals; region edge
-  // from, to, kind, oneway, km/h, lanes, xyz..., rank, controls [m from start, code, direction]
-  edges: [number, number, number, number, number, number, number[], number, [number, number, number][]][];
+  // from, to, kind, oneway, km/h, lanes, xyz..., rank, controls [m from start, code, direction],
+  // bikes both ways (contraflow cycling), pavement [left, right] m from the centreline (0: none found)
+  edges: [number, number, number, number, number, number, number[], number, [number, number, number][], number, [number, number]][];
+  /** footpaths (parks, squares, pedestrian streets): [[node a, node b], xyz...] */
+  paths?: [[number, number], number[]][];
 }
 
 /** traffic control codes on edges (pipeline roads.py) */
@@ -29,6 +32,7 @@ export interface Lane {
   cum: Float32Array;           // distance along the lane at each point
   length: number;
   rank: number;                // road class: priority at unsigned intersections
+  bikeOnly?: boolean;          // contraflow cycle lane in a one-way street
   controls: { s: number; code: number }[];   // signals / give way / stop along the lane, in driving direction
 }
 
@@ -65,23 +69,24 @@ function reversed(p: number[]) {
 /** all lanes: forward along each edge, plus backward on two-way edges; roads keep right */
 export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
   const lanes: Lane[] = [];
-  net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl], edge) => {
+  net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl, contra], edge) => {
     const p: number[] = [];
     for (let i = 0; i < raw.length; i += 3) p.push(...toScene(vs, raw[i], raw[i + 1], raw[i + 2]));
     let len = 0;
     for (let i = 3; i < p.length; i += 3) len += Math.hypot(p[i] - p[i - 3], p[i + 2] - p[i - 1]);
     const off = kind === KIND.road && !oneway ? HALF_LANE : 0;   // tracks are mapped one per line: no shift
     const dirs: [number, number, number[], number][] = [[from, to, p, 1]];
-    if (!oneway) dirs.push([to, from, reversed(p), -1]);
+    if (!oneway || (kind === KIND.road && contra)) dirs.push([to, from, reversed(p), -1]);
     for (const [a, b, line, sign] of dirs) {
-      const pts = offsetLine(line, off);
+      const bikeOnly = !!oneway && sign < 0;   // cycling against the traffic, at the kerb
+      const pts = offsetLine(line, bikeOnly ? HALF_LANE + 1 : off);
       const cum = new Float32Array(pts.length / 3);
       for (let i = 1; i < cum.length; i++)
         cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
       const length = cum[cum.length - 1];
       const controls = ctl.filter(([, , dr]) => dr === 0 || dr === sign)
         .map(([m, code]) => ({ s: (sign > 0 ? m : len - m) * (length / (len || 1)), code })).sort((x, y) => x.s - y.s);
-      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length, rank, controls });
+      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length, rank, controls, bikeOnly });
     }
   });
   return lanes;
@@ -99,9 +104,9 @@ export function roadOverlay(net: RoadNetwork, lanes: Lane[], vs: number) {
       col.push(c.r, c.g, c.b, c.r, c.g, c.b);
     }
   }
-  c.set(LANE_COLOR);
   for (const l of lanes) {
-    if (l.kind !== KIND.road || net.edges[l.edge][3]) continue;   // one-way lanes coincide with the centreline
+    c.set(l.bikeOnly ? 0xc080ff : LANE_COLOR);                       // contraflow cycle lanes purple
+    if (l.kind !== KIND.road || (net.edges[l.edge][3] && !l.bikeOnly)) continue;   // one-way lanes: the centreline
     const p = l.pts;
     for (let i = 0; i + 5 < p.length; i += 3) {
       pos.push(p[i], p[i + 1] + LIFT, p[i + 2], p[i + 3], p[i + 4] + LIFT, p[i + 5]);

@@ -30,11 +30,13 @@ ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
 ROI_NAME = ARGS[0] if ARGS else CFG["default"]
 ROI = CFG["roi"][ROI_NAME]
 RAW = ROOT / "data/raw" / f"osm_roads_{ROI_NAME}.json"
+RAW_PATHS = ROOT / "data/raw" / f"osm_paths_{ROI_NAME}.json"
 OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 
 ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
          "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
 KIND = {"road": 0, "tram": 1, "rail": 2}
+BUILDING = 6
 # road class -> rank: who has priority at an unsigned intersection (Belgium: otherwise from the right)
 RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, "unclassified": 2,
         "residential": 2, "living_street": 1}
@@ -47,6 +49,80 @@ MARGIN = 20.0     # m around the region
 
 to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
 to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
+
+
+def overpass(q, dest):
+    req = urllib.request.Request("https://overpass-api.de/api/interpreter",
+                                 data=urllib.parse.urlencode({"data": q}).encode(),
+                                 headers={"User-Agent": "bxl-vice-voxel/0.1"})
+    for i in range(5):            # the public Overpass server is often briefly overloaded (502/504)
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                dest.write_bytes(r.read())
+            return
+        except Exception as e:
+            print(f"overpass: {e}; retrying")
+            time.sleep(10 * (i + 1))
+    raise SystemExit("overpass unavailable")
+
+
+def bbox():
+    corners = [to_wgs.transform(x, y) for x in (ROI["xmin"] - MARGIN, ROI["xmax"] + MARGIN)
+               for y in (ROI["ymin"] - MARGIN, ROI["ymax"] + MARGIN)]
+    return (f"{min(c[1] for c in corners):.6f},{min(c[0] for c in corners):.6f},"
+            f"{max(c[1] for c in corners):.6f},{max(c[0] for c in corners):.6f}")
+
+
+def fetch_paths():
+    """footways, paths, pedestrian streets, steps (parks, squares); pavements and crossings are generated"""
+    overpass(f'[out:json][timeout:120];way["highway"~"^(footway|path|pedestrian|steps)$"]({bbox()});'
+             'out body;>;out skel qt;', RAW_PATHS)
+
+
+def walk_paths(m, X0, Y0, vs):
+    """Footpaths as polylines with ground heights, split at shared nodes: [[node a, node b], xyz...]."""
+    els = json.loads(RAW_PATHS.read_text())["elements"]
+    nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    ways = [e for e in els if e["type"] == "way" and e["tags"].get("footway") not in ("sidewalk", "crossing")
+            and e["tags"].get("access") not in ("no", "private")]
+    use = {}
+    for w in ways:
+        for n in w["nodes"]:
+            use[n] = use.get(n, 0) + 1
+    ids, out = {}, []
+    def ground(px, py):
+        zs = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                c = m.column(int(px) + dx, int(py) + dy)
+                if c is not None:
+                    k = np.flatnonzero(c == 2)
+                    if len(k):
+                        zs.append(k.max() + 1)
+        return float(np.median(zs)) if zs else np.nan
+    for w in ways:
+        seq = w["nodes"]
+        cuts = [0] + [i for i in range(1, len(seq) - 1) if use[seq[i]] > 1] + [len(seq) - 1]
+        for a, b in zip(cuts, cuts[1:]):
+            seg = seq[a:b + 1]
+            xy = np.array([nodes[n] for n in seg])
+            v = (xy - [X0, Y0]) / vs
+            if not ((v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])).all():
+                continue
+            d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
+            n = max(1, int(np.ceil(d[-1] / SAMPLE)))
+            s = np.unique(np.r_[np.linspace(0, d[-1], n + 1), d])
+            p = np.c_[np.interp(s, d, v[:, 0]), np.interp(s, d, v[:, 1])]
+            z = np.array([ground(px, py) for px, py in p])
+            if np.isnan(z).all():
+                continue
+            ok = ~np.isnan(z)
+            z = np.interp(np.arange(len(z)), np.flatnonzero(ok), z[ok])
+            for nid in (seg[0], seg[-1]):
+                ids.setdefault(nid, len(ids))
+            out.append([[ids[seg[0]], ids[seg[-1]]], [round(float(c), 1) for c in np.c_[p, z].ravel()]])
+    print(f"{len(out)} footpath segments, {sum(edge_length(x[1], vs)[-1] for x in out) / 1000:.1f} km")
+    return out
 
 
 def fetch():
@@ -173,7 +249,7 @@ def clip(edges, node_xy, node_sig, size, vs):
                         boundary.append(1)
                         ends.append(len(node_xy) - 1)
                 ctl = [[round(m - cum[i], 1), c, d] for m, c, d in e[8] if cum[i] <= m <= cum[j]]
-                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl])
+                out.append([ends[0], ends[1], *e[2:6], [round(float(c), 1) for c in p[i:j + 1].ravel()], e[7], ctl, *e[9:]])
             i = j + 1
     print(f"clipped to the region: {len(edges)} -> {len(out)} edges, {sum(boundary)} boundary nodes")
     return out, node_xy, node_sig, boundary
@@ -248,6 +324,34 @@ def tram_directions(edges, vs):
                 changed = True
                 break
     print(f"tram tracks: {n} of {len(trams)} given a direction")
+
+
+def pavements(edges, m, vs):
+    """Where the pavement is, per side of each road edge: just in front of the facades. From the
+    centreline, look sideways every 10 m for the first building voxel 1-6 m above the road; the
+    pavement runs 1.5 m in front of it (median over the edge). Appended to the edge as
+    [left, right] in metres (left / right of the edge direction); 0: no facade found."""
+    for e in edges:
+        if e[2] != KIND["road"]:
+            e.append([0, 0])
+            continue
+        p = np.array(e[6]).reshape(-1, 3)
+        found = [[], []]
+        for k in range(1, len(p) - 1, 5):
+            d = p[k + 1, :2] - p[k - 1, :2]
+            d = d / (np.linalg.norm(d) or 1)
+            left = np.array([-d[1], d[0]])                   # x east, y north: left of travel
+            for side, sgn in ((0, 1), (1, -1)):
+                for r in range(4, 50):                       # 2..25 m, voxel steps
+                    q = p[k, :2] + sgn * left * r
+                    c = m.column(int(q[0]), int(q[1]))
+                    if c is None:
+                        break
+                    z0 = int(p[k, 2])
+                    if (c[z0 + 2:z0 + 12] == BUILDING).any():
+                        found[side].append(r * vs)
+                        break
+        e.append([round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found])
 
 
 def reverse(e, vs):
@@ -367,16 +471,24 @@ def build():
             node_xy[node_ix[seg[0]]] = [*p[0], z[0]]
             node_xy[node_ix[seg[-1]]] = [*p[-1], z[-1]]
             rank = RANK.get(t.get("highway", "").replace("_link", ""), 0)
+            cyc = " ".join(t.get(k, "") for k in ("cycleway", "cycleway:left", "cycleway:right", "cycleway:both"))
+            contra = 1 if oneway and kind == "road" and (t.get("oneway:bicycle") == "no" or "opposite" in cyc) else 0
             edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
-                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl])
+                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra])
             stats[kind] += d[-1]
     edges, node_xy, node_sig = consolidate(edges, node_xy, node_sig, vs)
     edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
     tram_directions(edges, vs)
-    out = {"build": m.man["build"],
+    pavements(edges, m, vs)
+    if "--refetch" in sys.argv or not RAW_PATHS.exists():
+        fetch_paths()
+    paths = walk_paths(m, X0, Y0, vs)
+    out = {"build": m.man["build"], "paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
            "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
-                                      "rank", "controls [m, 1 signals|2 give way|3 stop, dir]"]}
+                                      "rank", "controls [m, 1 signals|2 give way|3 stop, dir]",
+                                      "bikes both ways (one-way street open to cycling against the traffic)",
+                                      "pavement [left, right] m from the centreline (0: none found)"]}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":")))
     nctl = sum(len(e[8]) for e in edges)

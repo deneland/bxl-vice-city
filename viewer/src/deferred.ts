@@ -13,8 +13,8 @@
 // A frame with only moving vehicles costs their own geometry plus a few full-screen passes.
 import * as THREE from 'three/webgpu';
 import {
-  attribute, dot, float, fract, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
-  normalWorld, positionWorld, select, smoothstep, step, texture, uniform, uv, vec2, vec3, vec4,
+  abs, attribute, dot, float, fract, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
+  cos, normalWorld, positionGeometry, positionLocal, positionWorld, select, sin, smoothstep, step, texture, uniform, uv, vec2, vec3, vec4,
 } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
@@ -170,6 +170,27 @@ export class Deferred {
     if (extra) l = l.add(extra(positionWorld));
     const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
     m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1))), 1);
+    return m;
+  }
+
+  /** material for pedestrians (pedestrians.ts): shirt / skin / trousers per instance, legs and arms
+   *  swing with the walk phase (vertex shader) */
+  pedestrianMaterial(extra?: (world: any) => any) {
+    const m = new THREE.MeshBasicNodeMaterial();
+    const limb = attribute('limb', 'float').add(0.5).floor(), mat = attribute('pmat', 'float').add(0.5).floor();
+    const ph = attribute('phase', 'float'), pg = positionGeometry;
+    const legSign = select(limb.equal(2), float(-1), float(1)), armSign = select(limb.equal(4), float(-1), float(1));
+    const leg = select(limb.lessThan(3).and(limb.greaterThan(0)), sin(ph).mul(legSign).mul(0.2).mul(float(0.875).sub(pg.y).div(0.875)), float(0));
+    const arm = select(limb.greaterThan(2), sin(ph).mul(armSign).mul(-0.14).mul(float(1.5).sub(pg.y).div(0.65)), float(0));
+    // (positionNode replaces the already instanced position: add the swing to positionLocal, turned by
+    // the person's heading `yaw`, instead of starting from the raw geometry)
+    const dx = leg.add(arm), yaw = attribute('yaw', 'float');
+    m.positionNode = positionLocal.add(vec3(cos(yaw).mul(dx), abs(sin(ph)).mul(0.025), sin(yaw).negate().mul(dx)));
+    const alb = select(mat.equal(1), attribute('shirt', 'vec3'), select(mat.equal(2), attribute('skin', 'vec3'),
+      select(mat.equal(3), attribute('pants', 'vec3'), vec3(0.04, 0.035, 0.03))));
+    let l = this.light(normalWorld, positionWorld, false);
+    if (extra) l = l.add(extra(positionWorld));
+    m.colorNode = vec4(alb.mul(l), 1);
     return m;
   }
 

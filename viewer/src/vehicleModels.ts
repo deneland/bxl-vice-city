@@ -7,17 +7,17 @@ import * as THREE from 'three/webgpu';
 export const VOX = 0.25;
 
 /** voxel materials: 1 paint (per instance); fixed colours; lights (emissive at night) */
-export const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9 };
+export const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9, skin: 10, jacket: 11, jeans: 12 };
 const FIXED: Record<number, number> = {
   [M.glass]: 0x1c2630, [M.tyre]: 0x141414, [M.trim]: 0x2b2c2e, [M.head]: 0xe8e4d8, [M.tail]: 0x7a1410,
-  [M.roof]: 0xd9dad6, [M.stripe]: 0xa47a3c, [M.cab]: 0x3a3d42,
+  [M.roof]: 0xd9dad6, [M.stripe]: 0xa47a3c, [M.cab]: 0x3a3d42, [M.skin]: 0xd9a47e, [M.jacket]: 0x2a3140, [M.jeans]: 0x334a6b,
 };
 
 class Grid {
   readonly nx: number; readonly ny: number; readonly nz: number;
   readonly v: Uint8Array;
-  constructor(len: number, h: number, w: number) {
-    this.nx = Math.round(len / VOX); this.ny = Math.round(h / VOX); this.nz = Math.round(w / VOX);
+  constructor(len: number, h: number, w: number, readonly vox = VOX) {
+    this.nx = Math.round(len / vox); this.ny = Math.round(h / vox); this.nz = Math.round(w / vox);
     this.v = new Uint8Array(this.nx * this.ny * this.nz);
   }
   in(x: number, y: number, z: number) { return x >= 0 && y >= 0 && z >= 0 && x < this.nx && y < this.ny && z < this.nz; }
@@ -146,10 +146,41 @@ function carriage(len: number) {
   return g;
 }
 
+/** fill a box of voxels [x0, x1) × [y0, y1) × [z0, z1) */
+function box(g: Grid, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, m: number) {
+  for (let x = x0; x < x1; x++) for (let y = y0; y < y1; y++) for (let z = z0; z < z1; z++) g.set(x, y, z, m);
+}
+
+/** bicycle with rider, 0.125 m voxels (x forward): frame in paint */
+function bicycle() {
+  const g = new Grid(1.75, 1.75, 0.5, 0.125);
+  box(g, 0, 4, 0, 4, 1, 3, M.tyre); box(g, 10, 14, 0, 4, 1, 3, M.tyre);   // wheels
+  box(g, 2, 12, 3, 4, 2, 2 + 1, M.paint); box(g, 5, 6, 3, 7, 2, 3, M.paint); box(g, 10, 11, 4, 9, 2, 3, M.paint);   // frame, seat post, fork
+  box(g, 9, 11, 9, 10, 0, 4, M.trim);                                     // handlebar
+  box(g, 5, 7, 4, 8, 1, 3, M.jeans);                                      // legs
+  box(g, 5, 8, 8, 12, 1, 3, M.jacket); box(g, 8, 10, 9, 11, 1, 3, M.jacket);   // body, arms
+  box(g, 6, 8, 12, 14, 1, 3, M.skin);                                     // head
+  g.set(13, 5, 2, M.head); g.set(0, 5, 2, M.tail);
+  return g;
+}
+
+/** moped with a delivery box (in paint) and a rider with a helmet, 0.125 m voxels */
+function moped() {
+  const g = new Grid(1.9, 1.75, 0.625, 0.125);
+  box(g, 0, 3, 0, 3, 2, 3, M.tyre); box(g, 12, 15, 0, 3, 2, 3, M.tyre);
+  box(g, 2, 13, 2, 4, 1, 4, M.trim); box(g, 11, 13, 4, 8, 1, 4, M.trim);   // body, front
+  box(g, 4, 9, 4, 5, 1, 4, M.cab);                                         // seat
+  box(g, 0, 4, 5, 9, 0, 5, M.paint);                                       // delivery box
+  box(g, 6, 8, 5, 9, 1, 4, M.jeans); box(g, 5, 9, 9, 12, 1, 4, M.jacket); box(g, 9, 11, 10, 11, 1, 4, M.jacket);
+  box(g, 6, 9, 12, 14, 1, 4, M.trim);                                      // helmet
+  g.set(14, 5, 2, M.head); g.set(0, 3, 2, M.tail);
+  return g;
+}
+
 /** voxel grid -> mesh of its outer faces; attributes: position, normal, vcol (fixed colour), vmat */
 function mesh(g: Grid) {
   const pos: number[] = [], nrm: number[] = [], col: number[] = [], mat: number[] = [], idx: number[] = [];
-  const ox = (g.nx * VOX) / 2, oy = (g.ny * VOX) / 2, oz = (g.nz * VOX) / 2;
+  const VOX = g.vox, ox = (g.nx * VOX) / 2, oy = (g.ny * VOX) / 2, oz = (g.nz * VOX) / 2;
   const c = new THREE.Color();
   const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
   for (let y = 0; y < g.ny; y++)
@@ -198,8 +229,9 @@ export function buildModels() {
     tramCab: tramSection(6.4, 'front', false), tramRear: tramSection(6.4, 'rear', false),
     tramMid: tramSection(6.0, null, false), tramPanto: tramSection(6.0, null, true),
     carriage: carriage(24),
+    bike: bicycle(), moped: moped(),
   };
   const out: Record<string, { geo: THREE.BufferGeometry; len: number; h: number; w: number }> = {};
-  for (const [k, g] of Object.entries(grids)) out[k] = { geo: mesh(g), len: g.nx * VOX, h: g.ny * VOX, w: g.nz * VOX };
+  for (const [k, g] of Object.entries(grids)) out[k] = { geo: mesh(g), len: g.nx * g.vox, h: g.ny * g.vox, w: g.nz * g.vox };
   return out;
 }

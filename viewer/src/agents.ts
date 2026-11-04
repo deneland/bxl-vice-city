@@ -7,6 +7,7 @@
 // Agents are kept apart from vehicles: an agent exists all day, its car only while it drives. That is
 // what will let the simulation run in detail only near the camera when the region grows.
 import type { Spot, Traffic } from './traffic';
+import type { Pedestrians, WalkSpot } from './pedestrians';
 
 export interface Places {
   cats: string[]; streets: string[]; names: string[];
@@ -14,11 +15,13 @@ export interface Places {
   pois: [number, number, number, number][];    // x, y (voxels), category, name
 }
 
-type Where = { kind: 'home' } | { kind: 'poi'; i: number } | { kind: 'edge' };
+type Where = { kind: 'home' } | { kind: 'poi'; i: number } | { kind: 'edge' } | { kind: 'house'; i: number }
+  | { kind: 'park'; spot: WalkSpot };
 export interface Activity { where: Where; purpose: string; until: number }   // until: seconds of the day
 
 export interface Agent {
   id: number; name: string; type: string;
+  mode: 'car' | 'walk' | 'bike';
   home: number;                       // index in places.homes (-1: lives outside the area)
   car: { kind: string; paint: number; ag: number; f: number };
   plan: Activity[];
@@ -49,6 +52,14 @@ const LAST = ['Peeters', 'Janssens', 'Maes', 'Dubois', 'Lambert', 'Martin', 'Dup
   'Nowak', 'Kowalski', 'Popescu', 'Ionescu', 'Rossi', 'García', 'Fernandes', 'Yilmaz', 'Demir', 'Kaya', 'Haddad',
   'El Idrissi', 'Vermeulen', 'De Smet', 'Van den Broeck', 'Michel', 'Renard', 'Lejeune', 'Collard', 'Bouzid', 'Camara'];
 
+// walkers (share of the walking population): kids walking to school with a parent, shoppers,
+// dog walkers, errands, evening strolls
+const WALK_TYPES: [string, number][] = [['kid', 0.22], ['walkShop', 0.3], ['dog', 0.18], ['walkErrand', 0.15], ['stroll', 0.15]];
+
+// cyclists and delivery couriers (counts set in the constructor)
+const BIKE_COLORS = [0x1b1b1d, 0x8c1c1c, 0x2f5597, 0xd8d4c8, 0x3d5a3a, 0xc9a227];
+const COURIER_BOXES = [0x00ccbc, 0xff8000, 0x06c167];
+
 // share of each type in the population
 const TYPES: [string, number][] = [['parent', 0.14], ['commuterOut', 0.18], ['commuterIn', 0.12], ['shopper', 0.18],
   ['evening', 0.1], ['errands', 0.08], ['delivery', 0.06], ['taxi', 0.04], ['through', 0.1]];
@@ -57,6 +68,7 @@ export const PURPOSE: Record<string, string> = {
   home: 'at home', school: 'dropping the kids at school', pickup: 'picking up the kids', work: 'at work',
   out: 'working outside the area', shop: 'shopping', dinner: 'out for dinner', errand: 'running an errand',
   delivery: 'delivering', fare: 'with a passenger', away: 'outside the area', passing: 'passing through',
+  dog: 'walking the dog', stroll: 'out for a walk', 'pickup-food': 'collecting an order',
 };
 
 export class Agents {
@@ -70,7 +82,8 @@ export class Agents {
   /** called when something changed that the info panel shows */
   onChange: ((a: Agent) => void) | null = null;
 
-  constructor(readonly places: Places, private traffic: Traffic, private vs: number, count = 3000) {
+  constructor(readonly places: Places, private traffic: Traffic, private vs: number, count = 3000,
+    private peds: Pedestrians | null = null, walkers = 0, cyclists = 0) {
     this.byCat = places.cats.map((_, c) => places.pois.flatMap((p, i) => (p[2] === c ? [i] : [])));
     this.homeW = places.homes.map((h) => h[2]);
     this.homeTotal = this.homeW.reduce((a, b) => a + b, 0);
@@ -83,10 +96,25 @@ export class Agents {
       while (car.kind === 'bus') car = traffic.randomCar();
       if (type === 'delivery') car = { ...car, kind: 'van', paint: r() < 0.65 ? 0xeceeee : car.paint, ag: 1.1, f: 1.1 };
       if (type === 'taxi') car = { ...car, kind: 'sedan', paint: 0x1b1b1d };
-      this.list.push({ id, type, name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
+      this.list.push({ id, type, mode: 'car', name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
         home: outside ? -1 : this.pickHome(r), car, plan: [], i: 0, driving: false, departed: 0 });
     }
+    for (let k = 0; k < (peds ? walkers : 0); k++) {
+      let x = r(), type = WALK_TYPES[0][0];
+      for (const [t, w] of WALK_TYPES) { x -= w; if (x <= 0) { type = t; break; } }
+      this.list.push({ id: count + k, type, mode: 'walk', name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
+        home: this.pickHome(r), car: traffic.randomCar(), plan: [], i: 0, driving: false, departed: 0 });
+    }
+    for (let k = 0; k < cyclists; k++) {
+      const courier = k < cyclists * 0.06;
+      this.list.push({ id: count + walkers + k, type: courier ? 'courier' : 'cyclist', mode: courier ? 'car' : 'bike',
+        name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`, home: courier ? -1 : this.pickHome(r),
+        car: courier ? { kind: 'scooter', paint: COURIER_BOXES[Math.floor(r() * 3)], ag: 1.3, f: 1.15 }
+          : { kind: 'bike', paint: BIKE_COLORS[Math.floor(r() * BIKE_COLORS.length)], ag: 1, f: 1 },
+        plan: [], i: 0, driving: false, departed: 0 });
+    }
     traffic.onArrive = (a, arrived) => this.arrive(a as Agent, arrived);
+    if (peds) peds.onArrive = (a) => this.arrive(a as Agent, true);
   }
 
   private pickHome(r: () => number) {
@@ -99,12 +127,79 @@ export class Agents {
     return pool.length ? { kind: 'poi', i: pool[Math.floor(r() * pool.length)] } : { kind: 'edge' };
   }
 
+  /** a destination of these categories near home (walking distance): one of the nearest few */
+  private near(a: Agent, r: () => number, max: number, ...cats: string[]): Where | null {
+    const h = this.places.homes[a.home];
+    const pool = cats.flatMap((c) => this.byCat[this.places.cats.indexOf(c)] ?? [])
+      .map((i) => ({ i, d: Math.hypot(this.places.pois[i][0] - h[0], this.places.pois[i][1] - h[1]) * this.vs }))
+      .filter((x) => x.d < max).sort((x, y) => x.d - y.d).slice(0, 6);
+    return pool.length ? { kind: 'poi', i: pool[Math.floor(r() * pool.length)].i } : null;
+  }
+  /** a walk: preferably to a park path or square 250-900 m away, else around the block */
+  private around(a: Agent, r: () => number): Where {
+    const h = this.places.homes[a.home];
+    const sp = this.peds?.parkSpot(h[0] * this.vs, -h[1] * this.vs, 250, 900, r);
+    if (sp && r() < 0.75) return { kind: 'park', spot: sp };
+    return this.block(a, r);
+  }
+  /** another building 200-500 m from home (a walk around the block) */
+  private block(a: Agent, r: () => number): Where {
+    const h = this.places.homes[a.home];
+    for (let t = 0; t < 30; t++) {
+      const i = Math.floor(r() * this.places.homes.length), o = this.places.homes[i];
+      const d = Math.hypot(o[0] - h[0], o[1] - h[1]) * this.vs;
+      if (d > 200 && d < 500) return { kind: 'house', i };
+    }
+    return { kind: 'home' };
+  }
+
+  /** a walker's day */
+  private walkPlan(a: Agent, r: () => number, wd: number): Activity[] {
+    const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
+    const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
+    const home: Where = { kind: 'home' };
+    const p: Activity[] = [];
+    const act = (where: Where, purpose: string, until: number) => p.push({ where, purpose, until });
+    const outAndBack = (where: Where | null, purpose: string, t: number, stay: number) => {
+      if (!where) return;
+      act(home, 'home', t); act(where, purpose, t + stay);
+    };
+    switch (a.type) {
+      case 'kid': {
+        const school = weekday ? this.near(a, r, 1200, 'school', 'kindergarten') : null;
+        if (!school) { outAndBack(this.near(a, r, 900, 'shop', 'supermarket', 'food'), 'shop', u(10 * H, 17 * H), u(20 * M, 60 * M)); break; }
+        act(home, 'home', u(7 * H + 45 * M, 8 * H + 15 * M));
+        act(school, 'school', wed ? u(11 * H + 55 * M, 12 * H + 10 * M) : u(15 * H + 20 * M, 15 * H + 45 * M));
+        break;
+      }
+      case 'walkShop':
+        outAndBack(this.near(a, r, 900, 'supermarket', 'shop'), 'shop', u(9 * H, 19 * H), u(10 * M, 35 * M));
+        if (r() < 0.6) outAndBack(this.near(a, r, 900, 'shop', 'food', 'health'), 'shop', u(p.length ? p[p.length - 1].until + 30 * M : 10 * H, 19 * H), u(10 * M, 30 * M));
+        break;
+      case 'dog':
+        for (const t of [u(7 * H, 8 * H + 30 * M), u(12 * H, 14 * H), u(19 * H, 22 * H)].slice(0, r() < 0.5 ? 2 : 3))
+          outAndBack(this.around(a, r), 'dog', t, u(1 * M, 4 * M));
+        break;
+      case 'walkErrand':
+        if (wd !== 0) outAndBack(this.near(a, r, 1000, 'health', 'services', 'leisure', 'food'), 'errand', u(9 * H, 18 * H), u(15 * M, 50 * M));
+        break;
+      case 'stroll':
+        if (r() < 0.5) outAndBack(this.near(a, r, 1000, 'food', 'leisure'), 'dinner', u(17 * H, 21 * H + 30 * M), u(30 * M, 120 * M));
+        else outAndBack(this.around(a, r), 'stroll', u(wd === 0 || wd === 6 ? 10 * H : 16 * H, 20 * H), u(15 * M, 60 * M));
+        break;
+    }
+    act(home, 'home', 24 * H);
+    for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
+    return p;
+  }
+
   /** the day's plan for an agent (seeded by agent and date: the same every time for that day) */
   private makePlan(a: Agent, date: string): Activity[] {
     const [y, m, d] = date.split('-').map(Number);
     const wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();   // 0 Sunday … 3 Wednesday … 6 Saturday
     const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
     const r = rng(a.id * 7919 + y * 372 + m * 31 + d);
+    if (a.mode === 'walk') return this.walkPlan(a, r, wd);
     const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
     const home: Where = a.home >= 0 ? { kind: 'home' } : { kind: 'edge' };
     const p: Activity[] = [];
@@ -119,6 +214,34 @@ export class Agents {
       act(home, 'home', 24 * H);
     };
     switch (a.type) {
+      case 'cyclist': {   // to work / school or an errand by bike, mostly weekdays
+        if (weekday && r() < 0.6) {
+          act(home, 'home', u(7 * H + 15 * M, 9 * H));
+          act(this.poi(r, 'office', 'school', 'shop', 'health', 'services'), 'work', u(16 * H + 30 * M, 18 * H + 45 * M));
+        } else if (r() < 0.7) {
+          act(home, 'home', u(9 * H, 18 * H));
+          act(this.poi(r, 'shop', 'supermarket', 'food', 'leisure'), 'shop', p[0].until + u(20 * M, 90 * M));
+        }
+        act(home, 'home', 24 * H);
+        break;
+      }
+      case 'courier': {   // meal deliveries in the evening (and some lunchtimes): restaurant -> customer -> ...
+        const slots = [[18 * H, 22 * H + 30 * M]];
+        if (r() < 0.4) slots.unshift([11 * H + 45 * M, 13 * H + 45 * M]);
+        let t = slots[0][0] + u(-20 * M, 20 * M);
+        act({ kind: 'edge' }, 'away', t);
+        for (const [s0, s1] of slots) {
+          t = Math.max(t, s0);
+          while (t < s1) {
+            act(this.poi(r, 'food'), 'pickup-food', t + u(3 * M, 8 * M));
+            t = p[p.length - 1].until;
+            act({ kind: 'house', i: Math.floor(r() * this.places.homes.length) }, 'delivery', t + u(4 * M, 9 * M));
+            t = p[p.length - 1].until + u(1 * M, 6 * M);
+          }
+        }
+        act({ kind: 'edge' }, 'away', 24 * H);
+        break;
+      }
       case 'parent': {
         if (!weekday) return (shopping(), p);
         const school = this.poi(r, 'school', 'kindergarten');
@@ -211,12 +334,15 @@ export class Agents {
   }
 
   /** kerbside spot of a place (cached) */
-  private spot(a: Agent, w: Where): Spot | 'edge' | null {
+  private spot(a: Agent, w: Where): Spot | WalkSpot | 'edge' | null {
     if (w.kind === 'edge') return 'edge';
-    const key = w.kind === 'home' ? `h${a.home}` : `p${w.i}`;
+    if (w.kind === 'park') return w.spot;
+    const walk = a.mode === 'walk';
+    const key = (walk ? 'w' : 'c') + (w.kind === 'home' ? `h${a.home}` : w.kind === 'house' ? `h${w.i}` : `p${w.i}`);
     if (!this.spots.has(key)) {
-      const xy = w.kind === 'home' ? this.places.homes[a.home] : this.places.pois[w.i];
-      this.spots.set(key, xy ? this.traffic.spotNear(xy[0] * this.vs, -xy[1] * this.vs) : null);
+      const xy = w.kind === 'home' ? this.places.homes[a.home] : w.kind === 'house' ? this.places.homes[w.i] : this.places.pois[w.i];
+      const x = xy ? xy[0] * this.vs : 0, z = xy ? -xy[1] * this.vs : 0;
+      this.spots.set(key, !xy ? null : walk ? (this.peds?.spotNear(x, z) ?? null) as never : this.traffic.spotNear(x, z));
     }
     return this.spots.get(key)!;
   }
@@ -225,6 +351,8 @@ export class Agents {
   label(a: Agent, w: Where) {
     if (w.kind === 'edge') return 'outside the area';
     if (w.kind === 'home') return a.home >= 0 ? `home, ${this.street(this.places.homes[a.home][3])}` : 'outside the area';
+    if (w.kind === 'house') return this.street(this.places.homes[w.i][3]);
+    if (w.kind === 'park') return 'a park / square';
     const p = this.places.pois[w.i];
     return this.places.names[p[3]] || this.places.cats[p[2]];
   }
@@ -236,18 +364,22 @@ export class Agents {
   /** a rough trip duration before the route is known (for jumps in time) */
   private guess(a: Agent, from: Where, to: Where) {
     const pos = (w: Where) => w.kind === 'home' && a.home >= 0 ? this.places.homes[a.home]
-      : w.kind === 'poi' ? this.places.pois[w.i] : null;
+      : w.kind === 'poi' ? this.places.pois[w.i] : w.kind === 'house' ? this.places.homes[w.i] : null;
+    if (from.kind === 'park' || to.kind === 'park') return 700 / 1.3 + 20;
     const pa = pos(from), pb = pos(to);
     const d = pa && pb ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) * this.vs * 1.4 : 900;
-    return d / 6 + 60;
+    return a.mode === 'walk' ? d / 1.3 + 20 : d / 6 + 60;
   }
 
   private depart(a: Agent, now: number, progress = 0) {
     const from = a.plan[a.i], to = a.plan[a.i + 1];
     const sa = this.spot(a, from.where), sb = this.spot(a, to.where);
     a.departed = now;
-    if (sa && sb && !(sa === 'edge' && sb === 'edge' && to.purpose !== 'passing')   // outside -> outside: no drive
-      && this.traffic.spawn(a, sa, sb, a.car, progress) > 0) {
+    const go = a.mode === 'walk'
+      ? sa && sb && sa !== 'edge' && sb !== 'edge' && (this.peds?.spawn(a, sa as WalkSpot, sb as WalkSpot, progress) ?? 0) > 0
+      : sa && sb && !(sa === 'edge' && sb === 'edge' && to.purpose !== 'passing')   // outside -> outside: no drive
+        && this.traffic.spawn(a, sa as Spot | 'edge', sb as Spot | 'edge', a.car, progress) > 0;
+    if (go) {
       a.driving = true;
     } else {
       a.i++;   // no route (or nothing to drive): just be there
@@ -271,6 +403,7 @@ export class Agents {
     if (jump) {
       this.day = date;
       this.traffic.clearCars();
+      this.peds?.clear();
       for (const a of this.list) {
         a.plan = this.makePlan(a, date);
         a.driving = false;

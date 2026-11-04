@@ -7,6 +7,8 @@ import { buildLanes, loadRoads, roadOverlay } from './roads';
 import { Traffic } from './traffic';
 import { Agents } from './agents';
 import { AgentView } from './agentView';
+import { Pedestrians } from './pedestrians';
+import { Transit } from './transit';
 import { baseVoxel, gridOrigin, lampLightAt, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
 import { Walk } from './walk';
@@ -66,7 +68,12 @@ async function main() {
   const groundGuess = 20; // voxels above z0, refined once chunks arrive
 
   const renderer = new THREE.WebGPURenderer({ antialias: false, trackTimestamp: GPU_TIMING });  // FXAA in deferred.ts
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  // Dynamic resolution: render at most MP megapixels (high-DPI screens would otherwise draw 4-8 MP every
+  // frame), and lower the internal resolution while moving if frames get slow; raise it again when smooth.
+  const MP = Number(params.get('mp') ?? 3.5) * 1e6, DYNRES = params.get('dynres') !== '0';
+  const maxRatio = () => Math.min(devicePixelRatio, 2, Math.sqrt(MP / (innerWidth * innerHeight)));
+  let pixelRatio = maxRatio();
+  renderer.setPixelRatio(pixelRatio);
   renderer.setSize(innerWidth, innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -153,6 +160,7 @@ async function main() {
       const n = await network;
       if (!n) return;
       roads = roadOverlay(n.net, n.lanes, VS);
+      if (peds) roads.add(peds.overlay());   // pavements and crossings
       fx.add(roads);
     }
     if (roads) roads.visible = on;
@@ -161,6 +169,8 @@ async function main() {
   if (params.get('roads') === '1') setRoads(true);
   let traffic: Traffic | null = null;
   let agents: Agents | null = null;
+  let peds: Pedestrians | null = null;
+  let transit: Transit | null = null;
   // agent clock: seconds of the day; runs on from the chosen time (live: the Brussels clock)
   let clockBase = 0, clockAt = performance.now();
   const agentTime = () => Math.min(24 * 3600 - 1, clockBase + (performance.now() - clockAt) / 1000);
@@ -172,17 +182,27 @@ async function main() {
       if (!n) { trafficOn = false; return; }
       // car paint colours measured on the parked cars in the LiDAR (pipeline vehicles.py)
       const palette = await fetch(`vehicles/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: 12, train: 3 },
+      // STIB lines from the timetable (pipeline transit.py); without it, trams wander the tracks
+      const tt = await fetch(`transit/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: tt ? 0 : 12, train: 3 },
         deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
         (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
         palette?.palette ?? []);
+      if (tt) transit = new Transit(tt, traffic, VS);
       traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
       fx.add(traffic.group, traffic.lights);
       // the people driving them (places from OSM, pipeline places.py)
       const places = await fetch(`places/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      if (places) agents = new Agents(places, traffic, VS, Number(params.get('agents') ?? 8000));
+      // pedestrians on the pavements (both sides of every street), crossing at intersections
+      peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial((w) => lampLightAt(w, 0.8).mul(night)), traffic);
+      peds.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
+      fx.add(peds.mesh);
+      if (roads) roads.add(peds.overlay());
+      if (places) agents = new Agents(places, traffic, VS, Number(params.get('agents') ?? 8000), peds,
+        Number(params.get('walkers') ?? 10000), Number(params.get('cyclists') ?? 1500));
     }
     if (traffic) traffic.group.visible = traffic.lights.visible = trafficOn;
+    if (peds) peds.mesh.visible = trafficOn;
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
     dirty = true;
   };
@@ -302,7 +322,7 @@ async function main() {
     }
   };
   const inspector = new Inspector(vox, scene, manifest.origin[2], () => { dirty = true; });
-  const agentView = new AgentView(() => traffic, () => agents, fx, controls, camera, () => { dirty = true; });
+  const agentView = new AgentView(() => traffic, () => agents, () => peds, fx, controls, camera, () => { dirty = true; });
   const raycaster = new THREE.Raycaster();
   let down: { x: number; y: number; t: number } | null = null;
   renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button === 0) down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
@@ -378,15 +398,37 @@ async function main() {
   setTime(Number(timeInput.value));
   updateWeather();
   setTilt(params.get('tilt') === '1');
-  window.addEventListener('resize', () => {
+  const resize = () => {
     dirty = true;
     cityDirty = true;
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
+    renderer.setPixelRatio(pixelRatio);
     renderer.setSize(innerWidth, innerHeight);
     const s = renderer.getDrawingBufferSize(new THREE.Vector2());
     deferred.setSize(s.x, s.y);
-  });
+  };
+  window.addEventListener('resize', () => { pixelRatio = Math.min(pixelRatio, maxRatio()); resize(); });
+  // adapt to the frame rate while moving (full redraws): average interval over ~1 s
+  let resAcc = 0, resN = 0, resGood = 0, resAt = performance.now();
+  const adaptResolution = (interval: number, moving: boolean, now: number) => {
+    if (!DYNRES) return;
+    if (moving) { resAcc += interval; resN++; }
+    if (now - resAt < 1000) return;
+    resAt = now;
+    if (resN < 20) { resAcc = resN = 0; return; }      // not enough moving frames to judge
+    const avg = resAcc / resN;
+    resAcc = resN = 0;
+    const max = maxRatio(), min = Math.max(0.5, max * 0.45);
+    if (avg > 22 && pixelRatio > min) {                  // slow: 15 % fewer pixels per side
+      pixelRatio = Math.max(min, pixelRatio * 0.85);
+      resGood = 0;
+      resize();
+      telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1) });
+    } else if (avg < 17.5 && pixelRatio < max) {         // smooth for a while: try more pixels
+      if (++resGood >= 4) { pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize(); }
+    } else resGood = 0;
+  };
 
   telemetry.setState(() => ({
     view: getView(), lod: lod.stats, errPx: lod.errPx,
@@ -417,8 +459,12 @@ async function main() {
     if (walk.active) walk.update(interval / 1000);
     else controls.update();
     if (trafficOn && traffic) {
-      agents?.update(agentTime(), day);
-      traffic.update(Math.min(interval, 100) / 1000);
+      const now = agentTime();
+      agents?.update(now, day);
+      const [y, mo, d] = day.split('-').map(Number);
+      transit?.update(now, (new Date(Date.UTC(y, mo - 1, d)).getUTCDay() + 6) % 7);   // 0 Monday
+      traffic.update(Math.min(interval, 100) / 1000, now);
+      peds?.update(Math.min(interval, 100) / 1000);
     }
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
@@ -431,6 +477,7 @@ async function main() {
       focalLength.value = d * DEPTH_RATIO;
     }
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
+    if (lastTickRendered) adaptResolution(interval, moving, now);
     const cityChanged = CONTINUOUS || moving || tilesChanged || cityDirty;
     if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested)) {
       // nothing changed: draw nothing, the GPU stays idle
@@ -511,6 +558,7 @@ async function main() {
       `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
       ` (${(lod.stats.residentFaces / 1e6).toFixed(1)}M faces)` +
       `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
+      ` · ${renderer.domElement.width}×${renderer.domElement.height} (×${pixelRatio.toFixed(2)})` +
       ` · shadows ${SHADOWS ? 'on' : 'off'}${tiltOn ? ' · tilt-shift' : ''}${walk.active ? ' · walking' : ''}` +
       (TELEMETRY ? ' · telemetry on' : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
   }
@@ -518,7 +566,7 @@ async function main() {
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
     renderer, scene, cityScene, deferred, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
-    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, agentTime,
+    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, get peds() { return peds; }, get transit() { return transit; }, agentTime,
     whenIdle: () => lod.whenIdle(),
     info: () => ({ backend, ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
