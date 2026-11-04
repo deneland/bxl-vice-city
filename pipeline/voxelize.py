@@ -57,6 +57,14 @@ LAYER = {}  # street-level colour layer, loaded in main() (shared with forked wo
 
 C_UNCLASSIFIED, C_GROUND, C_LOWVEG, C_HIGHVEG, C_BUILDING = 1, 2, 3, 5, 6
 C_VEHICLE = 64     # derived here (ASPRS user range): parked vehicles found in unclassified geometry
+REMOVE_VEHICLES = "--keep-vehicles" not in sys.argv   # 2021's parked cars out of the geometry (simulated instead)
+FOOTPRINTS = ROOT / "data" / "cache" / "vehicles"
+# tidy (default; --no-tidy to keep all): unclassified voxels low above the ground are kept only when they belong to something: a
+# structure rising above TIDY_H (posts, signs, shelters), a building (attached to it), or something the
+# street photos recognised (building, sign, pole, fence, street furniture). Everything higher is kept.
+TIDY = "--no-tidy" not in sys.argv
+TIDY_H = 5                 # voxels (2.5 m) above the ground
+SEM_KEEP = [1, 2, 6, 7, 8, 11]
 FLAG_FILL = 1      # geometry synthesised (wall / terrain fill), not measured
 FLAG_APRON = 2     # belongs to the neighbouring tile, used only for culling
 FLAG_PTCOLOR = 4   # synthetic voxel whose colour comes from nearby measured points
@@ -85,9 +93,55 @@ def log(msg: str) -> None:
 
 
 # --- pass 1: bucket points per block -----------------------------------------
-def bucket_points() -> float:
+def bucket_tile(tile: str):
+    """Pass 1 for one LAS file (runs in a worker): points in the region, bucketed per block (+margin)
+    into CACHE/b{block}_{tile}.bin. Returns (tile, low ground percentiles, points)."""
+    path = next((ROOT / "data/raw/lidar").glob(f"*{tile}*.las"))
+    files, ground_lo, total = {}, [], 0
+    with laspy.open(path) as f:
+        for ch in f.chunk_iterator(5_000_000):
+            x = np.asarray(ch.x) - ROI["xmin"]
+            y = np.asarray(ch.y) - ROI["ymin"]
+            c = np.asarray(ch.classification)
+            m = (x >= 0) & (x < NX * VS) & (y >= 0) & (y < NY * VS) & (c != 7) & (c != 18)
+            if not m.any():
+                continue
+            rec = np.empty(m.sum(), PT)
+            rec["x"], rec["y"], rec["z"] = x[m], y[m], np.asarray(ch.z)[m]
+            rec["r"], rec["g"], rec["b"] = (np.asarray(ch.red)[m] >> 8), (np.asarray(ch.green)[m] >> 8), (np.asarray(ch.blue)[m] >> 8)
+            rec["c"] = c[m]
+            g = rec["z"][rec["c"] == C_GROUND]
+            if len(g):
+                ground_lo.append(float(np.percentile(g, 0.5)))   # robust: tunnels / canal edges are below
+            total += len(rec)
+            cx, cy = rec["x"] / VS, rec["y"] / VS
+            bx0 = np.floor((cx - MARGIN) / BLOCK).clip(0, NBX - 1).astype(int)
+            bx1 = np.floor((cx + MARGIN) / BLOCK).clip(0, NBX - 1).astype(int)
+            by0 = np.floor((cy - MARGIN) / BLOCK).clip(0, NBY - 1).astype(int)
+            by1 = np.floor((cy + MARGIN) / BLOCK).clip(0, NBY - 1).astype(int)
+            for dx in (0, 1):
+                for dy in (0, 1):
+                    bx, by = bx0 + dx, by0 + dy
+                    sel = (bx <= bx1) & (by <= by1)
+                    if dx and not sel.any():
+                        continue
+                    bid = (by * NBX + bx)[sel]
+                    r = rec[sel]
+                    o = np.argsort(bid, kind="stable")
+                    bid, r = bid[o], r[o]
+                    cuts = np.flatnonzero(np.diff(bid)) + 1
+                    for part, b in zip(np.split(r, cuts), bid[np.r_[0, cuts]] if len(bid) else []):
+                        fh = files.get(b) or files.setdefault(b, open(CACHE / f"b{b}_{tile}.bin", "ab"))
+                        fh.write(part.tobytes())
+    for fh in files.values():
+        fh.close()
+    return tile, ground_lo, total
+
+
+def bucket_points(jobs: int) -> float:
+    """Pass 1: the LAS files in parallel (one worker per file; reading them is the slow part)."""
     key = {"roi": {k: ROI[k] for k in ("xmin", "ymin", "xmax", "ymax", "tiles")}, "block": BLOCK,
-           "margin": MARGIN, "vs": VS, "format": 1}
+           "margin": MARGIN, "vs": VS, "format": 3}
     meta_f = CACHE / "meta.json"
     if meta_f.exists():
         meta = json.loads(meta_f.read_text())
@@ -97,48 +151,13 @@ def bucket_points() -> float:
     CACHE.mkdir(parents=True, exist_ok=True)
     for f in CACHE.glob("*"):
         f.unlink()
-    files = {}
     ground_lo, total = [], 0
-    for tile in ROI["tiles"]:
-        path = next((ROOT / "data/raw/lidar").glob(f"*{tile}*.las"))
-        with laspy.open(path) as f:
-            for ch in f.chunk_iterator(5_000_000):
-                x = np.asarray(ch.x) - ROI["xmin"]
-                y = np.asarray(ch.y) - ROI["ymin"]
-                c = np.asarray(ch.classification)
-                m = (x >= 0) & (x < NX * VS) & (y >= 0) & (y < NY * VS) & (c != 7) & (c != 18)
-                if not m.any():
-                    continue
-                rec = np.empty(m.sum(), PT)
-                rec["x"], rec["y"], rec["z"] = x[m], y[m], np.asarray(ch.z)[m]
-                rec["r"], rec["g"], rec["b"] = (np.asarray(ch.red)[m] >> 8), (np.asarray(ch.green)[m] >> 8), (np.asarray(ch.blue)[m] >> 8)
-                rec["c"] = c[m]
-                g = rec["z"][rec["c"] == C_GROUND]
-                if len(g):
-                    ground_lo.append(np.percentile(g, 0.01))
-                total += len(rec)
-                cx, cy = rec["x"] / VS, rec["y"] / VS
-                bx0 = np.floor((cx - MARGIN) / BLOCK).clip(0, NBX - 1).astype(int)
-                bx1 = np.floor((cx + MARGIN) / BLOCK).clip(0, NBX - 1).astype(int)
-                by0 = np.floor((cy - MARGIN) / BLOCK).clip(0, NBY - 1).astype(int)
-                by1 = np.floor((cy + MARGIN) / BLOCK).clip(0, NBY - 1).astype(int)
-                for dx in (0, 1):
-                    for dy in (0, 1):
-                        bx, by = bx0 + dx, by0 + dy
-                        sel = (bx <= bx1) & (by <= by1)
-                        if dx and not sel.any():
-                            continue
-                        bid = (by * NBX + bx)[sel]
-                        r = rec[sel]
-                        o = np.argsort(bid, kind="stable")
-                        bid, r = bid[o], r[o]
-                        cuts = np.flatnonzero(np.diff(bid)) + 1
-                        for part, b in zip(np.split(r, cuts), bid[np.r_[0, cuts]] if len(bid) else []):
-                            fh = files.get(b) or files.setdefault(b, open(CACHE / f"b{b}.bin", "ab"))
-                            fh.write(part.tobytes())
-        log(f"pass 1: read {path.name} ({total:,} points in region so far)")
-    for fh in files.values():
-        fh.close()
+    # (each reader holds one 5M-point chunk at a time; a few in parallel saturate the disk)
+    with ProcessPoolExecutor(max_workers=min(jobs, 6, len(ROI["tiles"])), mp_context=mp.get_context("fork")) as ex:
+        for tile, gl, n in ex.map(bucket_tile, ROI["tiles"]):
+            ground_lo += gl
+            total += n
+            log(f"pass 1: {tile} read ({n:,} points; {total:,} in region so far)")
     z0 = float(np.floor(min(ground_lo))) - 1.0
     meta_f.write_text(json.dumps({"key": key, "z0": z0, "points": total}))
     return z0
@@ -163,6 +182,15 @@ def fill_nearest(grid: np.ndarray, valid: np.ndarray) -> np.ndarray:
         return grid
     idx = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
     return grid[tuple(idx)]
+
+
+def open_colour(gcol, open_m, size=9):
+    """Smoothed colour of open ground, continued (nearest) into the rest: for ground that the aerial
+    photo shows covered (tree crowns, cars and their shadows)."""
+    w = ndimage.uniform_filter(open_m.astype(np.float32), size=size)
+    sm = np.stack([ndimage.uniform_filter(np.where(open_m, gcol[..., c], 0).astype(np.float32), size=size)
+                   for c in range(3)], -1) / np.maximum(w, 1e-6)[..., None]
+    return fill_nearest(sm.round().clip(0, 255).astype(np.uint8), open_m & (w > 0.05))
 
 
 def aggregate(key, rgb, cls, flags=None, weight=None):
@@ -440,6 +468,25 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
         veh = low & ok[lab[vy, vx]]
         vcls[veh] = C_VEHICLE
         st["vehicle"] += int(veh.sum())
+        if REMOVE_VEHICLES and veh.any():
+            # 2021's parked cars leave the geometry (the ground under them is in the fill below); their
+            # footprint columns are kept: where cars stood is where people park (simulated parking)
+            fp = np.zeros((GH, GW), bool)
+            fp[vy[veh], vx[veh]] = True
+            st["footprint"] = np.flatnonzero(fp.ravel())
+            vkey, col, vcls, cnt = vkey[~veh], col[~veh], vcls[~veh], cnt[~veh]
+            # the ground where the cars stood took the colour of the nearest measured ground: their shadow
+            # in the aerial photo. Continue the open road around them instead (as under tree crowns).
+            fpd = ndimage.binary_dilation(fp, iterations=3)
+            open_r = has_ground & ~canopy & ~fpd
+            if open_r.any():
+                road = open_colour(gcol, open_r)
+                fsel = fpd[fy, fx] & (fcls == C_GROUND)
+                fcol[fsel] = (road[fy[fsel], fx[fsel]] * np.where(fz[fsel] < ground[fy[fsel], fx[fsel]], 0.8, 1.0)[:, None]).astype(np.uint8)
+                vy2, vx2 = (vkey // GW) % GH, vkey % GW
+                gsel = (vcls == C_GROUND) & fpd[vy2, vx2]
+                col[gsel] = road[vy2[gsel], vx2[gsel]]
+                st["under_car"] = st.get("under_car", 0) + int(fsel.sum() + gsel.sum())
     new = ~np.isin(fkey, vkey, assume_unique=True)
     akey = np.concatenate([vkey, fkey[new]])
     acol = np.concatenate([col, fcol[new]])
@@ -447,26 +494,67 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     aflag = np.concatenate([np.zeros(len(vkey), np.uint8), fflag[new]])
     acnt = np.concatenate([cnt, np.full(int(new.sum()), 1 << 20)])   # fill voxels: solid by construction
 
+    # (--tidy) low, loose unclassified voxels: candidates to drop unless the photos recognise them
+    cand = None
+    if TIDY:
+        ax, ay, az = akey % GW, (akey // GW) % GH, akey // (GW * GH)
+        u = (acls == C_UNCLASSIFIED) & (aflag & FLAG_FILL == 0)
+        low = u & (az - ground[ay, ax] <= TIDY_H)
+        # parts of taller structures: 26-connected unclassified voxels reaching above TIDY_H
+        if low.any():
+            uz0 = int(az[u].min()); nzz = int(az[u].max()) - uz0 + 1
+            gridu = np.zeros((nzz, GH, GW), bool)
+            gridu[az[u] - uz0, ay[u], ax[u]] = True
+            labu, nu = ndimage.label(gridu, structure=np.ones((3, 3, 3)))
+            tall = np.zeros(nu + 1, bool)
+            hi = u & (az - ground[ay, ax] > TIDY_H)
+            tall[labu[az[hi] - uz0, ay[hi], ax[hi]]] = True
+            tall[0] = False
+            part_of_tall = np.zeros(len(akey), bool)
+            part_of_tall[low] = tall[labu[az[low] - uz0, ay[low], ax[low]]]
+            attached = ndimage.binary_dilation(is_bld, iterations=2)[ay, ax]
+            cand = low & ~part_of_tall & ~attached
+        else:
+            cand = low
+        if cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
+            cc = np.zeros((GH, GW), bool)
+            cc[ay[cand], ax[cand]] = True
+            ccd = ndimage.binary_dilation(cc, iterations=2)
+            open_r = has_ground & ~canopy & ~ccd
+            if open_r.any():
+                road = open_colour(gcol, open_r)
+                gs = (acls == C_GROUND) & ccd[ay, ax]
+                acol[gs] = road[ay[gs], ax[gs]]
+
     # f. isolated specks: small clusters (not counting the ground they stand on) backed by few points
     drop = specks(akey, acls, acnt, ground, GW, GH, st)
     akey, acol, acls, aflag = akey[~drop], acol[~drop], acls[~drop], aflag[~drop]
+    if cand is not None:
+        st["tidy_cand"] = cand[~drop]
     return Vox(akey % GW + gx0, (akey // GW) % GH + gy0, akey // (GW * GH), acol, acls, aflag)
 
 
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0}
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
-    f = CACHE / f"b{by * NBX + bx}.bin"
-    if not f.exists():
-        return levels, st, None
-    p = np.fromfile(f, PT)
+    parts = sorted(CACHE.glob(f"b{by * NBX + bx}_*.bin"))
+    if not parts:
+        return levels, st, None, None
+    p = np.concatenate([np.fromfile(f, PT) for f in parts])
     cx0, cy0 = bx * BLOCK, by * BLOCK
     cx1, cy1 = min(cx0 + BLOCK, NX), min(cy0 + BLOCK, NY)
     gx0, gy0 = max(cx0 - MARGIN, 0), max(cy0 - MARGIN, 0)
     gx1, gy1 = min(cx1 + MARGIN, NX), min(cy1 + MARGIN, NY)
     v = voxelize_block(p, gx0, gy0, gx1 - gx0, gy1 - gy0, z0, st)
     del p
+    # vehicle footprint columns inside this block (global column coordinates)
+    fp = st.pop("footprint", None)
+    foot = None
+    if fp is not None:
+        fx, fy = fp % (gx1 - gx0) + gx0, fp // (gx1 - gx0) + gy0
+        inb = (fx >= cx0) & (fx < cx1) & (fy >= cy0) & (fy < cy1)
+        foot = np.stack([fx[inb], fy[inb]], 1).astype(np.uint16)
     if LAYER:
         # street-level photo colours (streetview.py), keyed by L0 voxel; coarser levels inherit them
         k = (v.z.astype(np.int64) * NY + v.y) * NX + v.x
@@ -490,6 +578,12 @@ def process_block(bx: int, by: int, z0: float):
         sem[idx] = lab[use]
         st["labelled"] += len(idx)
     v.flag = (v.flag & ((1 << LABEL_SHIFT) - 1)) | (sem << LABEL_SHIFT).astype(np.uint8)
+    cand = st.pop("tidy_cand", None)
+    if cand is not None:   # --tidy: drop the loose low clutter the photos did not recognise
+        drop = cand & ~np.isin(sem, SEM_KEEP)
+        st["tidy"] += int(drop.sum())
+        keep = ~drop
+        v = Vox(v.x[keep], v.y[keep], v.z[keep], v.col[keep], v.cls[keep], v.flag[keep])
     carry = None
     BL = min(LEVELS, 4)
     for L in range(BL):
@@ -505,7 +599,7 @@ def process_block(bx: int, by: int, z0: float):
         lv["faces"] += count_faces(v, x0, x1, y0, y1)
         if L == BL - 1:
             carry = v.select(x0, x1, y0, y1)
-    return levels, st, carry
+    return levels, st, carry, foot
 
 
 def main() -> None:
@@ -513,7 +607,7 @@ def main() -> None:
     jobs = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("--jobs=")), cpu_quota()))
     log(f"region '{ROI['name']}': {NX}x{NY} columns @ {VS} m, {NBX}x{NBY} blocks of {BLOCK * VS:.0f} m, "
         f"{LEVELS} levels, {jobs} parallel jobs")
-    z0 = bucket_points()
+    z0 = bucket_points(jobs)
     if LAYER_F.exists() and "--no-photo" not in sys.argv:
         lf = np.load(LAYER_F)
         if tuple(lf["size"]) == (NX, NY):
@@ -531,13 +625,15 @@ def main() -> None:
         (DEST / f"L{L}").mkdir(parents=True)
 
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0}
-    carry = []
+    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
+    carry, feet = [], []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
         futs = [ex.submit(process_block, bx, by, z0) for bx, by in blocks]
         for i, fut in enumerate(as_completed(futs), 1):
-            lvs, bst, c = fut.result()
+            lvs, bst, c, foot = fut.result()
+            if foot is not None:
+                feet.append(foot)
             for L, lv in enumerate(lvs):
                 for k in ("voxels", "faces", "bytes"):
                     levels[L][k] += lv[k]
@@ -549,6 +645,10 @@ def main() -> None:
             if i % max(1, len(blocks) // 6) == 0 or i == len(blocks):
                 log(f"blocks {i}/{len(blocks)}: {levels[0]['voxels']:,} L0 voxels")
 
+    if feet:   # where 2021's parked cars stood (columns), for parking spots
+        FOOTPRINTS.mkdir(parents=True, exist_ok=True)
+        np.save(FOOTPRINTS / f"{ROI['name']}.npy", np.concatenate(feet))
+        log(f"vehicles removed from the geometry; {sum(len(f) for f in feet):,} footprint columns kept")
     # pass 3: levels spanning several blocks
     BL = min(LEVELS, 4)
     v = Vox.concat(carry) if carry else None
@@ -562,7 +662,7 @@ def main() -> None:
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
         f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
         f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
-        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; "
+        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = []
     for L, lv in enumerate(levels):

@@ -63,8 +63,8 @@ function personGeometry() {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
-  g.setAttribute('pmat', new THREE.Float32BufferAttribute(mat, 1));
-  g.setAttribute('limb', new THREE.Float32BufferAttribute(limb, 1));
+  // body part (material) and limb in one attribute: WebGPU allows only 8 vertex buffers per draw
+  g.setAttribute('part', new THREE.Float32BufferAttribute(mat.flatMap((m, i) => [m, limb[i]]), 2));
   g.setIndex(idx);
   return g;
 }
@@ -81,8 +81,7 @@ export class Pedestrians {
   private free: number[] = [];
   private busy = new Map<string, number>();     // crossing key `${edge}:${node}` -> people on it
   private grid = new Map<string, { seg: Seg; s: number; x: number; z: number }[]>();
-  private phase: THREE.InstancedBufferAttribute;
-  private yaw: THREE.InstancedBufferAttribute;
+  private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: unknown) => void) | null = null;
 
   constructor(net: RoadNetwork, vs: number, material: THREE.Material, private traffic: Traffic | null, capacity = 1500) {
@@ -175,15 +174,24 @@ export class Pedestrians {
       // nearest pavement points (sampled) for linking path ends
       const pave: { seg: Seg; s: number; x: number; y: number; z: number }[] = [];
       const tmp = new THREE.Vector3();
+      const PC = 15, paveGrid = new Map<string, typeof pave>();   // (spatial index: a commune has ~300k points)
       for (const seg of this.segs) if (!seg.cross && seg.pts.length > 6)
-        for (let s = 0.5; s < seg.len - 0.5; s += 2) { at(seg, s, tmp); pave.push({ seg, s, x: tmp.x, y: tmp.y, z: tmp.z }); }
+        for (let s = 0.5; s < seg.len - 0.5; s += 2) {
+          at(seg, s, tmp);
+          const q = { seg, s, x: tmp.x, y: tmp.y, z: tmp.z }, key = `${Math.floor(q.x / PC)},${Math.floor(q.z / PC)}`;
+          pave.push(q);
+          if (!paveGrid.has(key)) paveGrid.set(key, []);
+          paveGrid.get(key)!.push(q);
+        }
       const splits = new Map<Seg, { s: number; v: number }[]>();
       for (const seg of paths) {
         for (const [v, s] of [[seg.a, 0], [seg.b, seg.len]] as const) {
           if ((deg.get(v) ?? 0) > 1) continue;   // only dangling ends
           at(seg, s, tmp);
           let best: (typeof pave)[0] | null = null, bd = 15 * 15;
-          for (const q of pave) { const d = (q.x - tmp.x) ** 2 + (q.z - tmp.z) ** 2; if (d < bd) { bd = d; best = q; } }
+          const gx = Math.floor(tmp.x / PC), gz = Math.floor(tmp.z / PC);
+          for (let i = gx - 1; i <= gx + 1; i++) for (let j = gz - 1; j <= gz + 1; j++)
+            for (const q of paveGrid.get(`${i},${j}`) ?? []) { const d = (q.x - tmp.x) ** 2 + (q.z - tmp.z) ** 2; if (d < bd) { bd = d; best = q; } }
           if (!best) continue;
           const nv = vid++;
           if (!splits.has(best.seg)) splits.set(best.seg, []);
@@ -226,20 +234,22 @@ export class Pedestrians {
 
     // --- mesh: instanced people with per-instance colours and walk phase ---
     const g = personGeometry();
-    const shirt = new Float32Array(capacity * 3), skin = new Float32Array(capacity * 3), pants = new Float32Array(capacity * 3);
+    // per person: shirt, skin, trousers colours (one interleaved buffer, static) and walk phase + heading
+    // (one buffer, updated every frame); WebGPU allows only 8 vertex buffers per draw
+    const look = new Float32Array(capacity * 9);
     const c = new THREE.Color();
     for (let i = 0; i < capacity; i++) {
-      c.set(SHIRTS[i % SHIRTS.length]); shirt.set([c.r, c.g, c.b], i * 3);
-      c.set(SKIN[(i * 7) % SKIN.length]); skin.set([c.r, c.g, c.b], i * 3);
-      c.set(TROUSERS[(i * 3) % TROUSERS.length]); pants.set([c.r, c.g, c.b], i * 3);
+      c.set(SHIRTS[i % SHIRTS.length]); look.set([c.r, c.g, c.b], i * 9);
+      c.set(SKIN[(i * 7) % SKIN.length]); look.set([c.r, c.g, c.b], i * 9 + 3);
+      c.set(TROUSERS[(i * 3) % TROUSERS.length]); look.set([c.r, c.g, c.b], i * 9 + 6);
     }
-    g.setAttribute('shirt', new THREE.InstancedBufferAttribute(shirt, 3));
-    g.setAttribute('skin', new THREE.InstancedBufferAttribute(skin, 3));
-    g.setAttribute('pants', new THREE.InstancedBufferAttribute(pants, 3));
-    this.phase = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
-    g.setAttribute('phase', this.phase);
-    this.yaw = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
-    g.setAttribute('yaw', this.yaw);
+    const lb = new THREE.InstancedInterleavedBuffer(look, 9);
+    g.setAttribute('shirt', new THREE.InterleavedBufferAttribute(lb, 3, 0));
+    g.setAttribute('skin', new THREE.InterleavedBufferAttribute(lb, 3, 3));
+    g.setAttribute('pants', new THREE.InterleavedBufferAttribute(lb, 3, 6));
+    this.walk = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
+    this.walk.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('walk', this.walk);
     this.mesh = new THREE.InstancedMesh(g, material, capacity);
     this.mesh.frustumCulled = false;
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
@@ -247,6 +257,30 @@ export class Pedestrians {
   }
 
   get walking() { return this.walkers.length; }
+
+  // --- people standing still (waiting at a stop) ---
+  private standing = new Map<unknown, number>();
+  /** show someone standing at a spot (facing a random way) */
+  stand(agent: unknown, sp: WalkSpot) {
+    if (this.standing.has(agent) || !this.free.length) return;
+    const i = this.free.pop()!;
+    const p = at(sp.seg, sp.s, new THREE.Vector3());
+    // a little scatter, so a crowd does not stand in one voxel
+    p.x += (Math.random() - 0.5) * 2.5; p.z += (Math.random() - 0.5) * 2.5;
+    const yaw = Math.random() * Math.PI * 2;
+    this.mesh.setMatrixAt(i, this.m4.compose(p, this.q.setFromEuler(this.e.set(0, yaw, 0)), this.one));
+    this.walk.setXY(i, 0, yaw);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.standing.set(agent, i);
+  }
+  unstand(agent: unknown) {
+    const i = this.standing.get(agent);
+    if (i === undefined) return;
+    this.mesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.free.push(i);
+    this.standing.delete(agent);
+  }
 
   /** debug overlay (roads view, R): pavements green, footpaths blue, crossings white, corner links grey */
   overlay() {
@@ -271,9 +305,10 @@ export class Pedestrians {
     return group;
   }
 
+  private parks: Seg[] | null = null;
   /** a point on a footpath (park, square) between min and max metres from (x, z), if any */
   parkSpot(x: number, z: number, min: number, max: number, r: () => number): WalkSpot | null {
-    const parks = this.segs.filter((sg) => sg.park);
+    const parks = this.parks ??= this.segs.filter((sg) => sg.park);
     const tmp = new THREE.Vector3();
     for (let t = 0; t < 40; t++) {
       const seg = parks[Math.floor(r() * parks.length)];
@@ -306,10 +341,31 @@ export class Pedestrians {
     const goal = at(to.seg, to.s, new THREE.Vector3()), p = new THREE.Vector3();
     type Node = { v: number; cost: number; prev: Node | null; via: { seg: Seg; fwd: boolean } | null };
     const best = new Map<number, number>();
-    const open: [number, Node][] = [];
+    // binary min-heap on (estimated total cost)
+    const hk: number[] = [], hn: Node[] = [];
+    const hpush = (k: number, n: Node) => {
+      let i = hk.length; hk.push(k); hn.push(n);
+      while (i > 0) { const q = (i - 1) >> 1; if (hk[q] <= k) break; hk[i] = hk[q]; hn[i] = hn[q]; i = q; }
+      hk[i] = k; hn[i] = n;
+    };
+    const hpop = () => {
+      const top = hn[0], lk = hk.pop()!, ln = hn.pop()!;
+      if (hk.length) {
+        let i = 0;
+        for (;;) {
+          let c = 2 * i + 1;
+          if (c >= hk.length) break;
+          if (c + 1 < hk.length && hk[c + 1] < hk[c]) c++;
+          if (hk[c] >= lk) break;
+          hk[i] = hk[c]; hn[i] = hn[c]; i = c;
+        }
+        hk[i] = lk; hn[i] = ln;
+      }
+      return top;
+    };
     const push = (n: Node, s: Seg, fwd: boolean) => {
       at(s, fwd ? s.len : 0, p);
-      open.push([n.cost + p.distanceTo(goal), n]);
+      hpush(n.cost + p.distanceTo(goal), n);
     };
     // start at both ends of the first segment
     for (const fwd of [true, false]) {
@@ -318,10 +374,8 @@ export class Pedestrians {
       push(n, from.seg, fwd);
     }
     let guard = 0;
-    while (open.length && guard++ < 20000) {
-      let bi = 0;
-      for (let i = 1; i < open.length; i++) if (open[i][0] < open[bi][0]) bi = i;
-      const [, n] = open.splice(bi, 1)[0];
+    while (hk.length && guard++ < 60000) {
+      const n = hpop();
       if (n.cost > (best.get(n.v) ?? Infinity)) continue;
       for (const e of this.adj.get(n.v) ?? []) {
         if (e.seg === to.seg) {   // reached the goal segment
@@ -372,7 +426,7 @@ export class Pedestrians {
     const w = this.walkers.find((x) => x.agent === agent);
     if (w) this.release(w);
   }
-  clear() { for (const w of this.walkers.slice()) this.release(w); }
+  clear() { for (const w of this.walkers.slice()) this.release(w); for (const a of [...this.standing.keys()]) this.unstand(a); }
   private release(w: Walker) {
     if (w.crossing) this.busy.set(w.crossing, (this.busy.get(w.crossing) ?? 1) - 1);
     this.mesh.setMatrixAt(w.idx, new THREE.Matrix4().makeScale(0, 0, 0));
@@ -380,11 +434,19 @@ export class Pedestrians {
     this.walkers.splice(this.walkers.indexOf(w), 1);
   }
 
+  /** scene position of a pavement / footpath spot */
+  spotPosition(sp: WalkSpot) { return at(sp.seg, sp.s, new THREE.Vector3()); }
+
   /** the instance of an agent (for picking) */
-  agentAt(i: number) { return this.walkers.find((w) => w.idx === i)?.agent ?? null; }
+  agentAt(i: number) { return this.walkers.find((w) => w.idx === i)?.agent ?? [...this.standing].find(([, k]) => k === i)?.[0] ?? null; }
   positionOf(agent: unknown, out = new THREE.Vector3()) {
     const w = this.walkers.find((x) => x.agent === agent);
-    if (!w) return null;
+    if (!w) {
+      const i = this.standing.get(agent);
+      if (i === undefined) return null;
+      this.mesh.getMatrixAt(i, this.m4);
+      return out.setFromMatrixPosition(this.m4);
+    }
     const { seg, fwd } = w.segs[w.k];
     return at(seg, fwd ? w.s : seg.len - w.s, out);
   }
@@ -436,11 +498,9 @@ export class Pedestrians {
       this.q.setFromEuler(this.e.set(0, ang, 0));
       this.m4.compose(this.pa, this.q, this.one);
       this.mesh.setMatrixAt(w.idx, this.m4);
-      this.phase.setX(w.idx, step === 0 && w.wait > 0 ? 0 : w.dist * 2.4);
-      this.yaw.setX(w.idx, ang);
+      this.walk.setXY(w.idx, step === 0 && w.wait > 0 ? 0 : w.dist * 2.4, ang);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
-    this.phase.needsUpdate = true;
-    this.yaw.needsUpdate = true;
+    this.walk.needsUpdate = true;
   }
 }

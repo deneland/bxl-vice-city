@@ -13,13 +13,24 @@
 // A frame with only moving vehicles costs their own geometry plus a few full-screen passes.
 import * as THREE from 'three/webgpu';
 import {
-  abs, attribute, dot, float, fract, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
+  abs, attribute, dot, float, fract, hash, instanceIndex, normalGeometry, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
   cos, normalWorld, positionGeometry, positionLocal, positionWorld, select, sin, smoothstep, step, texture, uniform, uv, vec2, vec3, vec4,
 } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { night, windowsLit } from './nightlights';
 import { BOKEH, focalLength, focusDistance } from './tiltshift';
+
+/** Less clean: the city's voxels carry photo noise and grime, so models should too. Per-voxel brightness
+ *  variation (voxel cell from the model-space position, nudged inside along the normal), darker towards
+ *  the bottom (road dirt), and a per-instance amount of dirt. vox: model voxel size; grime: strength. */
+function weathered(vox: number, grime: number) {
+  const cell = positionGeometry.sub(normalGeometry.mul(vox * 0.25)).div(vox).floor();
+  const n = hash(cell.x.add(cell.y.mul(57)).add(cell.z.mul(113)).add(instanceIndex.toFloat().mul(1.7)));
+  const dirt = hash(instanceIndex.toFloat().mul(7.13).add(0.5));                 // this vehicle's dirt
+  const low = float(1).sub(smoothstep(-0.95, -0.1, positionGeometry.y));       // 1 at the bottom
+  return float(0.78).add(n.mul(0.34)).mul(float(1).sub(low.mul(grime * 0.5).mul(dirt.mul(0.8).add(0.4))));
+}
 
 /** per-voxel G-buffer outputs written by the voxel material (see voxelMaterial.ts mrtNode) */
 export const GBUF = ['output', 'emissive', 'normal'] as const;
@@ -65,10 +76,12 @@ export class Deferred {
     const opts = { type: THREE.HalfFloatType, depthBuffer: true };
     this.city = new THREE.RenderTarget(size.x, size.y, { ...opts, count: GBUF.length });
     GBUF.forEach((n, i) => { this.city.textures[i].name = n; });
+    (this.city as any).label = 'gbuffer';   // (names for the GPU pass timings, main.ts)
     this.city.depthTexture = new THREE.DepthTexture(size.x, size.y);
     this.fwd = new THREE.RenderTarget(size.x, size.y, opts);
     this.fwd.depthTexture = new THREE.DepthTexture(size.x, size.y);
     this.glow = new THREE.RenderTarget(size.x, size.y, opts);
+    (this.fwd as any).label = 'fwd'; (this.glow as any).label = 'glow';
     this.glow.depthTexture = this.fwd.depthTexture;   // shared: glows are hidden by city and vehicles
 
     // copies the city depth into the forward target, so the forward layer is depth-tested against it
@@ -89,6 +102,7 @@ export class Deferred {
       };
       this.stat = mk(STATIC_SIZE, shadows.half);
       this.dyn = mk(DYN_SIZE, DYN_HALF);
+      (this.stat.rt as any).label = 'shadowCity'; (this.dyn.rt as any).label = 'shadowDyn';
       this.dyn.cam.layers.set(DYNAMIC_SHADOW_LAYER);
     }
 
@@ -165,11 +179,14 @@ export class Deferred {
   vehicleMaterial(extra?: (world: any) => any) {
     const m = new THREE.MeshBasicNodeMaterial();
     const kind = attribute('vmat', 'float').add(0.5).floor();   // (interpolated: not exactly an integer)
-    const alb = select(kind.equal(1), attribute('paint', 'vec3'), attribute('vcol', 'vec3'));
+    // paint a little muted, like the LiDAR colours of the city around it
+    const paint = attribute('paint', 'vec3'), pl = dot(paint, vec3(0.299, 0.587, 0.114));
+    const alb = select(kind.equal(1), mix(paint, vec3(pl), 0.25).mul(0.85), attribute('vcol', 'vec3'));
     let l = this.light(normalWorld, positionWorld, false);
+    l = l.mul(weathered(0.25, 0.9));
     if (extra) l = l.add(extra(positionWorld));
     const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
-    m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1))), 1);
+    m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1)).mul(attribute('lights', 'float'))), 1);   // parked: off
     return m;
   }
 
@@ -177,18 +194,20 @@ export class Deferred {
    *  swing with the walk phase (vertex shader) */
   pedestrianMaterial(extra?: (world: any) => any) {
     const m = new THREE.MeshBasicNodeMaterial();
-    const limb = attribute('limb', 'float').add(0.5).floor(), mat = attribute('pmat', 'float').add(0.5).floor();
-    const ph = attribute('phase', 'float'), pg = positionGeometry;
+    const part = attribute('part', 'vec2'), walk = attribute('walk', 'vec2');
+    const limb = part.y.add(0.5).floor(), mat = part.x.add(0.5).floor();
+    const ph = walk.x, pg = positionGeometry;
     const legSign = select(limb.equal(2), float(-1), float(1)), armSign = select(limb.equal(4), float(-1), float(1));
     const leg = select(limb.lessThan(3).and(limb.greaterThan(0)), sin(ph).mul(legSign).mul(0.2).mul(float(0.875).sub(pg.y).div(0.875)), float(0));
     const arm = select(limb.greaterThan(2), sin(ph).mul(armSign).mul(-0.14).mul(float(1.5).sub(pg.y).div(0.65)), float(0));
     // (positionNode replaces the already instanced position: add the swing to positionLocal, turned by
     // the person's heading `yaw`, instead of starting from the raw geometry)
-    const dx = leg.add(arm), yaw = attribute('yaw', 'float');
+    const dx = leg.add(arm), yaw = walk.y;
     m.positionNode = positionLocal.add(vec3(cos(yaw).mul(dx), abs(sin(ph)).mul(0.025), sin(yaw).negate().mul(dx)));
     const alb = select(mat.equal(1), attribute('shirt', 'vec3'), select(mat.equal(2), attribute('skin', 'vec3'),
       select(mat.equal(3), attribute('pants', 'vec3'), vec3(0.04, 0.035, 0.03))));
     let l = this.light(normalWorld, positionWorld, false);
+    l = l.mul(weathered(0.125, 0.3));
     if (extra) l = l.add(extra(positionWorld));
     m.colorNode = vec4(alb.mul(l), 1);
     return m;

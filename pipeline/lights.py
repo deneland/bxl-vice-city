@@ -70,8 +70,11 @@ def fetch():
 
 def snap():
     feats = json.loads(RAW.read_text())
-    cal = json.loads(CAL.read_text())
-    off = np.median([c["offset"] for c in cal.values() if c["score"] >= MIN_SCORE], 0)
+    # the global Mapillary offset (streetview.py calibrate); another region's is fine: it is a systematic bias
+    cal_f = CAL if CAL.exists() else next(iter(sorted(CAL.parent.parent.glob("*/calibration.json"))), None)
+    cal = json.loads(cal_f.read_text()) if cal_f else {}
+    good = [c["offset"] for c in cal.values() if c["score"] >= MIN_SCORE]
+    off = np.median(good, 0) if good else np.zeros(3)
     xy = np.array([to_l72.transform(*f["geometry"]["coordinates"]) for f in feats]) + off[:2]
 
     # merge duplicate detections (greedy, around the earliest-listed point)
@@ -84,6 +87,7 @@ def snap():
         used |= near
         lamps.append(xy[near].mean(0))
 
+    lamps.sort(key=lambda q: (round(q[1] / 250), q[0]))   # spatial order (bounded tile cache)
     m = Model(ROI_NAME)
     X0, Y0 = m.man["origin"][:2]
     vs, r = m.vs, int(round(SEARCH / m.vs))

@@ -50,7 +50,7 @@ export class TileManager {
 
   constructor(
     private base: string, private tileSize: number, private levels: LevelInfo[],
-    private group: THREE.Group, private shadows: boolean, errPx: number, maxInflight = 6,
+    private group: THREE.Group, private shadows: boolean, errPx: number, maxInflight = 16,
   ) {
     this.errPx = errPx;
     this.maxInflight = maxInflight;

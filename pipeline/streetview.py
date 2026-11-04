@@ -240,17 +240,30 @@ def world_dirs(rotvec, W, H):
 
 
 def load_model():
-    """Dense L0 occupancy (voxel class, 0 = empty) of the whole region plus PAD, from the built tiles."""
+    """L0 occupancy (voxel class, 0 = empty) of the whole region plus PAD, from the built tiles.
+    Kept as a memory-mapped file next to the other caches (a whole commune is ~18 GB dense): built once
+    per voxel build, shared by the forked workers through the page cache; a camera's rays only touch
+    its surroundings, so the part in use stays small."""
     man = json.loads((TILES / "manifest.json").read_text())
     L0 = man["levels"][0]
     nx, ny = L0["size"][0] + 2 * PAD, L0["size"][1] + 2 * PAD
-    occ = np.zeros((nx, ny, 256), np.uint8)
-    for t in L0["tiles"]:
-        v = np.frombuffer((TILES / t["file"]).read_bytes(), np.uint8).reshape(-1, 8)
-        v = v[(v[:, 7] & 2) == 0]
-        occ[v[:, 0].astype(np.int64) - 1 + t["tx"] * 64 + PAD, v[:, 1].astype(np.int64) - 1 + t["ty"] * 64 + PAD,
-            v[:, 2]] = np.maximum(v[:, 6], 1)
-    return occ, man
+    WORK.mkdir(parents=True, exist_ok=True)
+    f = WORK / f"occ-{man.get('build', 'x')}.u8"
+    if not f.exists():
+        for old in WORK.glob("occ-*.u8"):
+            old.unlink()
+        tmp = f.with_suffix(".tmp")
+        occ = np.memmap(tmp, np.uint8, "w+", shape=(nx, ny, 256))
+        for t in L0["tiles"]:
+            v = np.frombuffer((TILES / t["file"]).read_bytes(), np.uint8).reshape(-1, 8)
+            v = v[(v[:, 7] & 2) == 0]
+            occ[v[:, 0].astype(np.int64) - 1 + t["tx"] * 64 + PAD, v[:, 1].astype(np.int64) - 1 + t["ty"] * 64 + PAD,
+                v[:, 2]] = np.maximum(v[:, 6], 1)
+        occ.flush()
+        del occ
+        tmp.rename(f)
+        log(f"occupancy grid built ({nx}x{ny}x256, {f.stat().st_size / 1e9:.1f} GB on disk)")
+    return np.memmap(f, np.uint8, "r", shape=(nx, ny, 256)), man
 
 
 @njit(cache=True, fastmath=True, nogil=True)

@@ -424,6 +424,8 @@ def build():
                     zs.append(k.max() + 1)
         return float(np.median(zs)) if zs else np.nan
 
+    # spatial order: the LiDAR tiles behind ground() are read through a bounded cache
+    ways.sort(key=lambda w: (round(nodes[w["nodes"][0]][1] / 250), nodes[w["nodes"][0]][0]))
     node_ix, node_xy, node_sig = {}, [], []
     edges, stats = [], {"road": 0, "tram": 0, "rail": 0}
     for w in ways:

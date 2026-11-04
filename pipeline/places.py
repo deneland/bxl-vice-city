@@ -115,6 +115,11 @@ def build():
     sid = lambda s: streets.setdefault(s, len(streets))
     nid = lambda s: names.setdefault(s, len(names))
     homes, pois, skipped = [], [], 0
+    # spatial order: the LiDAR tiles behind floors() are read through a bounded cache
+    def where(e):
+        c = e.get("center") or {"lon": e.get("lon") or 0, "lat": e.get("lat") or 0}
+        return (round(c["lat"] * 300), c["lon"])
+    els.sort(key=where)
     for e in els:
         t = e.get("tags", {})
         p = vox(e)

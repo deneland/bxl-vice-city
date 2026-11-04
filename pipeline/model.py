@@ -1,5 +1,6 @@
 """Read access to the built L0 voxel tiles (viewer/public/tiles/<roi>), tile by tile on demand."""
 import json
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -8,17 +9,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class Model:
-    """L0 voxel classes, tile by tile on demand."""
+    """L0 voxel classes, tile by tile on demand (LRU: a whole commune would not fit in memory)."""
+    MAX_TILES = 1500   # ~1 MB each
+
     def __init__(self, roi: str):
         self.dir = ROOT / "viewer/public/tiles" / roi
         self.man = json.loads((self.dir / "manifest.json").read_text())
         L0 = self.man["levels"][0]
         self.vs, self.size = L0["voxelSize"], L0["size"]
         self.files = {(t["tx"], t["ty"]): t["file"] for t in L0["tiles"]}
-        self.cache = {}
+        self.cache = OrderedDict()
 
     def tile(self, tx, ty):
-        if (tx, ty) not in self.cache:
+        if (tx, ty) in self.cache:
+            self.cache.move_to_end((tx, ty))
+        else:
             occ = np.zeros((64, 64, self.size[2]), np.uint8)
             f = self.files.get((tx, ty))
             if f:
@@ -26,6 +31,8 @@ class Model:
                 v = v[(v[:, 7] & 2) == 0]
                 occ[v[:, 0] - 1, v[:, 1] - 1, v[:, 2]] = np.maximum(v[:, 6], 1)
             self.cache[(tx, ty)] = occ
+            if len(self.cache) > self.MAX_TILES:
+                self.cache.popitem(last=False)
         return self.cache[(tx, ty)]
 
     def column(self, x, y):

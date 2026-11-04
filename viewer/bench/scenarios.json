@@ -1,5 +1,5 @@
 {
- "_comment": "Camera coordinates are three.js world units (metres) with the ROI's home point at the origin; y is up, -z is north. Region views assume the 1.5 km schaerbeek region centred on home.",
+ "_comment": "Camera coordinates are three.js world units (metres) with the ROI's home point (config [view], Place Colignon) at the origin; y is up, -z is north, +x east. Schaerbeek region centre is about (540, 610). 'jump' teleports on the first measured frame; 'move' is the pan distance [dx, dz] in metres.",
  "warmupFrames": 60,
  "frames": 300,
  "scenarios": [
@@ -140,6 +140,110 @@
     ]
    },
    "path": "dolly"
+  },
+  {
+   "name": "street-sim",
+   "view": {
+    "pos": [
+     18,
+     3,
+     22
+    ],
+    "target": [
+     0,
+     2,
+     0
+    ]
+   }
+  },
+  {
+   "name": "schaerbeek",
+   "view": {
+    "pos": [
+     540,
+     1700,
+     1900
+    ],
+    "target": [
+     540,
+     0,
+     610
+    ]
+   }
+  },
+  {
+   "name": "flyover",
+   "view": {
+    "pos": [
+     0,
+     160,
+     200
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ]
+   },
+   "path": "pan",
+   "move": [
+    1990,
+    2240
+   ]
+  },
+  {
+   "name": "jump-meiser",
+   "view": {
+    "pos": [
+     -110,
+     120,
+     150
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ]
+   },
+   "jump": {
+    "pos": [
+     1880,
+     120,
+     2390
+    ],
+    "target": [
+     1990,
+     0,
+     2240
+    ]
+   }
+  },
+  {
+   "name": "jump-street",
+   "view": {
+    "pos": [
+     1880,
+     120,
+     2390
+    ],
+    "target": [
+     1990,
+     0,
+     2240
+    ]
+   },
+   "jump": {
+    "pos": [
+     1108,
+     3,
+     362
+    ],
+    "target": [
+     1090,
+     2,
+     340
+    ]
+   }
   }
  ]
 }

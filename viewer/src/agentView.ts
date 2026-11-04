@@ -10,7 +10,7 @@ const TYPE_LABEL: Record<string, string> = {
   parent: 'parent, school run', commuterOut: 'works outside the area', commuterIn: 'comes in to work',
   shopper: 'running errands, shopping', evening: 'going out tonight', errands: 'errands', delivery: 'delivery driver',
   taxi: 'taxi driver', through: 'passing through',
-  cyclist: 'cyclist', courier: 'meal delivery courier', kid: 'walks the kids to school', walkShop: 'shops on foot', dog: 'dog owner', walkErrand: 'errands on foot', stroll: 'evening walk',
+  transit: 'takes the tram / bus', cyclist: 'cyclist', courier: 'meal delivery courier', kid: 'walks the kids to school', walkShop: 'shops on foot', dog: 'dog owner', walkErrand: 'errands on foot', stroll: 'evening walk',
 };
 const CAR_LABEL: Record<string, string> = { hatch: 'hatchback', sedan: 'saloon', estate: 'estate car', suv: 'SUV', van: 'van',
   bike: 'bicycle', scooter: 'moped' };
@@ -130,7 +130,10 @@ export class AgentView {
       const at = a.plan[a.i], next = a.plan[a.i + 1];
       const car = a.mode === 'walk' ? 'on foot' : `${CAR_LABEL[a.car.kind] ?? a.car.kind}`;
       let doing: string;
-      if (a.driving && next) {
+      if (a.ride === 1 || a.ride === 2 || a.ride === 3) {
+        doing = a.ride === 1 ? `waiting at ${A.label(a, at.where)}` : a.ride === 2 ? 'on a tram / bus, away'
+          : `coming back: gets off at ${A.label(a, at.where)}`;
+      } else if ((a.driving || a.travel) && next) {
         const left = walkLeft >= 0 ? walkLeft : v && t ? t.routeAhead(v).len : 0;
         const eta = walkLeft >= 0 ? walkLeft / 1.3 : v && t ? left / Math.max(4, t.speedOf(v)) : 0;
         doing = `${a.mode === 'walk' ? 'walking' : 'driving'} to ${A.label(a, next.where)}<br><span class="dim">${PURPOSE[next.purpose] ?? next.purpose}` +

@@ -217,6 +217,28 @@ function mesh(g: Grid) {
   return geo;
 }
 
+/** the same model at k× coarser voxels (level of detail for distant vehicles): per k×k×k block the most
+ *  common material, if at least a quarter of the block is filled */
+function coarse(g: Grid, k = 2) {
+  const c = new Grid(g.nx * g.vox, g.ny * g.vox, g.nz * g.vox, g.vox * k);
+  const n = new Map<number, number>();
+  for (let y = 0; y < c.ny; y++)
+    for (let z = 0; z < c.nz; z++)
+      for (let x = 0; x < c.nx; x++) {
+        n.clear();
+        let filled = 0;
+        for (let dy = 0; dy < k; dy++) for (let dz = 0; dz < k; dz++) for (let dx = 0; dx < k; dx++) {
+          const m = g.get(x * k + dx, y * k + dy, z * k + dz);
+          if (m) { filled++; n.set(m, (n.get(m) ?? 0) + 1); }
+        }
+        if (filled * 4 < k * k * k) continue;
+        let best = 0, bn = 0;
+        for (const [m, cnt] of n) if (cnt > bn) { best = m; bn = cnt; }
+        c.set(x, y, z, best);
+      }
+  return c;
+}
+
 /** all models by name, with their size (length, height, width) */
 export function buildModels() {
   const grids: Record<string, Grid> = {
@@ -231,7 +253,8 @@ export function buildModels() {
     carriage: carriage(24),
     bike: bicycle(), moped: moped(),
   };
-  const out: Record<string, { geo: THREE.BufferGeometry; len: number; h: number; w: number }> = {};
-  for (const [k, g] of Object.entries(grids)) out[k] = { geo: mesh(g), len: g.nx * g.vox, h: g.ny * g.vox, w: g.nz * g.vox };
+  const out: Record<string, { geo: THREE.BufferGeometry; far: THREE.BufferGeometry; len: number; h: number; w: number }> = {};
+  for (const [k, g] of Object.entries(grids))
+    out[k] = { geo: mesh(g), far: mesh(coarse(g)), len: g.nx * g.vox, h: g.ny * g.vox, w: g.nz * g.vox };
   return out;
 }

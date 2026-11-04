@@ -21,6 +21,7 @@
 import * as THREE from 'three/webgpu';
 import { CONTROL, KIND, type Lane } from './roads';
 import { buildModels } from './vehicleModels';
+import { Fleet } from './fleet';
 
 const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
 const MIN_RADIUS = 5.5;      // m, car turning circle (path of the car's centre)
@@ -96,7 +97,7 @@ export interface Spot { p: Path; s: number }
 /** a timetabled run of a STIB line through the region */
 export interface TransitRun {
   line: string; headsign: string; color: string; mode: number;
-  stops: { p: Path; s: number; dep: number; name: string; arrived: number; served: boolean }[];
+  stops: { p: Path; s: number; dep: number; name: string; id: number; arrived: number; served: boolean }[];
   next: number;   // next stop to serve
 }
 
@@ -116,7 +117,7 @@ export interface Vehicle {
   trip: Path[];                // cars: lanes still to drive after the route planned so far
   dest: { p: Path; s: number } | null;   // cars: where to pull over (null: leave the region)
   arrive: number;              // when it started approaching its next junction (first come, first served)
-  inst: { mesh: THREE.InstancedMesh; i: number }[];   // per section: its model's instanced mesh, index
+  inst: number[];             // per section: its body in the fleet (fleet.ts draws it)
   agent: unknown;              // cars: who drives (agents.ts); null for trams / trains
   transit?: TransitRun;        // STIB trams and buses: line and stops (transit.ts)
   stuck: number;               // s without moving
@@ -222,6 +223,7 @@ function conflict(a: Path, b: Path) {
 class Heap<T> {
   private k: number[] = []; private v: T[] = [];
   get size() { return this.k.length; }
+  clear() { this.k.length = 0; this.v.length = 0; }
   push(key: number, val: T) {
     const { k, v } = this;
     let i = k.length;
@@ -329,9 +331,9 @@ export class Traffic {
     this.exits = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.to) && !p.lane!.bikeOnly);
     // --- vehicle meshes: one instanced mesh per model, a pool of instances (cars come and go) ---
     this.material = material;
+    this.fleet = new Fleet(MODELS, material);
+    this.group.add(this.fleet.group);
     this.carPaint = this.paintPicker(palette);
-    for (const k of ROAD_MIX.map(([k]) => k)) this.pool(k.secs[0].model, counts.car);
-    this.pool('bike', 400); this.pool('moped', 150);
     // --- trams and trains: always on the network ---
     const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
     for (const [kindNo, n] of [[KIND.tram, counts.tram], [KIND.rail, counts.train]] as const) {
@@ -387,61 +389,33 @@ export class Traffic {
     this.plan(v);
   }
 
-  private meshes: THREE.InstancedMesh[] = [];
-  private pools = new Map<string, { mesh: THREE.InstancedMesh; free: number[] }>();
+  /** draws the vehicles: what the camera sees, at a level of detail for the distance (fleet.ts) */
+  private fleet!: Fleet;
   private material!: THREE.Material;
   private carPaint!: () => number;
-  private zero = new THREE.Matrix4().makeScale(0, 0, 0);
+  /** a STIB vehicle has stopped at stop `id` (transit.ts stop index): people board / alight */
+  onDwell: ((id: number) => void) | null = null;
   /** called when a car's trip ends (arrived, left the region, or given up when stuck) */
   onArrive: ((agent: unknown, arrived: boolean) => void) | null = null;
-
-  /** instanced mesh (and free-list) of a model, created on first use */
-  private pool(model: string, capacity: number) {
-    let p = this.pools.get(model);
-    if (!p) {
-      const geo = MODELS[model].geo.clone();
-      geo.setAttribute('paint', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3));
-      const mesh = new THREE.InstancedMesh(geo, this.material, capacity);
-      mesh.frustumCulled = false;
-      mesh.count = 0;
-      for (let i = 0; i < capacity; i++) mesh.setMatrixAt(i, this.zero);
-      p = { mesh, free: [] };
-      this.pools.set(model, p);
-      this.meshes.push(mesh);
-      this.group.add(mesh);
-    }
-    return p;
-  }
 
   /** a new vehicle with instances for its sections (null if the pool is full) */
   private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: unknown): Vehicle {
     const c = new THREE.Color(paint);
     const v: Vehicle = { t, kind, route: [], hist: [], s: 0, v: 0, ag, f, grant: null, inJunction: null, wait: 0,
       arrive: 0, inst: [], stuck: 0, trip: [], dest: null, agent };
-    for (const x of t.secs) {
-      const p = this.pool(x.model, kind === KIND.road ? 1 : 96);
-      const i = p.free.length ? p.free.pop()! : p.mesh.count < p.mesh.instanceMatrix.count ? p.mesh.count++ : -1;
-      if (i < 0) { this.release(v); throw new Error('pool full'); }
-      (p.mesh.geometry.getAttribute('paint') as THREE.BufferAttribute).setXYZ(i, c.r, c.g, c.b);
-      p.mesh.geometry.getAttribute('paint').needsUpdate = true;
-      v.inst.push({ mesh: p.mesh, i });
-    }
+    for (const x of t.secs) v.inst.push(this.fleet.add(x.model, c, 1));
     this.vehicles.push(v);
     return v;
   }
 
   /** take a vehicle off the road: free its instances and junction */
   private release(v: Vehicle) {
-    for (const x of v.inst) {
-      x.mesh.setMatrixAt(x.i, this.zero);
-      this.pools.get([...this.pools.entries()].find(([, p]) => p.mesh === x.mesh)![0])!.free.push(x.i);
-    }
+    for (const h of v.inst) this.fleet.remove(h);
     v.inst = [];
     if (v.inJunction) v.inJunction.junction?.occ.delete(v);
     v.inJunction = null;
     const k = this.vehicles.indexOf(v);
     if (k >= 0) this.vehicles.splice(k, 1);
-    for (const m of this.meshes) m.instanceMatrix.needsUpdate = true;
   }
 
   /** a car's trip ends */
@@ -469,7 +443,11 @@ export class Traffic {
   }
 
   /** for the shadow pass: let every vehicle mesh render in another layer too */
-  enableLayer(layer: number) { for (const m of this.meshes) m.layers.enable(layer); }
+  enableLayer(layer: number) { this.fleet.enableLayer(layer); }
+  /** fill the vehicle instance buffers for this camera (once per frame, before rendering) */
+  draw(camera: THREE.Camera) { this.fleet.update(camera); }
+  /** vehicle bodies drawn in the last frame, near / far detail */
+  get drawn() { return this.fleet.drawn; }
 
   private kerb: Path[] = []; private kerbTotal = 0;
   private entries: Path[] = []; private exits: Path[] = [];
@@ -525,7 +503,7 @@ export class Traffic {
     }
     return [...best.entries()].sort((a, b) => a[1].d - b[1].d).slice(0, 4).map(([p, b]) => ({ p, s: b.s }));
   }
-  routable(a: Path, b: Path) { return a === b || !!this.route(a, b); }
+  routable(a: Path, b: Path) { return a === b || !!this.stopRoute(a, b); }
 
   /** shortest way in from the region edge to `p` / out from `p` to the edge (cached per lane) */
   private edgeWay(p: Path, inbound: boolean): Path[] | null {
@@ -571,14 +549,14 @@ export class Traffic {
    *  until the timetabled departure; it leaves after the last stop. `from`: index of the first stop
    *  to start at (after a jump in time). */
   spawnTransit(info: { line: string; headsign: string; color: string; mode: number },
-    stops: { spot: Spot; dep: number; name: string }[], from = 0): Vehicle | null {
+    stops: { spot: Spot; dep: number; name: string; id: number }[], from = 0): Vehicle | null {
     const st = stops.slice(from);
     if (st.length < 2) return null;
     // in from the region edge (when starting at the first stop), stop to stop, out to the edge
     const inWay = from === 0 ? this.edgeWay(st[0].spot.p, true) : null;
     const lanes: Path[] = inWay ? [...inWay] : [st[0].spot.p];
     for (let i = 0; i + 1 < st.length; i++) {
-      const r = this.route(st[i].spot.p, st[i + 1].spot.p);
+      const r = this.stopRoute(st[i].spot.p, st[i + 1].spot.p);
       if (!r) return null;
       lanes.push(...r.slice(1));
     }
@@ -588,7 +566,7 @@ export class Traffic {
     const t = tram ? (info.line === '7' ? TYPES.t4000 : TYPES.t3000) : TYPES.bus;
     let v: Vehicle;
     try { v = this.make(t, tram ? KIND.tram : KIND.road, tram ? TRAM_SILVER : STIB_BUS, 1, 1, null); } catch { return null; }
-    v.transit = { ...info, next: 0, stops: st.map((x) => ({ p: x.spot.p, s: x.spot.s, dep: x.dep, name: x.name, arrived: -1, served: false })) };
+    v.transit = { ...info, next: 0, stops: st.map((x) => ({ p: x.spot.p, s: x.spot.s, dep: x.dep, name: x.name, id: x.id, arrived: -1, served: false })) };
     v.route = [lanes[0]]; v.trip = lanes.slice(1);
     v.s = inWay ? lanes[0].start : st[0].spot.s; v.v = inWay ? lanes[0].speed * 0.6 : 0;
     this.plan(v);
@@ -658,7 +636,8 @@ export class Traffic {
 
   /** the vehicle drawn as instance i of mesh (for picking) */
   vehicleAt(mesh: THREE.Object3D, i: number) {
-    return this.vehicles.find((v) => v.inst.some((x) => x.mesh === mesh && x.i === i)) ?? null;
+    const h = this.fleet.handleAt(mesh, i);
+    return h < 0 ? null : this.vehicles.find((v) => v.inst.includes(h)) ?? null;
   }
   /** the car an agent drives now, if any */
   vehicleOf(agent: unknown) { return this.vehicles.find((v) => v.agent === agent) ?? null; }
@@ -685,8 +664,39 @@ export class Traffic {
   describe(v: Vehicle) {
     if (v.transit) return `${v.transit.mode === 0 ? 'Tram' : 'Bus'} ${v.transit.line} → ${v.transit.headsign}`;
     return v.t.name === 't3000' ? 'STIB tram (T3000-style)' : v.t.name === 't4000' ? 'STIB tram (T4000-style)' : 'train'; }
-  pickable() { return this.meshes; }
+  pickable() { return this.fleet.meshes(); }
   speedOf(v: Vehicle) { return v.v; }
+
+  /** position of the vehicle an agent drives (this group's frame), if any */
+  positionOfAgent(agent: unknown) { const v = this.vehicleOf(agent); return v ? this.positionOf(v) : null; }
+  /** metres left of an agent's trip */
+  routeLeft(agent: unknown) { const v = this.vehicleOf(agent); return v ? this.routeAhead(v).len : 0; }
+
+  // --- parked cars: static instances, no simulation ---
+  private parked = new Map<unknown, number[]>();
+  /** show an agent's car parked at (x, z) with a heading (rad about y), on the ground of the nearest lane */
+  park(agent: unknown, car: { kind: string; paint: number }, x: number, z: number, heading: number) {
+    if (this.parked.has(agent)) return;
+    const t = (TYPES as Record<string, Kind>)[car.kind] ?? TYPES.hatch;
+    const sp = this.spotNear(x, z);
+    const y = sp ? sample(sp.p, sp.s, tmp).y : 0;
+    const c = new THREE.Color(car.paint), list: number[] = [];
+    for (const x0 of t.secs) {
+      const h = this.fleet.add(x0.model, c, 0);   // lights off
+      this.m4.compose(tmp2.set(x, y + x0.h / 2, z), this.q.setFromEuler(this.e.set(0, heading, 0)), this.scl.set(1, 1, 1));
+      this.fleet.setPose(h, this.m4);
+      list.push(h);
+    }
+    this.parked.set(agent, list);
+  }
+  unpark(agent: unknown) {
+    const list = this.parked.get(agent);
+    if (!list) return;
+    for (const h of list) this.fleet.remove(h);
+    this.parked.delete(agent);
+  }
+  clearParked() { for (const a of [...this.parked.keys()]) this.unpark(a); }
+  get parkedCount() { return this.parked.size; }
 
   /** take an agent's car off the road (e.g. after a jump in time) */
   remove(agent: unknown) {
@@ -709,39 +719,86 @@ export class Traffic {
   }
 
   /** A* over lanes (directed: one-ways included), cost = travel time + turn penalties */
-  private route(from: Path, to: Path, bike = false): Path[] | null {
-    const goal = sample(to, to.end, new THREE.Vector3());
-    const cost = new Map<Path, number>([[from, 0]]), prev = new Map<Path, Path>();
-    const open = new Heap<Path>();
-    open.push(0, from);
-    const pos = new THREE.Vector3(), done = new Set<Path>();
-    while (open.size) {
-      const a = open.pop()!;
-      if (done.has(a)) continue;
-      done.add(a);
-      if (a === to) {
-        const out = [a];
-        for (let p = prev.get(a); p; p = prev.get(p)) out.unshift(p);
-        return out;
-      }
+  // --- routing graph: lanes as nodes, built once; per search only typed arrays (no allocations) ---
+  private rg: {
+    id: Map<Path, number>; lanes: Path[]; ex: Float32Array; ez: Float32Array;   // lane end (stop line) positions
+    off: Int32Array; to: Int32Array; base: Float32Array;   // successors (CSR) and their static cost (time + turn penalty)
+    g: Float64Array; prev: Int32Array; seen: Uint32Array; closed: Uint32Array; stamp: number; heap: Heap<number>;
+  } | null = null;
+  private routeGraph() {
+    if (this.rg) return this.rg;
+    const lanes = this.paths.filter((p) => p.lane), id = new Map(lanes.map((p, i) => [p, i] as [Path, number]));
+    const n = lanes.length, ex = new Float32Array(n), ez = new Float32Array(n), q = new THREE.Vector3();
+    lanes.forEach((p, i) => { sample(p, p.end, q); ex[i] = q.x; ez[i] = q.z; });
+    const off = new Int32Array(n + 1), to: number[] = [], base: number[] = [];
+    lanes.forEach((a, i) => {
+      off[i] = to.length;
       const da = heading(a, a.end);
       for (const b of this.byNode.get(a.lane!.to) ?? []) {
-        if (b.kind !== a.kind || b.end - b.start < 0.5 || (b.lane?.bikeOnly && !bike)) continue;
+        if (b.kind !== a.kind || b.end - b.start < 0.5) continue;
         const db = heading(b, b.start);
         const turn = Math.atan2(da.x * db.y - da.y * db.x, da.dot(db));   // > 0: right (x east, z south)
         const pen = b.lane!.edge === a.lane!.edge ? 60
           : a.kind !== KIND.road ? (da.dot(db) < SWITCH_COS ? 500 : 0)   // rails: only switch-like connections
             : turn < -0.5 ? 4 : turn > 0.5 ? 1.5 : 0;
+        to.push(id.get(b)!); base.push((b.end - b.start + 10) / b.speed + pen);
+      }
+    });
+    off[n] = to.length;
+    this.rg = { id, lanes, ex, ez, off, to: Int32Array.from(to), base: Float32Array.from(base),
+      g: new Float64Array(n), prev: new Int32Array(n), seen: new Uint32Array(n), closed: new Uint32Array(n), stamp: 0, heap: new Heap<number>() };
+    return this.rg;
+  }
+
+  /** A* over the lanes (time + turn penalties + queues); null if `to` cannot be reached */
+  private route(from: Path, to: Path, bike = false, maxCost = Infinity): Path[] | null {
+    const G = this.routeGraph();
+    const s = G.id.get(from), t = G.id.get(to);
+    if (s === undefined || t === undefined) return null;
+    const st = ++G.stamp, { g, prev, seen, closed, ex, ez, off, base, lanes, heap } = G;
+    const gx = ex[t], gz = ez[t];
+    g[s] = 0; prev[s] = -1; seen[s] = st;
+    heap.clear();
+    heap.push(0, s);
+    while (heap.size) {
+      const a = heap.pop()!;
+      if (closed[a] === st) continue;
+      closed[a] = st;
+      if (a === t) {
+        const out: Path[] = [];
+        for (let k = a; k >= 0; k = prev[k]) out.push(lanes[k]);
+        return out.reverse();
+      }
+      for (let e = off[a]; e < off[a + 1]; e++) {
+        const b = G.to[e], lb = lanes[b];
+        if (lb.lane!.bikeOnly && !bike) continue;
         // congestion: every vehicle already on the lane costs time (drivers avoid queues)
-        const c = cost.get(a)! + (b.end - b.start + 10) / b.speed + pen + b.occ.length * QUEUE_COST;
-        if (c < (cost.get(b) ?? Infinity)) {
-          cost.set(b, c); prev.set(b, a);
-          sample(b, b.end, pos);
-          open.push(c + pos.distanceTo(goal) / 14, b);
+        const c = g[a] + base[e] + lb.occ.length * QUEUE_COST;
+        if (c > maxCost) continue;   // (bounded searches give up instead of exploring the whole network)
+        if (seen[b] !== st || c < g[b]) {
+          g[b] = c; prev[b] = a; seen[b] = st;
+          heap.push(c + Math.hypot(ex[b] - gx, ez[b] - gz) / 14, b);
         }
       }
     }
     return null;
+  }
+
+  /** route for timetabled vehicles between two stops: the same pairs come back all day, so cached
+   *  (without queues: buses and trams keep to their line anyway) */
+  private stopRoutes = new Map<string, Path[] | null>();
+  stopRoute(a: Path, b: Path): Path[] | null {
+    const G = this.routeGraph();
+    const key = `${G.id.get(a)}>${G.id.get(b)}`;
+    let r = this.stopRoutes.get(key);
+    // bounded: consecutive stops are a few hundred metres apart; a wrong-direction track candidate would
+    // otherwise search the whole network before failing
+    if (r === undefined) {
+      const d = Math.hypot(G.ex[G.id.get(a)!] - G.ex[G.id.get(b)!], G.ez[G.id.get(a)!] - G.ez[G.id.get(b)!]);
+      r = this.route(a, b, false, d / 4 + 240);
+      this.stopRoutes.set(key, r);
+    }
+    return r;
   }
 
   /** extend the route (cars: along their trip; trams, trains: random) with the curves joining lanes */
@@ -940,7 +997,7 @@ export class Traffic {
         if (st && v.route[0] === st.p && v.s > st.s - 2.5) {
           if (v.s > st.s + 3) st.served = true;                            // drove past it
           else if (v.v < 0.5) {
-            if (st.arrived < 0) st.arrived = this.now;
+            if (st.arrived < 0) { st.arrived = this.now; this.onDwell?.(st.id); }   // people get on / off
             const late = this.now > st.dep + 30;   // running late: shorter stops
             if (this.now >= st.dep && this.now - st.arrived >= (late ? 6 : 12)) st.served = true;
           }
@@ -975,11 +1032,10 @@ export class Traffic {
         this.q.setFromEuler(this.e);
         this.pos.y += x.h / 2;
         this.m4.compose(this.pos, this.q, this.scl.set(1, 1, 1));
-        v.inst[k].mesh.setMatrixAt(v.inst[k].i, this.m4);
+        this.fleet.setPose(v.inst[k], this.m4);
         fb -= x.len + t.gap;
       });
     }
-    for (const m of this.meshes) m.instanceMatrix.needsUpdate = true;
     // signal heads
     let changed = false;
     for (const l of this.lightAt)
