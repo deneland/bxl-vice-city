@@ -27,6 +27,7 @@ const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the dr
 const MIN_RADIUS = 5.5;      // m, car turning circle (path of the car's centre)
 const PLAN = 120;            // m of route planned ahead
 const LOOK = 90;             // m looked ahead for obstacles and curves
+const BUMP = 20 / 3.6;       // m/s over a speed bump / raised table
 const APPROACH = 30;         // m: signals / signs this close to a lane's end belong to the junction
 const PATIENCE = 6;          // s waiting at a junction before ignoring priority (if nothing is in the way)
 const NO_ROOM_PATIENCE = 8;  // s before entering even without room after the junction
@@ -104,6 +105,7 @@ interface Path {
   next: Map<Path, Path>;       // next lane -> junction curve
   approach: Approach | null;   // how this lane enters the junction at its end
   crossings: { s: number; sig: Signal }[];   // pedestrian-crossing lights along the lane
+  bumps: number[];                           // speed bumps / cushions / raised tables along the lane (s)
   zebras: { s: number; key: number }[];      // mapped crosswalks along the lane (give way to people on them)
   // junction curves
   junction: Junction | null; from: Path | null; to: Path | null; turn: number;   // turn: heading change, rad
@@ -178,7 +180,7 @@ function makePath(pts: Float32Array, speed: number, kind: number): Path {
     cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
   const length = cum[cum.length - 1];
   return { pts, cum, length, vmax: curveLimits(pts, cum), speed, kind, start: 0, end: length, occ: [],
-    lane: null, next: new Map(), approach: null, crossings: [], zebras: [], junction: null, from: null, to: null, turn: 0 };
+    lane: null, next: new Map(), approach: null, crossings: [], bumps: [], zebras: [], junction: null, from: null, to: null, turn: 0 };
 }
 
 /** travel direction (x, z) at s */
@@ -364,6 +366,8 @@ export class Traffic {
         this.zebraAt.get(z.key)!.push({ p, s: zs });
       }
     }
+    for (const p of this.paths)
+      if (p.kind === KIND.road) p.bumps = p.lane!.controls.filter((c) => c.code === CONTROL.calming).map((c) => c.s);
     // crosswalks under lights: people walk when the cars over them have red. At a signalled junction: the
     // phase of the road it crosses (on an approach, between its stop line and the junction; on an exit, the
     // group of that road's axis); away from junctions: the crossing light there
@@ -1112,6 +1116,13 @@ export class Traffic {
           const vm = Math.min(p.vmax[k] * Math.sqrt(v.ag), p.speed * v.f);
           v0 = Math.min(v0, Math.sqrt(vm * vm + 2 * t.b * v.ag * 0.8 * Math.max(0, dd - t.total / 2)));
         }
+        // speed bumps (OSM traffic calming): over them at BUMP, braking comfortably before; until the rear is over
+        if (t !== TYPES.bike)
+          for (const sb of p.bumps) {
+            const dd = d + sb;
+            if (dd < -t.total || dd > LOOK) continue;
+            v0 = Math.min(v0, dd <= 0 ? BUMP : Math.sqrt(BUMP * BUMP + 2 * t.b * 0.6 * dd));
+          }
         if (gap === Infinity) {                              // vehicle ahead on this path
           for (const o of p.occ) {
             if (o === v || o.s <= from) continue;

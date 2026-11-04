@@ -17,7 +17,7 @@ export interface RoadNetwork {
 }
 
 /** traffic control codes on edges (pipeline roads.py) */
-export const CONTROL = { signals: 1, giveWay: 2, stop: 3, crossingLight: 4 };   // (roads.py: 1 = a stop line of the signalled junction ahead)
+export const CONTROL = { signals: 1, giveWay: 2, stop: 3, crossingLight: 4, calming: 5 };   // (roads.py: 1 = a stop line of the signalled junction ahead)
 
 export const KIND = { road: 0, tram: 1, rail: 2 };
 /** key of a mapped crosswalk: its edge and index along it (shared by pedestrians.ts and traffic.ts) */

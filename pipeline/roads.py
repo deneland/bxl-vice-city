@@ -42,6 +42,8 @@ RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, 
         "residential": 2, "living_street": 1}
 # traffic controls on nodes: code
 SIGNALS, GIVE_WAY, STOP = 1, 2, 3
+CALMING = 5                     # speed bump / cushion / raised table (cars slow down over it)
+CALM_KINDS = {"cushion", "table", "hump", "bump", "yes", "dip"}
 DEFAULT_SPEED = {"living_street": 20, "primary": 50, "trunk": 50, "motorway": 90}   # else 30 (Brussels zone 30)
 SAMPLE = 2.0      # m between height samples
 MERGE = 15.0      # m; road intersections joined by a shorter edge are one intersection
@@ -559,7 +561,8 @@ def build():
         t = ntags.get(nid, {})
         if t.get("highway") == "traffic_signals" or t.get("crossing") == "traffic_signals":
             return SIGNALS
-        return {"give_way": GIVE_WAY, "stop": STOP}.get(t.get("highway"), 0)
+        c = {"give_way": GIVE_WAY, "stop": STOP}.get(t.get("highway"), 0)
+        return c or (CALMING if t.get("traffic_calming") in CALM_KINDS else 0)
     ways = [e for e in els if e["type"] == "way" and e["tags"].get("tunnel") not in ("yes", "building_passage")
             and e["tags"].get("access") not in ("no", "private") and e["tags"].get("service") is None]
     use = {}
@@ -633,6 +636,8 @@ def build():
                     dtag = ntags[seg[i]].get("traffic_signals:direction") or ntags[seg[i]].get("direction", "")
                     dr = {"forward": 1, "backward": -1}.get(dtag, 0) * (-1 if ow == "-1" else 1)
                     ctl.append([round(float(d[i]), 1), c, dr])
+            if kind == "road" and t.get("traffic_calming") in CALM_KINDS:   # (a raised table mapped as its own way)
+                ctl.append([round(float(d[-1]) / 2, 1), CALMING, 0])
             node_xy[node_ix[seg[0]]] = [*p[0], z[0]]
             node_xy[node_ix[seg[-1]]] = [*p[-1], z[-1]]
             rank = RANK.get(t.get("highway", "").replace("_link", ""), 0)
@@ -665,7 +670,7 @@ def build():
     out = {"build": m.man["build"], "paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
            "edges": edges, "pieces": pieces, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
-                                      "rank", "controls [m, 1 stop line of the signalled junction ahead|2 give way|3 stop|4 crossing light, dir]",
+                                      "rank", "controls [m, 1 stop line of the signalled junction ahead|2 give way|3 stop|4 crossing light|5 speed bump, dir]",
                                       "bikes both ways (one-way street open to cycling against the traffic)",
                                       "pavement [left, right] m from the centreline (0: none found)",
                                       "crosswalks [[m, 1 signals|2 marked|3 unmarked]]", "roundabout",
