@@ -46,6 +46,85 @@ LEISURE = {"sports_centre", "fitness_centre", "swimming_pool", "pitch", "sports_
 NOT_HOMES = {"school", "industrial", "retail", "garages", "garage", "shed", "roof", "church", "commercial",
              "office", "warehouse", "kindergarten", "hospital", "public", "civic", "train_station", "service"}
 
+# opening hours: a week as 7 day masks (Monday first), bit h = open for most of hour h. From OSM's
+# opening_hours where it parses (the common forms: "Mo-Fr 09:00-18:00; Sa 10:00-17:00", "24/7", "off",
+# lunch breaks, past midnight); else a typical week for the category
+DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+def hours(a, b):
+    return sum(1 << h for h in range(24) if min(b, (h + 1) * 60) - max(a, h * 60) >= 30)
+WEEK = lambda days, a, b: [hours(a * 60, b * 60) if d in days else 0 for d in range(7)]
+DEFAULT_HOURS = {
+    "school": WEEK(range(5), 7, 18), "kindergarten": WEEK(range(5), 7, 18),
+    "shop": WEEK(range(6), 10, 19), "supermarket": WEEK(range(6), 8, 20),
+    "food": WEEK(range(7), 11, 23), "health": WEEK(range(5), 8, 19), "office": WEEK(range(5), 7, 19),
+    "leisure": WEEK(range(7), 8, 22), "services": WEEK(range(5), 9, 17),
+}
+
+
+def parse_hours(v):
+    """OSM opening_hours -> 7 day masks, or None when not understood"""
+    try:
+        return _parse_hours(v.strip())
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_hours(v):
+    if v == "24/7":
+        return [(1 << 24) - 1] * 7
+    week = [0] * 7
+    ok = False
+    for rule in v.split(";"):
+        rule = rule.strip()
+        if not rule or rule.startswith("PH") or rule.startswith("SH"):
+            continue
+        parts = rule.split(" ", 1)
+        if parts[0][:2] in DAYS:
+            days = set()
+            for span in parts[0].split(","):
+                if "-" in span:
+                    a, b = span.split("-")
+                    if a not in DAYS or b not in DAYS:
+                        return None
+                    i, j = DAYS.index(a), DAYS.index(b)
+                    days |= set(range(i, j + 1)) if i <= j else set(range(i, 7)) | set(range(0, j + 1))
+                elif span in DAYS:
+                    days.add(DAYS.index(span))
+                elif span == "PH":
+                    continue
+                else:
+                    return None
+            times = parts[1].strip() if len(parts) > 1 else "00:00-24:00"
+        else:
+            days, times = set(range(7)), rule
+        if times in ("off", "closed"):
+            for d in days:
+                week[d] = 0
+            ok = True
+            continue
+        masks = [0] * 7                      # (a rule replaces earlier rules for its days)
+        for span in times.split(","):
+            try:
+                a, b = span.strip().split("-")
+                ha, ma = map(int, a.split(":")); hb, mb = map(int, b.rstrip("+").split(":"))
+            except ValueError:
+                return None
+            t0, t1 = ha * 60 + ma, hb * 60 + mb
+            for d in days:
+                if t1 > t0:
+                    masks[d] |= hours(t0, min(t1, 1440))
+                else:                        # past midnight: the rest of this day, then the next morning
+                    masks[d] |= hours(t0, 1440)
+                    masks[(d + 1) % 7] |= hours(0, t1)
+        for d in days:
+            week[d] = masks[d]
+        for d in range(7):
+            if d not in days and masks[d]:
+                week[d] |= masks[d]
+        ok = True
+    return week if ok else None
+
+
 to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
 to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
 
@@ -115,6 +194,19 @@ def build():
     sid = lambda s: streets.setdefault(s, len(streets))
     nid = lambda s: names.setdefault(s, len(names))
     homes, pois, skipped = [], [], 0
+    weeks, week_ix, parsed, tagged = [], {}, 0, 0
+    def week_of(cat, t):
+        nonlocal parsed, tagged
+        w = None
+        if "opening_hours" in t:
+            tagged += 1
+            w = parse_hours(t["opening_hours"])
+            parsed += w is not None
+        key = tuple(w or DEFAULT_HOURS[cat])
+        if key not in week_ix:
+            week_ix[key] = len(weeks)
+            weeks.append(list(key))
+        return week_ix[key]
     # spatial order: the LiDAR tiles behind floors() are read through a bounded cache
     def where(e):
         c = e.get("center") or {"lon": e.get("lon") or 0, "lat": e.get("lat") or 0}
@@ -127,7 +219,7 @@ def build():
             continue
         cat = category(t)
         if cat:
-            pois.append([round(p[0], 1), round(p[1], 1), CATS.index(cat), nid(t.get("name", ""))])
+            pois.append([round(p[0], 1), round(p[1], 1), CATS.index(cat), nid(t.get("name", "")), week_of(cat, t)])
             continue
         if "building" in t and t["building"] not in NOT_HOMES and ("addr:housenumber" in t or t["building"] in
                                                                   ("apartments", "house", "residential", "terrace")):
@@ -138,13 +230,14 @@ def build():
             lv = t.get("building:levels", "")
             homes.append([round(p[0], 1), round(p[1], 1), int(lv) if lv.isdigit() else floors(*p), sid(street)])
     out = {"build": m.man["build"], "cats": CATS, "streets": list(streets), "names": list(names),
-           "homes": homes, "pois": pois,
-           "fields": {"homes": ["x", "y", "floors", "street"], "pois": ["x", "y", "cat", "name"]}}
+           "homes": homes, "pois": pois, "weeks": weeks,
+           "fields": {"homes": ["x", "y", "floors", "street"], "pois": ["x", "y", "cat", "name", "opening week"],
+                      "weeks": "7 day masks, Monday first: bit h = open in hour h"}}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":"), ensure_ascii=False))
     cnt = {c: sum(1 for q in pois if q[2] == i) for i, c in enumerate(CATS)}
     print(f"{len(homes)} homes ({sum(h[2] for h in homes)} floors, {skipped} on excluded streets left out), "
-          f"{len(pois)} destinations {cnt} -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
+          f"{len(pois)} destinations {cnt}, opening hours from OSM for {parsed} ({tagged} tagged), {len(weeks)} distinct weeks -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 
 
 if __name__ == "__main__":

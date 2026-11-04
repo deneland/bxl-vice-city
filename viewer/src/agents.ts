@@ -14,7 +14,8 @@ import { prof } from './prof';
 export interface Places {
   cats: string[]; streets: string[]; names: string[];
   homes: [number, number, number, number][];   // x, y (voxels), floors, street
-  pois: [number, number, number, number][];    // x, y (voxels), category, name
+  pois: [number, number, number, number, number?][];    // x, y (voxels), category, name, opening week
+  weeks?: number[][];                          // 7 day masks (Monday first): bit h = open in hour h (places.py)
 }
 
 type Where = { kind: 'home' } | { kind: 'poi'; i: number } | { kind: 'edge' } | { kind: 'house'; i: number }
@@ -89,6 +90,8 @@ function rng(seed: number) {
   };
 }
 const H = 3600, M = 60;
+const VISITS = new Set(['shop', 'dinner', 'errand', 'pickup-food']);   // purposes that need the place open
+const VISIT_REACH = 1500;   // m: how far a closed place may be swapped for an open one
 
 // a Brussels mix of first and last names (generated people; nobody real)
 const FIRST = ['Lucas', 'Emma', 'Mohamed', 'Louise', 'Adam', 'Olivia', 'Noah', 'Lina', 'Arthur', 'Nour', 'Louis', 'Sarah',
@@ -239,6 +242,34 @@ export class Agents {
     return pool.length ? { kind: 'poi', i: pool[Math.floor(r() * pool.length)] } : null;
   }
   private nearCache = new Map<string, number[]>();
+
+  /** is place i open at t (seconds of the day; may run past midnight) on weekday wd (0 Sunday)? */
+  isOpen(i: number, wd: number, t: number) {
+    const w = this.places.weeks?.[this.places.pois[i][4] ?? -1];
+    if (!w) return true;
+    const day = ((wd + 6) % 7 + Math.floor(t / (24 * H))) % 7, h = Math.floor((t % (24 * H)) / H);
+    return ((w[day] >> h) & 1) === 1;
+  }
+  /** visitors (not staff, pupils or parents dropping off) go somewhere open when they arrive: a closed
+   * place is swapped for the nearest open one of its kind within VISIT_REACH (else they go anyway) */
+  private openFor(w: Where, purpose: string, wd: number, leave: number): Where {
+    if (w.kind !== 'poi' || !VISITS.has(purpose)) return w;
+    const t = leave + 10 * M;   // (about when they get there)
+    if (this.isOpen(w.i, wd, t)) { this.openStats.open++; return w; }
+    const o = this.places.pois[w.i], grid = this.gridOf([this.places.cats[o[2]]]), C = Agents.POI_CELL;
+    const cx = Math.floor(o[0] / C), cy = Math.floor(o[1] / C), R = Math.ceil(VISIT_REACH / (C * this.vs));
+    let best = -1, bd = Infinity;
+    for (let gx = cx - R; gx <= cx + R; gx++)
+      for (let gy = cy - R; gy <= cy + R; gy++)
+        for (const i of grid.get(gx * 65536 + gy) ?? []) {
+          const q = this.places.pois[i], d = Math.hypot(q[0] - o[0], q[1] - o[1]) * this.vs;
+          if (d < bd && d < VISIT_REACH && this.isOpen(i, wd, t)) { bd = d; best = i; }
+        }
+    this.openStats[best >= 0 ? 'swapped' : 'closed']++;
+    return best >= 0 ? { kind: 'poi', i: best } : w;
+  }
+  /** visits planned to an open place / swapped to an open one / to a closed one (nothing open near) */
+  openStats = { open: 0, swapped: 0, closed: 0 };
   private static POI_CELL = 400;   // voxels (200 m)
   private grids = new Map<string, Map<number, number[]>>();
   /** places of these categories by grid cell (key gx * 65536 + gy) */
@@ -313,7 +344,8 @@ export class Agents {
     const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
     const home: Where = { kind: 'home' };
     const p: Activity[] = [];
-    const act = (where: Where, purpose: string, until: number) => p.push({ where, purpose, until });
+    const act = (where: Where, purpose: string, until: number) =>
+      p.push({ where: this.openFor(where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
     const outAndBack = (where: Where | null, purpose: string, t: number, stay: number) => {
       if (!where) return;
       act(home, 'home', t); act(where, purpose, t + stay);
@@ -366,7 +398,8 @@ export class Agents {
     const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
     const home: Where = a.home >= 0 ? { kind: 'home' } : { kind: 'edge' };
     const p: Activity[] = [];
-    const act = (where: Where, purpose: string, until: number) => p.push({ where, purpose, until });
+    const act = (where: Where, purpose: string, until: number) =>
+      p.push({ where: this.openFor(where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
     const shopping = () => {
       if (weekday || wd === 6 || r() < 0.3) {   // Sundays: most shops closed
         act(home, 'home', u(9 * H, 19 * H));
