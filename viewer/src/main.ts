@@ -194,7 +194,7 @@ async function main() {
   if (!wPreset) setInterval(updateWeather, 10 * 60e3);
 
   // --- level-of-detail tiles ------------------------------------------------
-  const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
+  const ERR = Number(params.get('err') ?? 16);          // max on-screen size of one voxel, px
   const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
   lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions
