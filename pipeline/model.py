@@ -1,11 +1,11 @@
 """Read access to the built L0 voxel tiles (viewer/public/tiles/<roi>), tile by tile on demand."""
 import json
 from collections import OrderedDict
-from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+from common import FLAG_APRON, ROOT
+
 
 
 class Model:
@@ -28,7 +28,7 @@ class Model:
             f = self.files.get((tx, ty))
             if f:
                 v = np.frombuffer((self.dir / f).read_bytes(), np.uint8).reshape(-1, 8)
-                v = v[(v[:, 7] & 2) == 0]
+                v = v[(v[:, 7] & FLAG_APRON) == 0]
                 occ[v[:, 0] - 1, v[:, 1] - 1, v[:, 2]] = np.maximum(v[:, 6], 1)
             self.cache[(tx, ty)] = occ
             if len(self.cache) > self.MAX_TILES:

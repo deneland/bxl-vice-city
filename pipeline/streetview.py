@@ -14,35 +14,26 @@ Stages (each cached, rerun only what changed):
 Usage: uv run python streetview.py fetch|calibrate|project [roi-name] [--jobs=N]
 Needs MAPILLARY_TOKEN in ../.env. Image data © Mapillary contributors, CC-BY-SA.
 """
+import base64
 import json
+import multiprocessing as mp
 import sys
 import time
-import tomllib
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-
-import base64
-import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import cache
 
 import mapbox_vector_tile
-import multiprocessing as mp
 import numpy as np
 from numba import njit
 from PIL import Image, ImageDraw
-from pyproj import Transformer
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-ROI_NAME = ARGS[1] if len(ARGS) > 1 else CFG["default"]
-ROI = {"name": ROI_NAME, **CFG["roi"][ROI_NAME]}
+from common import ARGS, ROOT, VS, jobs as njobs, log_clock, mapillary_token, region, to_l72, to_wgs
+
+ROI_NAME, ROI = region(1)   # (the first argument is the stage)
 RAW = ROOT / "data/raw/mapillary"
 IMG, DET = RAW / "img", RAW / "det"
 WORK = ROOT / "data/cache/streetview" / ROI_NAME
-TOKEN = next(l.split("=", 1)[1].strip().strip("'\"") for l in (ROOT / ".env").read_text().splitlines()
-             if l.startswith("MAPILLARY_TOKEN"))
 FIELDS = "id,captured_at,sequence,computed_geometry,computed_rotation,thumb_1024_url"
 
 SPACING = 5.0     # m between kept images along one capture session
@@ -51,19 +42,14 @@ SESSIONS = 4
 QUERY = 250.0     # m; API bbox size per request (stays below the 2000-result cap)
 MARGIN = 30.0     # m; images just outside the region still see facades inside it
 
-T0 = time.time()
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
-to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
-
-
-def log(msg):
-    print(f"[{time.time() - T0:6.1f}s] {msg}", flush=True)
+log = log_clock()
+token = cache(mapillary_token)   # (read when first needed: calibrate / project work offline)
 
 
 def get(url, auth=True, tries=4):
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"Authorization": f"OAuth {TOKEN}"} if auth else {})
+            req = urllib.request.Request(url, headers={"Authorization": f"OAuth {token()}"} if auth else {})
             with urllib.request.urlopen(req, timeout=60) as r:
                 return r.read()
         except Exception:
@@ -160,7 +146,6 @@ def fetch():
 
 
 # --- shared: voxel model, labels, rays ----------------------------------------------------
-VS = CFG.get("voxel", {}).get("size", 0.5)
 TILES = ROOT / "viewer/public/tiles" / ROI_NAME
 PAD = 120            # voxels of empty border around the region (images in the margin)
 CAM_H = 2.0          # m above ground: car roof / backpack mounts
@@ -511,7 +496,7 @@ def project():
         f"({skipped:,} images in badly matching or unresolved segments skipped)")
     C, L = [], []
     with ProcessPoolExecutor(jobs, mp_context=mp.get_context("fork")) as ex:
-        for i, (ck, crgb, cn, vk, lb, ln) in enumerate(ex.map(project_session, tasks), 1):
+        for i, (ck, crgb, cn, vk, lb, _) in enumerate(ex.map(project_session, tasks), 1):
             C.append((ck, crgb, cn))
             L.append((vk, lb))
             if i % 50 == 0 or i == len(tasks):
@@ -537,17 +522,6 @@ def project():
     log(f"colour layer: {len(key):,} voxels (median {np.median(nses):.0f} sessions each)")
     cnt = np.bincount(lab[lnses >= 2], minlength=16)
     log("label layer (2+ sessions agree): " + ", ".join(f"{L_NAMES[k]} {cnt[k]:,}" for k in L_NAMES if cnt[k]))
-
-
-def njobs():
-    a = next((a.split("=")[1] for a in sys.argv if a.startswith("--jobs=")), None)
-    if a:
-        return int(a)
-    try:
-        q, p = open("/sys/fs/cgroup/cpu.max").read().split()
-        return max(1, int(int(q) / int(p))) if q != "max" else os.cpu_count()
-    except Exception:
-        return os.cpu_count()
 
 
 if __name__ == "__main__":

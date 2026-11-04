@@ -11,3 +11,14 @@ dependencies = [
     "pyproj>=3.8.0",
     "scipy>=1.18.1",
 ]
+
+[dependency-groups]
+dev = ["ruff>=0.14"]
+
+[tool.ruff]
+line-length = 130
+extend-exclude = ["poc"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B"]
+ignore = ["B905"]   # zip() without strict=: the zipped sequences are built to match

@@ -1,6 +1,7 @@
 """STIB trams and buses from the GTFS timetable -> viewer/public/transit/<roi>.json.
 
-Per weekday (the feed's dates are mapped to a normal week, REF_WEEK), every trip that stops at least
+Per weekday (the feed's dates are mapped to a normal week: the one in the feed with the most service,
+i.e. not a holiday week), every trip that stops at least
 twice inside the region, with its stops in the region and their times. The metro runs underground and
 is left out. Positions in voxel coordinates.
 
@@ -10,28 +11,16 @@ Data: STIB-MIVB open data (GTFS), via data/raw/gtfs/stib.zip.
 import csv
 import io
 import json
-import sys
-import tomllib
 import zipfile
-from datetime import date
-from pathlib import Path
+from datetime import date, timedelta
 
-from pyproj import Transformer
+from common import ROOT, VS, region, to_l72
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-ROI_NAME = ARGS[0] if ARGS else CFG["default"]
-ROI = CFG["roi"][ROI_NAME]
+ROI_NAME, ROI = region()
 ZIP = ROOT / "data/raw/gtfs/stib.zip"
 OUT = ROOT / "viewer/public/transit" / f"{ROI_NAME}.json"
-VS = CFG["voxel"]["size"]
-
-# a normal week inside the feed's validity: Monday .. Sunday
-REF_WEEK = [date(2026, 3, 16 + k) for k in range(7)]
 MODES = {"0": 0, "3": 3}            # GTFS route_type: 0 tram, 3 bus (1 metro: underground, skipped)
 
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
 
 
 def rows(z, name):
@@ -46,7 +35,7 @@ def secs(t):
 def main():
     z = zipfile.ZipFile(ZIP)
     # stops in the region
-    stops, stop_ix, out_stops = {}, {}, []
+    stop_ix, out_stops = {}, []
     for r in rows(z, "stops.txt"):
         x, y = to_l72.transform(float(r["stop_lon"]), float(r["stop_lat"]))
         inside = ROI["xmin"] <= x < ROI["xmax"] and ROI["ymin"] <= y < ROI["ymax"]
@@ -64,13 +53,26 @@ def main():
     for r in rows(z, "calendar_dates.txt"):
         extra.setdefault(r["date"], {})[r["service_id"]] = r["exception_type"]
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    active = []
-    for k, d in enumerate(REF_WEEK):
-        ds = d.strftime("%Y%m%d")
-        s = {sid for sid, c in cal.items() if c[days[k]] == "1" and c["start_date"] <= ds <= c["end_date"]}
+
+    def services(d):
+        ds, wd = d.strftime("%Y%m%d"), days[d.weekday()]
+        s = {sid for sid, c in cal.items() if c[wd] == "1" and c["start_date"] <= ds <= c["end_date"]}
         for sid, ex in extra.get(ds, {}).items():
             (s.add if ex == "1" else s.discard)(sid)
-        active.append(s)
+        return s
+    # the reference week: of the weeks the feed covers, the one whose thinnest day has the most services
+    parse = lambda v: date(int(v[:4]), int(v[4:6]), int(v[6:]))
+    first, last = min(parse(c["start_date"]) for c in cal.values()), max(parse(c["end_date"]) for c in cal.values())
+    monday = first - timedelta(days=first.weekday())
+    weeks = []
+    while monday + timedelta(days=6) <= last:
+        week = [monday + timedelta(days=k) for k in range(7)]
+        weeks.append((min(len(services(d)) for d in week), week))
+        monday += timedelta(days=7)
+    if not weeks:
+        raise SystemExit("the GTFS feed does not cover a whole week")
+    ref_week = max(weeks)[1]
+    active = [services(d) for d in ref_week]
     trips = {}
     for r in rows(z, "trips.txt"):
         if r["route_id"] in routes:
@@ -99,12 +101,14 @@ def main():
                 out_days[k].append(entry)
     for d in out_days:
         d.sort(key=lambda e: e[2][0][1])
+    if not all(out_days):
+        raise SystemExit(f"no trips on {[days[k] for k, d in enumerate(out_days) if not d]} of the week of {ref_week[0]}")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps({"routes": out_routes, "stops": out_stops, "days": out_days,
                                "fields": {"routes": ["name", "mode (0 tram, 3 bus)", "colour"],
                                           "trips": ["route", "headsign", "[[stop, arrival s, departure s]]"],
                                           "days": "Monday .. Sunday"}}, separators=(",", ":"), ensure_ascii=False))
-    print(f"{len(out_stops)} stops, {len(out_routes)} lines ({', '.join(r[0] for r in out_routes)}); "
+    print(f"week of {ref_week[0]}: {len(out_stops)} stops, {len(out_routes)} lines ({', '.join(r[0] for r in out_routes)}); "
           f"trips per day {[len(d) for d in out_days]} -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 
 

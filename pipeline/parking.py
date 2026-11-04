@@ -23,24 +23,19 @@ Usage: uv run python parking.py [roi-name] [--refetch]
 """
 import json
 import sys
-import tomllib
-from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from pyproj import Transformer
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from roads import bbox, overpass
+from common import ROOT, VS, bbox, overpass, region, to_l72
+from model import Model
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ROI_NAME = next((a for a in sys.argv[1:] if not a.startswith("-")), CFG["default"])
+ROI_NAME, ROI = region()
 FOOT = ROOT / "data/cache/vehicles" / f"{ROI_NAME}.npy"
 ROADS = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 OUT = ROOT / "viewer/public/parking" / f"{ROI_NAME}.json"
-VS = CFG["voxel"]["size"]
 
 PARALLEL = 5.4      # m of kerb per parked car (car + gap)
 PERP = 2.6          # m per perpendicular place
@@ -58,7 +53,6 @@ HALF = 1.0          # m: footprint within this of the parking line counts for th
 LOTS = ROOT / "data/raw" / f"osm_lots_{ROI_NAME}.json"
 KERB, LOT, GARAGE = 0, 1, 2
 GARAGE_CAP = (40, 150)  # places per public garage: when OSM has no capacity, at most
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
 
 
 def resample(p, step):
@@ -83,8 +77,9 @@ def runs(mask):
 
 
 def fetch_lots():
-    q = (f'[out:json][timeout:120];(way["amenity"="parking"]({bbox()});nwr["amenity"="parking_entrance"]({bbox()});'
-         f'nwr["amenity"="parking"]["parking"~"underground|multi-storey"]({bbox()}););out tags geom;')
+    bb = bbox(ROI, 20.0)
+    q = (f'[out:json][timeout:120];(way["amenity"="parking"]({bb});nwr["amenity"="parking_entrance"]({bb});'
+         f'nwr["amenity"="parking"]["parking"~"underground|multi-storey"]({bb}););out tags geom;')
     overpass(q, LOTS)
 
 
@@ -122,7 +117,7 @@ def lot_places(grid, x0, y0, origin, kerb):
             continue
         if lu <= 6.5 and lv <= 3.0:                        # one car: along its own long axis
             q = c + u * (np.percentile(pu, 98) + np.percentile(pu, 2)) / 2
-            out.append([q[0], q[1], np.arctan2(u[1], u[0]) + (np.pi if (len(out) * 7919) % 2 else 0)])
+            out.append([q[0], q[1], np.arctan2(u[1], u[0]) + (np.pi if len(out) % 2 else 0)])
             continue
         mu, mv = (np.percentile(pu, 98) + np.percentile(pu, 2)) / 2, (np.percentile(pv, 98) + np.percentile(pv, 2)) / 2
         if lv >= 3.2:                                      # cars side by side, in one or more rows
@@ -259,7 +254,7 @@ def main():
                 length = (b - a) * VS
                 if length < MIN_ROW:
                     continue
-                perp = np.median(deep[a:b][deep[a:b] > 0]) * 0.5 > 3.6 if (deep[a:b] > 0).any() else False
+                perp = np.median(deep[a:b][deep[a:b] > 0]) * VS > 3.6 if (deep[a:b] > 0).any() else False
                 if osm[side] >= 3:
                     perp = True                           # OSM: diagonal / perpendicular (drawn perpendicular)
                 elif osm[side] == 2:
@@ -283,7 +278,6 @@ def main():
                 used += b - a
     if "--refetch" in sys.argv or not LOTS.exists():
         fetch_lots()
-    from model import Model
     spots += lot_places(grid, x0, y0, np.array(Model(ROI_NAME).man["origin"][:2]), spots)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps({"spots": spots, "fields": ["x", "y", "heading (rad, x east / y north)", "kind (0 kerb, 1 car park, 2 garage)"]},

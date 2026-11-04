@@ -13,22 +13,13 @@ Map data © OpenStreetMap contributors, ODbL.
 """
 import json
 import sys
-import time
-import tomllib
-import urllib.parse
-import urllib.request
-from pathlib import Path
 
 import numpy as np
-from pyproj import Transformer
 
+from common import C_BUILDING as BUILDING, ROOT, bbox, overpass, region, to_l72
 from model import Model
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-ROI_NAME = ARGS[0] if ARGS else CFG["default"]
-ROI = CFG["roi"][ROI_NAME]
+ROI_NAME, ROI = region()
 RAW = ROOT / "data/raw" / f"osm_roads_{ROI_NAME}.json"
 RAW_PATHS = ROOT / "data/raw" / f"osm_paths_{ROI_NAME}.json"
 OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
@@ -36,7 +27,6 @@ OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
          "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
 KIND = {"road": 0, "tram": 1, "rail": 2}
-BUILDING = 6
 # road class -> rank: who has priority at an unsigned intersection (Belgium: otherwise from the right)
 RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, "unclassified": 2,
         "residential": 2, "living_street": 1}
@@ -50,35 +40,10 @@ MERGE = 15.0      # m; road intersections joined by a shorter edge are one inter
 CLUSTER = 20.0    # m; ...unless the merged junction would be wider than this
 MARGIN = 20.0     # m around the region
 
-to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
-
-
-def overpass(q, dest):
-    req = urllib.request.Request("https://overpass-api.de/api/interpreter",
-                                 data=urllib.parse.urlencode({"data": q}).encode(),
-                                 headers={"User-Agent": "bxl-vice-voxel/0.1"})
-    for i in range(5):            # the public Overpass server is often briefly overloaded (502/504)
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                dest.write_bytes(r.read())
-            return
-        except Exception as e:
-            print(f"overpass: {e}; retrying")
-            time.sleep(10 * (i + 1))
-    raise SystemExit("overpass unavailable")
-
-
-def bbox():
-    corners = [to_wgs.transform(x, y) for x in (ROI["xmin"] - MARGIN, ROI["xmax"] + MARGIN)
-               for y in (ROI["ymin"] - MARGIN, ROI["ymax"] + MARGIN)]
-    return (f"{min(c[1] for c in corners):.6f},{min(c[0] for c in corners):.6f},"
-            f"{max(c[1] for c in corners):.6f},{max(c[0] for c in corners):.6f}")
-
 
 def fetch_paths():
     """footways, paths, pedestrian streets, steps (parks, squares); pavements and crossings are generated"""
-    overpass(f'[out:json][timeout:120];way["highway"~"^(footway|path|pedestrian|steps)$"]({bbox()});'
+    overpass(f'[out:json][timeout:120];way["highway"~"^(footway|path|pedestrian|steps)$"]({bbox(ROI, MARGIN)});'
              'out body;>;out skel qt;', RAW_PATHS)
 
 
@@ -129,25 +94,9 @@ def walk_paths(m, X0, Y0, vs):
 
 
 def fetch():
-    corners = [to_wgs.transform(x, y) for x in (ROI["xmin"] - MARGIN, ROI["xmax"] + MARGIN)
-               for y in (ROI["ymin"] - MARGIN, ROI["ymax"] + MARGIN)]
-    lo = (min(c[1] for c in corners), min(c[0] for c in corners))
-    hi = (max(c[1] for c in corners), max(c[0] for c in corners))
-    bb = f"{lo[0]:.6f},{lo[1]:.6f},{hi[0]:.6f},{hi[1]:.6f}"
-    q = (f'[out:json][timeout:120];(way["highway"~"^({"|".join(ROADS)})$"]({bb});'
-         f'way["railway"~"^(tram|rail|light_rail)$"]({bb}););out body;>;out body qt;')
-    req = urllib.request.Request("https://overpass-api.de/api/interpreter",
-                                 data=urllib.parse.urlencode({"data": q}).encode(),
-                                 headers={"User-Agent": "bxl-vice-voxel/0.1"})
-    for i in range(5):            # the public Overpass server is often briefly overloaded (502/504)
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                RAW.write_bytes(r.read())
-            return
-        except Exception as e:
-            print(f"overpass: {e}; retrying")
-            time.sleep(10 * (i + 1))
-    raise SystemExit("overpass unavailable")
+    bb = bbox(ROI, MARGIN)
+    overpass(f'[out:json][timeout:120];(way["highway"~"^({"|".join(ROADS)})$"]({bb});'
+             f'way["railway"~"^(tram|rail|light_rail)$"]({bb}););out body;>;out body qt;', RAW)
 
 
 def speed(t):
@@ -476,7 +425,7 @@ def assign_signals(edges, node_sig, pieces, vs):
             stats["crossing light"] += 1
     for e in roads:
         e[8] = [x for x in e[8] if x[1] != SIGNALS]
-    for e, m, kind, d, j in plan:
+    for e, m, kind, d, _ in plan:
         if kind == "stop":
             e[8].append([m, SIGNALS, d])
         elif kind == "crossing":

@@ -30,20 +30,17 @@ import os
 import shutil
 import sys
 import time
-import tomllib
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 
 import laspy
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ROI_NAME = next((a for a in sys.argv[1:] if not a.startswith("-") and not a.endswith(".las")), CFG["default"])
-ROI = {"name": ROI_NAME, **CFG["roi"][ROI_NAME]}
-VS = CFG.get("voxel", {}).get("size", 0.5)
+from common import (CFG, C_BUILDING, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+                    FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
+
+ROI_NAME, ROI = region()
 LEVELS = ROI.get("levels", 4)
 CH = 64            # tile size in columns (every level)
 NZ = 256           # max voxel layers at L0 (z stored as uint8)
@@ -55,8 +52,6 @@ DEST = OUT  # where tiles are written (a staging folder during a build)
 LAYER_F = ROOT / "data" / "cache" / "streetview" / ROI["name"] / "layer.npz"
 LAYER = {}  # street-level colour layer, loaded in main() (shared with forked workers)
 
-C_UNCLASSIFIED, C_GROUND, C_LOWVEG, C_HIGHVEG, C_BUILDING = 1, 2, 3, 5, 6
-C_VEHICLE = 64     # derived here (ASPRS user range): parked vehicles found in unclassified geometry
 REMOVE_VEHICLES = "--keep-vehicles" not in sys.argv   # 2021's parked cars out of the geometry (simulated instead)
 FOOTPRINTS = ROOT / "data" / "cache" / "vehicles"
 # tidy (default; --no-tidy to keep all): unclassified voxels low above the ground are kept only when they belong to something: a
@@ -72,11 +67,6 @@ ROAD_H = 8                 # voxels (4 m)
 FLOAT_VOX = 20             # small clusters floating more than FLOAT_H above the ground go
 FLOAT_H = 2
 SEM_KEEP = [1, 2, 6, 7, 8, 11]
-FLAG_FILL = 1      # geometry synthesised (wall / terrain fill), not measured
-FLAG_APRON = 2     # belongs to the neighbouring tile, used only for culling
-FLAG_PTCOLOR = 4   # synthetic voxel whose colour comes from nearby measured points
-FLAG_PHOTO = 8     # colour from street-level photos (streetview.py layer)
-LABEL_SHIFT = 4    # flags bits 4-7: semantic class of the voxel, whatever the source (see SEM_*)
 LABEL_MIN_SESSIONS = 2
 # semantic classes 1-12 as in streetview.L_NAMES (12 = sky is a photo/model mismatch, never a voxel class)
 SEM_BUILDING, SEM_VEG, SEM_GROUND, SEM_SKY, SEM_WATER, SEM_RAIL, SEM_OTHER = 1, 3, 9, 12, 13, 14, 15
@@ -88,15 +78,15 @@ SEM_TRANSIENT = [4, 5, 10]   # vehicle, bike, person: they move, so photos taken
 
 PT = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1"), ("c", "u1")])
 
+def ceil_div(a: int, b: int) -> int:
+    return -(-a // b)
+
+
 NX = int(round((ROI["xmax"] - ROI["xmin"]) / VS))
 NY = int(round((ROI["ymax"] - ROI["ymin"]) / VS))
-NBX, NBY = -(-NX // BLOCK), -(-NY // BLOCK)
+NBX, NBY = ceil_div(NX, BLOCK), ceil_div(NY, BLOCK)
 
-T0 = time.time()
-
-
-def log(msg: str) -> None:
-    print(f"[{time.time() - T0:6.1f}s] {msg}", flush=True)
+log = log_clock()
 
 
 # --- pass 1: bucket points per block -----------------------------------------
@@ -171,17 +161,6 @@ def bucket_points(jobs: int) -> float:
 
 
 # --- helpers ----------------------------------------------------------------
-def cpu_quota() -> int:
-    """CPUs we may actually use (container quota), not the host core count."""
-    try:
-        q, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
-        if q != "max":
-            return max(1, int(q) // int(period))
-    except (OSError, ValueError):
-        pass
-    return max(1, (os.cpu_count() or 2) - 1)
-
-
 def fill_nearest(grid: np.ndarray, valid: np.ndarray) -> np.ndarray:
     if valid.all():
         return grid
@@ -306,7 +285,6 @@ def write_tiles(L, v: Vox, tx_range, ty_range):
 
 # --- pass 2: one block ---------------------------------------------------------
 SPECK_POINTS = int(os.environ.get("SPECK_POINTS", 10))  # isolated clusters with fewer LiDAR points are dropped (0: off)
-SPECK_DUMP = os.environ.get("SPECK_DUMP")               # dir: save per-cluster stats for analysis
 
 
 def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
@@ -324,18 +302,6 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
     vl[m] = lab[vz[m] - z0, vy[m], vx[m]]
     del lab
     pts = np.bincount(vl[m], weights=np.minimum(cnt[m], 1 << 20), minlength=n + 1)
-    if SPECK_DUMP:
-        nvox = np.bincount(vl[m], minlength=n + 1)
-        h = vz - ground[vy, vx]
-        hmin = np.full(n + 1, 1 << 30); np.minimum.at(hmin, vl[m], h[m])
-        hmax = np.full(n + 1, -(1 << 30)); np.maximum.at(hmax, vl[m], h[m])
-        main = np.zeros(n + 1, np.int64)
-        k, c = np.unique(vl[m] * 256 + cls[m], return_counts=True)
-        o = np.lexsort((c, k // 256)); last = np.r_[k[o][1:] // 256 != k[o][:-1] // 256, True]
-        main[(k[o] // 256)[last]] = (k[o] % 256)[last]
-        Path(SPECK_DUMP).mkdir(parents=True, exist_ok=True)
-        np.savez(Path(SPECK_DUMP) / f"{os.getpid()}_{int(key[0])}_{len(key)}.npz",
-                 nvox=nvox[1:], pts=pts[1:], hmin=hmin[1:], hmax=hmax[1:], cls=main[1:])
     if not SPECK_POINTS:
         return np.zeros(len(key), bool)
     drop = m & (pts[vl] < SPECK_POINTS)
@@ -491,6 +457,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
             fp = np.zeros((GH, GW), bool)
             fp[vy[veh], vx[veh]] = True
             st["footprint"] = np.flatnonzero(fp.ravel())
+            st["vehicle_rgb"] = np.asarray(col[veh][::4]).astype(np.uint8)   # (a sample: car paint palette, vehicles.py)
             vkey, col, vcls, cnt = vkey[~veh], col[~veh], vcls[~veh], cnt[~veh]
             # the ground where the cars stood took the colour of the nearest measured ground: their shadow
             # in the aerial photo. Continue the open road around them instead (as under tree crowns).
@@ -688,8 +655,8 @@ def process_block(bx: int, by: int, z0: float):
         if L:
             v = v.coarser()
         s = 1 << L
-        x0, x1, y0, y1 = cx0 // s, -(-cx1 // s), cy0 // s, -(-cy1 // s)
-        tiles, nb = write_tiles(L, v, range(x0 // CH, -(-x1 // CH)), range(y0 // CH, -(-y1 // CH)))
+        x0, x1, y0, y1 = cx0 // s, ceil_div(cx1, s), cy0 // s, ceil_div(cy1, s)
+        tiles, nb = write_tiles(L, v, range(x0 // CH, ceil_div(x1, CH)), range(y0 // CH, ceil_div(y1, CH)))
         lv = levels[L]
         lv["tiles"] += tiles
         lv["bytes"] += nb
@@ -702,7 +669,7 @@ def process_block(bx: int, by: int, z0: float):
 
 def main() -> None:
     global DEST
-    jobs = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("--jobs=")), cpu_quota()))
+    jobs = cpu_jobs()
     log(f"region '{ROI['name']}': {NX}x{NY} columns @ {VS} m, {NBX}x{NBY} blocks of {BLOCK * VS:.0f} m, "
         f"{LEVELS} levels, {jobs} parallel jobs")
     z0 = bucket_points(jobs)
@@ -726,7 +693,7 @@ def main() -> None:
 
     levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
     st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
-    carry, feet = [], []
+    carry, feet, paint = [], [], []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
         futs = [ex.submit(process_block, bx, by, z0) for bx, by in blocks]
@@ -734,6 +701,8 @@ def main() -> None:
             lvs, bst, c, foot = fut.result()
             if foot is not None:
                 feet.append(foot)
+            if "vehicle_rgb" in bst:
+                paint.append(bst.pop("vehicle_rgb"))
             for L, lv in enumerate(lvs):
                 for k in ("voxels", "faces", "bytes"):
                     levels[L][k] += lv[k]
@@ -749,6 +718,8 @@ def main() -> None:
     if feet:   # where 2021's parked cars stood (columns), for parking spots
         FOOTPRINTS.mkdir(parents=True, exist_ok=True)
         np.save(FOOTPRINTS / f"{ROI['name']}.npy", np.concatenate(feet))
+        if paint:
+            np.save(FOOTPRINTS / f"{ROI['name']}_rgb.npy", np.concatenate(paint))
         log(f"vehicles removed from the geometry; {sum(len(f) for f in feet):,} footprint columns kept")
     # pass 3: levels spanning several blocks
     BL = min(LEVELS, 4)
@@ -756,7 +727,7 @@ def main() -> None:
     for L in range(BL, LEVELS):
         v = v.coarser()
         s = 1 << L
-        tiles, nb = write_tiles(L, v, range(0, -(-(-(-NX // s)) // CH)), range(0, -(-(-(-NY // s)) // CH)))
+        tiles, nb = write_tiles(L, v, range(ceil_div(ceil_div(NX, s), CH)), range(ceil_div(ceil_div(NY, s), CH)))
         levels[L].update(tiles=tiles, bytes=nb, voxels=len(v), faces=count_faces(v, 0, 1 << 30, 0, 1 << 30))
 
     log(f"walls: {st['wall_coloured']:,}/{st['wall']:,} voxels coloured from facade points "
@@ -770,7 +741,7 @@ def main() -> None:
         lv["tiles"].sort(key=lambda t: (t["ty"], t["tx"]))
         log(f"L{L}: {VS * (1 << L)} m, {lv['voxels']:,} voxels, ~{lv['faces']:,} faces, "
             f"{len(lv['tiles'])} tiles, {lv['bytes'] / 1e6:.1f} MB")
-        out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [-(-NX // (1 << L)), -(-NY // (1 << L)), NZ >> L],
+        out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
                            "voxels": lv["voxels"], "faces": lv["faces"], "tiles": lv["tiles"]})
     manifest = {
         "version": 2, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",

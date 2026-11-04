@@ -10,21 +10,15 @@ Needs MAPILLARY_TOKEN in ../.env. Map data © Mapillary contributors, CC-BY-SA.
 """
 import json
 import sys
-import tomllib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import numpy as np
-from pyproj import Transformer
 
+from common import ROOT, mapillary_token, region, to_l72, to_wgs
 from model import Model
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-ROI_NAME = ARGS[0] if ARGS else CFG["default"]
-ROI = CFG["roi"][ROI_NAME]
+ROI_NAME, ROI = region()
 RAW = ROOT / "data/raw" / f"mapillary_lights_{ROI_NAME}.json"
 CAL = ROOT / "data/cache/streetview" / ROI_NAME / "calibration.json"
 OUT = ROOT / "viewer/public/lights" / f"{ROI_NAME}.json"
@@ -36,17 +30,8 @@ HEAD_MIN, HEAD_MAX = 3.0, 12.0   # m above ground for a lamp head
 HEAD_DEFAULT = 5.0               # m; wall-mounted lamps and poles the LiDAR missed
 MIN_SCORE = 0.5    # same as streetview.py
 
-to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
-
-
-def token():
-    return next(l.split("=", 1)[1].strip().strip("'\"") for l in (ROOT / ".env").read_text().splitlines()
-                if l.startswith("MAPILLARY_TOKEN"))
-
-
 def fetch():
-    tok = token()
+    tok = mapillary_token()
     x0, y0, x1, y1 = ROI["xmin"], ROI["ymin"], ROI["xmax"], ROI["ymax"]
     cells = [(x, y) for x in np.arange(x0, x1, QUERY) for y in np.arange(y0, y1, QUERY)]
 

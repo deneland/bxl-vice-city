@@ -5,7 +5,7 @@ centrelines (grey) and junction pieces (purple: road surface inside a merged jun
 lines as squares coloured by signal group (red / cyan), crossing lights as magenta crosses, crosswalks as
 small circles (filled: run with the lights; open: not).
 
-Usage: uv run python qa_junctions.py [junctions.json]   (default: the newest run)
+Usage: uv run python qa_junctions.py [junctions.json [roi-name]]   (default: the newest run)
 """
 import json
 import random
@@ -14,11 +14,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parent.parent
+from common import ROOT, VS, region
+
+ROI_NAME, _ = region(1)   # (the first argument is the junctions.json)
 src = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted((ROOT / "data/metrics/junctions").glob("*/junctions.json"))[-1]
 js = json.loads(src.read_text())
-roads = json.loads((ROOT / "viewer/public/roads/schaerbeek.json").read_text())
-VS = 0.5
+roads = json.loads((ROOT / f"viewer/public/roads/{ROI_NAME}.json").read_text())
 # road centrelines and junction pieces in the viewer's frame (x east, z south: x * vs, -y * vs)
 lines = [("edge", [(e[6][i] * VS, -e[6][i + 1] * VS) for i in range(0, len(e[6]), 3)]) for e in roads["edges"] if e[2] == 0]
 lines += [("piece", [(e[6][i] * VS, -e[6][i + 1] * VS) for i in range(0, len(e[6]), 3)]) for e in roads.get("pieces", []) if e[2] == 0]
@@ -44,7 +45,8 @@ for k, j in enumerate(pick):
     d = ImageDraw.Draw(tile)
     ox, oy = 0, 0
     cx, cz = j["centre"]
-    tx = lambda q: (ox + T / 2 + (q[0] - cx) * T / M, oy + T / 2 + (q[1] - cz) * T / M)
+    def tx(q, ox=ox, oy=oy, cx=cx, cz=cz):
+        return (ox + T / 2 + (q[0] - cx) * T / M, oy + T / 2 + (q[1] - cz) * T / M)
     for kind, ln in lines:   # centrelines (grey) and junction pieces (purple) around it
         if min(abs(q[0] - cx) + abs(q[1] - cz) for q in ln) < M:
             d.line([tx(q) for q in ln], fill=(150, 60, 200) if kind == "piece" else (190, 190, 190), width=1)

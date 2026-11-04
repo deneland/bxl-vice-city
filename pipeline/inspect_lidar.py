@@ -4,14 +4,13 @@ Usage: uv run python inspect_lidar.py ../data/raw/lidar/<file>.las
 """
 
 import sys
-import tomllib
 from pathlib import Path
 
 import laspy
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
+from common import CFG
+
 ROI_NAME = next((a for a in sys.argv[1:] if not a.startswith("-") and not a.endswith(".las")), CFG["default"])
 ROI = {"name": ROI_NAME, **CFG["roi"][ROI_NAME]}
 

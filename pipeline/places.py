@@ -2,34 +2,26 @@
 their number of floors, estimated from the LiDAR height) and destinations (schools, shops, food,
 health, offices, leisure, services) -> viewer/public/places/<roi>.json.
 
-Homes on EXCLUDE_STREETS are left out (privacy). Places are in voxel coordinates.
+Homes on EXCLUDE_STREETS are left out (privacy): by their address, and buildings without an address
+by distance to the street (its geometry from roads.py's OSM download). Places are in voxel coordinates.
 
 Usage: uv run python places.py [roi-name] [--refetch]
 Map data © OpenStreetMap contributors, ODbL.
 """
 import json
 import sys
-import time
-import tomllib
-import urllib.parse
-import urllib.request
-from pathlib import Path
 
 import numpy as np
-from pyproj import Transformer
 
+from common import C_BUILDING, ROOT, bbox, overpass, region, to_l72
 from model import Model
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = tomllib.loads((ROOT / "config.toml").read_text())
-ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-ROI_NAME = ARGS[0] if ARGS else CFG["default"]
-ROI = CFG["roi"][ROI_NAME]
+ROI_NAME, ROI = region()
 RAW = ROOT / "data/raw" / f"osm_places_{ROI_NAME}.json"
 OUT = ROOT / "viewer/public/places" / f"{ROI_NAME}.json"
 
 EXCLUDE_STREETS = ["Grote Bosstraat"]          # no simulated homes here
-BUILDING, GROUND = 6, 2
+EXCLUDE_NEAR = 20.0                            # m: buildings without an address this close to them too
 
 # destination categories (order = index in the output)
 CATS = ["school", "kindergarten", "shop", "supermarket", "food", "health", "office", "leisure", "services"]
@@ -125,28 +117,12 @@ def _parse_hours(v):
     return week if ok else None
 
 
-to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
-to_l72 = Transformer.from_crs(4326, 31370, always_xy=True)
 
 
 def fetch():
-    corners = [to_wgs.transform(x, y) for x in (ROI["xmin"], ROI["xmax"]) for y in (ROI["ymin"], ROI["ymax"])]
-    bb = (f"{min(c[1] for c in corners):.6f},{min(c[0] for c in corners):.6f},"
-          f"{max(c[1] for c in corners):.6f},{max(c[0] for c in corners):.6f}")
-    q = (f'[out:json][timeout:120];(way["building"]({bb});nwr["shop"]({bb});nwr["amenity"]({bb});'
-         f'nwr["office"]({bb});nwr["leisure"]({bb}););out tags center;')
-    req = urllib.request.Request("https://overpass-api.de/api/interpreter",
-                                 data=urllib.parse.urlencode({"data": q}).encode(),
-                                 headers={"User-Agent": "bxl-vice-voxel/0.1"})
-    for i in range(5):            # the public Overpass server is often briefly overloaded
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                RAW.write_bytes(r.read())
-            return
-        except Exception as e:
-            print(f"overpass: {e}; retrying")
-            time.sleep(10 * (i + 1))
-    raise SystemExit("overpass unavailable")
+    bb = bbox(ROI)
+    overpass(f'[out:json][timeout:120];(way["building"]({bb});nwr["shop"]({bb});nwr["amenity"]({bb});'
+             f'nwr["office"]({bb});nwr["leisure"]({bb}););out tags center;', RAW)
 
 
 def category(t):
@@ -159,6 +135,28 @@ def category(t):
     if t.get("leisure") in LEISURE:
         return "leisure"
     return None
+
+
+def excluded_street_lines():
+    """polylines (L72 m) of the EXCLUDE_STREETS, from the road network's OSM download"""
+    raw = ROOT / "data/raw" / f"osm_roads_{ROI_NAME}.json"
+    if not raw.exists():
+        raise SystemExit(f"{raw.relative_to(ROOT)} missing: run roads.py first (needed to keep homes off EXCLUDE_STREETS)")
+    els = json.loads(raw.read_text())["elements"]
+    nodes = {e["id"]: (e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    return [np.array([to_l72.transform(*nodes[n]) for n in e["nodes"] if n in nodes]) for e in els
+            if e["type"] == "way" and any(x in e.get("tags", {}).get("name", "") for x in EXCLUDE_STREETS)]
+
+
+def near_lines(p, lines, d):
+    """is point p (L72 m) within d m of any of the polylines"""
+    for q in lines:
+        a, b = q[:-1], q[1:]
+        ab = b - a
+        t = np.clip(((p - a) * ab).sum(1) / np.maximum((ab ** 2).sum(1), 1e-9), 0, 1)
+        if (np.hypot(*(a + t[:, None] * ab - p).T) < d).any():
+            return True
+    return False
 
 
 def build():
@@ -185,7 +183,7 @@ def build():
                 c = m.column(int(vx) + dx, int(vy) + dy)
                 if c is None:
                     continue
-                b = np.flatnonzero(c == BUILDING)
+                b = np.flatnonzero(c == C_BUILDING)
                 if len(b):
                     best = max(best, (b.max() - np.flatnonzero(c).min()) * vs)
         return int(np.clip(round(best / 3), 1, 12))
@@ -212,6 +210,7 @@ def build():
         c = e.get("center") or {"lon": e.get("lon") or 0, "lat": e.get("lat") or 0}
         return (round(c["lat"] * 300), c["lon"])
     els.sort(key=where)
+    excluded = excluded_street_lines()
     for e in els:
         t = e.get("tags", {})
         p = vox(e)
@@ -224,7 +223,8 @@ def build():
         if "building" in t and t["building"] not in NOT_HOMES and ("addr:housenumber" in t or t["building"] in
                                                                   ("apartments", "house", "residential", "terrace")):
             street = t.get("addr:street", "")
-            if any(x in street for x in EXCLUDE_STREETS):
+            if any(x in street for x in EXCLUDE_STREETS) or (
+                    not street and near_lines(np.array(p) * vs + [X0, Y0], excluded, EXCLUDE_NEAR)):
                 skipped += 1
                 continue
             lv = t.get("building:levels", "")
