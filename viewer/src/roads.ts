@@ -17,7 +17,7 @@ export interface RoadNetwork {
 }
 
 /** traffic control codes on edges (pipeline roads.py) */
-export const CONTROL = { signals: 1, giveWay: 2, stop: 3 };
+export const CONTROL = { signals: 1, giveWay: 2, stop: 3, crossingLight: 4 };   // (roads.py: 1 = a stop line of the signalled junction ahead)
 
 export const KIND = { road: 0, tram: 1, rail: 2 };
 /** key of a mapped crosswalk: its edge and index along it (shared by pedestrians.ts and traffic.ts) */
@@ -41,7 +41,7 @@ export interface Lane {
   bikeOnly?: boolean;          // contraflow cycle lane in a one-way street
   controls: { s: number; code: number }[];   // signals / give way / stop along the lane, in driving direction
   crosswalks: { s: number; key: number }[];  // mapped crosswalks along the lane (cars give way to people on them)
-  toSignal: boolean;           // the junction it leads to has a mapped traffic light on its node
+  toSignal: boolean;           // the junction it leads to is signalled (roads.py assign_signals)
 }
 
 export async function loadRoads(url: string): Promise<RoadNetwork | null> {

@@ -4,7 +4,7 @@
 Edges are split at every node shared by two or more ways. Per edge: start/end node, kind, one-way,
 speed (km/h), lanes, the centreline as voxel coordinates (x east, y north, z = ground surface),
 resampled every SAMPLE m, the road rank (priority) and traffic controls along it. One-way edges point
-in the driving direction. Nodes: x, y, z, 1 if the intersection itself carries traffic signals, and 1
+in the driving direction. Nodes: x, y, z, 1 if the junction is signalled (assign_signals), and 1
 if it is where an edge leaves the region (entry / exit for through traffic). Edges are clipped to the
 region. Double tram tracks get a direction (trams keep right); single track stays two-way.
 
@@ -377,6 +377,115 @@ def pavements(edges, m, vs):
         e.insert(10, [round(float(np.median(f)) - 1.5, 1) if len(f) >= 2 else 0 for f in found])
 
 
+SIG_REACH = 35.0   # m: an OSM light this close to a junction (along the road, through plain bends) is that junction's
+CROSSING_LIGHT = 4  # control code: a light on its own (a pedestrian crossing away from junctions)
+
+
+def assign_signals(edges, node_sig, pieces, vs):
+    """Which junctions have traffic lights, and where each incoming road stops for them.
+
+    OSM maps lights inconsistently: on the junction node, at each stop line (with or without
+    traffic_signals:direction), on the crosswalks around it, sometimes only on some of its roads. So OSM
+    lights are evidence, not the model:
+      - a junction is signalled if a light is on its node, inside it (a merged junction's pieces), or within
+        SIG_REACH of it on one of its roads (through plain bends);
+      - every road into a signalled junction gets a stop line (the viewer runs the phases): where OSM has a
+        light for that direction on that road, else at the junction's mouth. Lights on a junction's exits
+        (cars just past it used to stop again there) are part of its cycle: dropped;
+      - lights away from junctions are pedestrian-crossing lights (CROSSING_LIGHT) for the directions that
+        reach them.
+    Rewrites the controls of road edges: signals become [m, SIGNALS, dir towards the junction] (stop lines,
+    always for the junction the edge leads to in that direction) or [m, CROSSING_LIGHT, dir]."""
+    roads = [e for e in edges if e[2] == KIND["road"]]
+    deg, at = {}, {}
+    for e in roads:
+        for n in (e[0], e[1]):
+            deg[n] = deg.get(n, 0) + 1
+            at.setdefault(n, []).append(e)
+    length = {id(e): edge_length(e[6], vs)[-1] for e in roads}
+    is_junction = lambda n: deg.get(n, 0) >= 3
+
+    def reach(e, end, d):
+        """the junction reached leaving edge e through its end `end` (0 start, 1 end) within SIG_REACH
+        (d: m already to that end), passing plain bends; or None"""
+        n, seen = e[end], {id(e)}
+        while d <= SIG_REACH:
+            if is_junction(n):
+                return n
+            nxt = [o for o in at.get(n, []) if id(o) not in seen]
+            if deg.get(n, 0) != 2 or len(nxt) != 1:
+                return None                                 # dead end / region edge
+            o = nxt[0]
+            seen.add(id(o))
+            d += length[id(o)]
+            n = o[1] if o[0] == n else o[0]
+        return None
+
+    signalled = {n for n, s in enumerate(node_sig) if s and is_junction(n)}
+    signalled |= {e[0] for e in pieces if any(c == SIGNALS for _, c, _ in e[8])}
+    stats = {"stop line (OSM direction)": 0, "stop line (nearest junction)": 0, "on an exit: in the junction's cycle": 0,
+             "for a junction beyond a bend": 0, "crossing light": 0}
+    plan = []                                               # (edge, m, kind, dir, junction)
+    for e in roads:
+        L = length[id(e)]
+        for m, c, dr in e[8]:
+            if c != SIGNALS:
+                continue
+            ends = {0: reach(e, 0, m), 1: reach(e, 1, L - m)}   # junction behind each end (or None)
+            dirs = [dr] if dr else ([1] if e[3] else [1, -1])   # directions driving through this light
+            # each direction that drives through it heads for the junction ahead (end 1 for +1, end 0 for -1)
+            ahead = {d: ends[1 if d > 0 else 0] for d in dirs}
+            if dr == 0 and not e[3] and ahead[1] is not None and ahead[-1] is not None:
+                # (two-way, no direction, junctions both ways: the nearer one's)
+                ahead = {1: ahead[1]} if L - m <= m else {-1: ahead[-1]}
+            got = {d: j for d, j in ahead.items() if j is not None}
+            if got:
+                for d, j in got.items():
+                    signalled.add(j)
+                    direct = e[1 if d > 0 else 0] == j
+                    plan.append((e, m, "stop" if direct else "beyond", d, j))
+                    stats["stop line (OSM direction)" if dr and direct else "stop line (nearest junction)" if direct
+                          else "for a junction beyond a bend"] += 1
+            elif any(j is not None for j in ends.values()):
+                # only behind it: a light on a junction's exit (cars come from the junction)
+                for j in ends.values():
+                    if j is not None:
+                        signalled.add(j)
+                plan.append((e, m, "exit", 0, None))
+                stats["on an exit: in the junction's cycle"] += 1
+            else:
+                plan.append((e, m, "crossing", dr if dr else (1 if e[3] else 0), None))
+                stats["crossing light"] += 1
+    # lights on plain bends (OSM ways split there): crossing lights for the traffic reaching them, unless a
+    # junction is close (then they are its)
+    for n, s in enumerate(node_sig):
+        if not s or is_junction(n) or deg.get(n, 0) == 0:
+            continue
+        near = [j for e in at[n] for j in [reach(e, 1 if e[0] == n else 0, length[id(e)])] if j is not None and
+                length[id(e)] <= SIG_REACH]
+        if near:
+            signalled.update(near)
+            continue
+        for e in at[n]:
+            to_n = 1 if e[1] == n else -1
+            if e[3] and to_n < 0:
+                continue
+            plan.append((e, length[id(e)] - 0.5 if to_n > 0 else 0.5, "crossing", to_n, None))
+            stats["crossing light"] += 1
+    for e in roads:
+        e[8] = [x for x in e[8] if x[1] != SIGNALS]
+    for e, m, kind, d, j in plan:
+        if kind == "stop":
+            e[8].append([m, SIGNALS, d])
+        elif kind == "crossing":
+            e[8].append([m, CROSSING_LIGHT, d])
+    for e in roads:
+        e[8].sort()
+    for n in range(len(node_sig)):
+        node_sig[n] = 1 if n in signalled else 0
+    print(f"traffic lights: {len(signalled)} signalled junctions; OSM lights -> " + ", ".join(f"{v} {k}" for k, v in stats.items()))
+
+
 def reverse(e, vs):
     L = edge_length(e[6], vs)[-1]
     e[0], e[1] = e[1], e[0]
@@ -547,6 +656,7 @@ def build():
     pieces = [e for e in pieces if all(1 <= c < lim for c, lim in zip(e[6][0:2], m.size[:2]))]
     edges, node_xy, node_sig, boundary = clip(edges, node_xy, node_sig, m.size, vs)
     tram_directions(edges, vs)
+    assign_signals(edges, node_sig, pieces, vs)
     pavements(edges, m, vs)
     pavements(pieces, m, vs)
     if "--refetch" in sys.argv or not RAW_PATHS.exists():
@@ -555,7 +665,7 @@ def build():
     out = {"build": m.man["build"], "paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
            "edges": edges, "pieces": pieces, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
-                                      "rank", "controls [m, 1 signals|2 give way|3 stop, dir]",
+                                      "rank", "controls [m, 1 stop line of the signalled junction ahead|2 give way|3 stop|4 crossing light, dir]",
                                       "bikes both ways (one-way street open to cycling against the traffic)",
                                       "pavement [left, right] m from the centreline (0: none found)",
                                       "crosswalks [[m, 1 signals|2 marked|3 unmarked]]", "roundabout",

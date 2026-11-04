@@ -7,6 +7,7 @@ import { crosswalkKey, KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
 
 const DEFAULT_PAVEMENT = [6, 6, 6, 7, 8.5, 9.5, 10];   // m from the centreline, by road rank (no facade found)
+const RED_PATIENCE = 120;   // s at a red light before walking anyway (when no car is near)
 const CROSS_PATIENCE = 25;   // s waiting for a gap before crossing anyway (cars then stop)
 
 interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: number | null; park?: boolean }   // cross: crosswalk key (roads.ts crosswalkKey)
@@ -543,8 +544,11 @@ export class Pedestrians {
         const stop = w.k === w.segs.length - 1 ? w.end : seg.len;
         // about to cross a street: wait for a gap (or until patience runs out; then cars wait)
         if (seg.cross !== null && w.crossing !== seg.cross) {
-          const safe = !this.traffic || this.traffic.zebraClear(seg.cross);   // (no car that could not stop)
-          if (!safe && w.wait < CROSS_PATIENCE) { w.wait += dt; step = 0; break; }
+          // under a light: wait for the cars' red (a rare one gives up after a long wait); else for a gap
+          const walk = this.traffic?.walkSignal(seg.cross) ?? null;
+          const clear = !this.traffic || this.traffic.zebraClear(seg.cross);   // (no car that could not stop)
+          const go = walk === false ? clear && w.wait >= RED_PATIENCE : clear;
+          if (!go && (walk === false || w.wait < CROSS_PATIENCE)) { w.wait += dt; step = 0; break; }
           w.wait = 0; w.crossing = seg.cross;
           this.busy.set(seg.cross, (this.busy.get(seg.cross) ?? 0) + 1);
         }

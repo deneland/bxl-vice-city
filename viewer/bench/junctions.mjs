@@ -11,6 +11,11 @@
 //   spread   lane ends more than 30 m from the centre: a junction that is really several
 //   kink     a sharp bend (> 60 degrees within 2 m) in the last / first 30 m of a lane: a spike
 //   dead     an incoming lane with no curve out although the junction has exits
+// and for the traffic lights (roads.py assign_signals, traffic.ts):
+//   unlit    a road into a signalled junction without a light
+//   farstop  a stop line more than 35 m before the junction
+//   restop   a light within 15 m past a junction (cars that crossed would stop again)
+//   nowalk   a crosswalk at a signalled junction that does not run with its lights
 import { chromium } from 'playwright-core';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -37,7 +42,7 @@ const angle = (a, b, c) => {
   return l ? Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / l))) * 180 / Math.PI : 0;
 };
 const kinks = (line) => { let k = 0; for (let i = 1; i + 1 < line.length; i++) if (angle(line[i - 1], line[i], line[i + 1]) > 60) k++; return k; };
-const counts = { loop: 0, far: 0, spread: 0, kink: 0, dead: 0 };
+const counts = { loop: 0, far: 0, spread: 0, kink: 0, dead: 0, unlit: 0, farstop: 0, restop: 0, nowalk: 0 };
 for (const j of js) {
   const ends = [...j.ins.map((x) => x.end), ...j.outs.map((x) => x.start)];
   j.centre = [ends.reduce((a, x) => a + x[0], 0) / ends.length, ends.reduce((a, x) => a + x[1], 0) / ends.length];
@@ -48,8 +53,12 @@ for (const j of js) {
     kink: j.ins.reduce((a, x) => a + kinks(x.line), 0) + j.outs.reduce((a, x) => a + kinks(x.line), 0),
     // (dead ends, a single street: turning back there is right)
     dead: j.outs.length && new Set([...j.ins.map((x) => x.edge), ...j.outs.map((x) => x.edge)]).size > 1 ? j.ins.filter((a) => !j.curves.some((c) => c.from === a.edge)).length : 0,
+    unlit: j.signalled ? j.ins.filter((a) => !a.light).length : 0,
+    farstop: j.ins.filter((a) => a.light && a.light.back > 35).length,
+    restop: new Set([...j.ins.map((x) => x.edge), ...j.outs.map((x) => x.edge)]).size >= 3 ? j.outs.reduce((a, b) => a + b.crossings.filter((c) => d(c, b.start) < 15).length, 0) : 0,
+    nowalk: j.signalled ? [...j.ins.flatMap((a) => a.zebras.filter((z) => a.light && z.at && d(z.at, a.end) <= a.light.back + 3)), ...j.outs.flatMap((b) => b.zebras)].filter((z) => z.walk < 0).length : 0,
   };
-  j.score = 3 * j.flags.loop + 2 * j.flags.far + 3 * j.flags.spread + 2 * j.flags.kink + 2 * j.flags.dead;
+  j.score = 3 * j.flags.unlit + 2 * j.flags.farstop + 3 * j.flags.restop + j.flags.nowalk + 3 * j.flags.loop + 2 * j.flags.far + 3 * j.flags.spread + 2 * j.flags.kink + 2 * j.flags.dead;
   j.degree = new Set([...j.ins.map((x) => x.edge), ...j.outs.map((x) => x.edge)]).size;
   for (const k of Object.keys(counts)) if (j.flags[k]) counts[k]++;
 }
@@ -57,5 +66,8 @@ writeFileSync(resolve(OUT, 'junctions.json'), JSON.stringify(js));
 const n = js.length, bad = js.filter((j) => j.score > 0).length;
 console.log(`${n} road junctions; ${bad} flagged (${(100 * bad / n).toFixed(1)} %)`);
 for (const [k, v] of Object.entries(counts)) console.log(`  ${k.padEnd(7)} ${v}`);
+const sig = js.filter((j) => j.signalled), appr = sig.flatMap((j) => j.ins);
+console.log(`lights: ${sig.length} signalled junctions, ${appr.length} roads into them: ${appr.filter((a) => a.light?.osm).length} stop lines from OSM, ${appr.filter((a) => a.light && !a.light.osm).length} at the mouth; ` +
+  `${js.reduce((a, j) => a + j.ins.reduce((b, x) => b + x.crossings.length, 0), 0)} crossing lights on approaches`);
 console.log(`worst: ${js.sort((a, b) => b.score - a.score).slice(0, 8).map((j) => `node ${j.node} (${j.score})`).join(', ')}`);
 console.log(`-> ${OUT}/junctions.json`);

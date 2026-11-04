@@ -1,7 +1,9 @@
 """Contact sheet of junctions from viewer/bench/junctions.mjs: the worst-scoring ones and a random sample by
 type (3-way, 4-way, 5+ way, signalled), each drawn 80 m wide: incoming lane ends (blue), outgoing lane
 starts (green), the curves joining them (orange; red when flagged), the junction centre (black), road
-centrelines (grey) and junction pieces (purple: road surface inside a merged junction).
+centrelines (grey) and junction pieces (purple: road surface inside a merged junction). Lights: stop
+lines as squares coloured by signal group (red / cyan), crossing lights as magenta crosses, crosswalks as
+small circles (filled: run with the lights; open: not).
 
 Usage: uv run python qa_junctions.py [junctions.json]   (default: the newest run)
 """
@@ -30,10 +32,11 @@ pick = watch + [j for j in worst if j not in watch][:9]
 for label, sel in (("3-way", lambda j: j["degree"] == 3), ("4-way", lambda j: j["degree"] == 4),
                    ("5+", lambda j: j["degree"] >= 5), ("signals", lambda j: j["signalled"])):
     pool = [j for j in js if sel(j) and j not in pick]
-    pick += random.sample(pool, min(3, len(pool)))
+    pick += random.sample(pool, min(6 if label == "signals" else 3, len(pool)))
 
 T, M = 320, 80.0                  # tile px, metres across
 cols = 6
+pick = pick[:30]
 rows = (len(pick) + cols - 1) // cols
 sheet = Image.new("RGB", (cols * T, rows * T), (250, 250, 250))
 for k, j in enumerate(pick):
@@ -55,6 +58,18 @@ for k, j in enumerate(pick):
         bad = c["chord"] > 3 and c["len"] > 2 * c["chord"]
         if len(c["pts"]) > 1:
             d.line([tx(q) for q in c["pts"]], fill=(220, 30, 30) if bad else (240, 150, 30), width=1)
+    GROUP = [(220, 30, 30), (0, 170, 200)]
+    for a in j["ins"]:
+        if a.get("light"):
+            x, y = tx(a["light"]["at"])
+            col = GROUP[a["light"]["group"] % 2]
+            d.rectangle([x - 4, y - 4, x + 4, y + 4], fill=col if a["light"]["osm"] else None, outline=col, width=2)
+    for x_ in [c for a in j["ins"] + j["outs"] for c in a.get("crossings", [])]:
+        x, y = tx(x_)
+        d.line([x - 5, y - 5, x + 5, y + 5], fill=(220, 0, 220), width=2); d.line([x - 5, y + 5, x + 5, y - 5], fill=(220, 0, 220), width=2)
+    for z in [z for a in j["ins"] + j["outs"] for z in a.get("zebras", [])]:
+        x, y = tx(z["at"])
+        d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(60, 60, 60) if z["walk"] >= 0 else None, outline=(60, 60, 60))
     x, y = tx(j["centre"])
     d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(0, 0, 0))
     flags = " ".join(f"{f}{v}" for f, v in j["flags"].items() if v)
