@@ -485,6 +485,7 @@ async function main() {
   const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
   let shadowTiles = true, dynShadowDirty = true;
   let wasMoving = false, lastCpu = 0;
+  let prevTags: Record<string, boolean> = {}, shadowStepped = false, dynShadowDrawn = false;
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const interval = now - last;
@@ -538,6 +539,7 @@ async function main() {
     }
     dirty = false;
     renderer.info.reset();
+    shadowStepped = dynShadowDrawn = false;
     if (traffic && trafficOn) { prof.begin('fleet'); traffic.draw(camera); prof.end('fleet'); }   // vehicles in view
     if (cityChanged) {   // the expensive part: only when the city on screen changed
       prof.begin('city');
@@ -562,14 +564,17 @@ async function main() {
         deferred.beginStaticShadow(cityScene, sun.target.position);   // other tiles: redraw in slices
         shadowTiles = false;
       }
+      shadowStepped = sunMoved;
       if (deferred.shadowBusy && !sunMoved) {
+        shadowStepped = true;
         prof.begin('shadowCity');
         if (deferred.stepStaticShadow(cityScene)) shadowRenders++;
         prof.end('shadowCity');
       }
       // vehicles, around what you look at: every other frame is enough (a fast car's shadow lags < 0.25 m;
       // the map and its transform always match)
-      if (dynShadowDirty || (trafficOn && (rendered & 1) === 0)) {
+      dynShadowDrawn = dynShadowDirty || (trafficOn && (rendered & 1) === 0);
+      if (dynShadowDrawn) {
         prof.begin('shadowDyn');
         deferred.renderDynamicShadow(scene, walk.active ? camera.position : controls.target);
         prof.end('shadowDyn');
@@ -590,9 +595,13 @@ async function main() {
       const frame = { interval, cpu, moving, drawCalls: renderer.info.render.drawCalls,
         triangles: renderer.info.render.triangles };
       telemetry.frame(frame);
+      telemetry.tags(interval, prevTags);
       for (const h of frameHooks) h(frame);
     }
     lastTickRendered = true;
+    // what this frame did (its cost shows in the next interval)
+    prevTags = { moving, city: cityChanged, cityShadow: shadowStepped, carShadow: dynShadowDrawn, simStep: (traffic?.lastSteps ?? 0) > 0,
+      tiles: lod.lastArrived > 0, cpu12: cpu > 12 };
 
     if (GPU_TIMING && !gpuInFlight) {
       gpuInFlight = true;

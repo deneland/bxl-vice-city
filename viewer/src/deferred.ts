@@ -279,7 +279,7 @@ export class Deferred {
   private statBack: ShadowMap | null = null;
   private job: { groups: THREE.Object3D[][]; k: number } | null = null;
   /** quads per slice frame */
-  sliceQuads = 600_000;
+  sliceQuads = 250_000;   // (an integrated GPU draws ~0.5-1 M quads per ms: a slice must fit in a frame's slack)
   get shadowBusy() { return this.job !== null; }
 
   beginStaticShadow(cityScene: THREE.Scene, center: THREE.Vector3) {

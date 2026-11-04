@@ -422,8 +422,10 @@ export class Traffic {
       arrive: 0, inst: [], stuck: 0, trip: [], dest: null, agent };
     for (const x of t.secs) v.inst.push(this.fleet.add(x.model, c, 1));
     this.vehicles.push(v);
+    if (agent) this.byAgent.set(agent, v);
     return v;
   }
+  private byAgent = new Map<unknown, Vehicle>();   // agent -> the vehicle they drive
 
   /** take a vehicle off the road: free its instances and junction */
   private release(v: Vehicle) {
@@ -431,6 +433,7 @@ export class Traffic {
     v.inst = [];
     if (v.inJunction) v.inJunction.junction?.occ.delete(v);
     v.inJunction = null;
+    if (v.agent && this.byAgent.get(v.agent) === v) this.byAgent.delete(v.agent);
     const k = this.vehicles.indexOf(v);
     if (k >= 0) this.vehicles.splice(k, 1);
   }
@@ -664,7 +667,7 @@ export class Traffic {
     return h < 0 ? null : this.vehicles.find((v) => v.inst.includes(h)) ?? null;
   }
   /** the car an agent drives now, if any */
-  vehicleOf(agent: unknown) { return this.vehicles.find((v) => v.agent === agent) ?? null; }
+  vehicleOf(agent: unknown) { return this.byAgent.get(agent) ?? null; }
   /** a vehicle's front bumper position (this group's frame) */
   positionOf(v: Vehicle, out = new THREE.Vector3()) { return this.at(v, v.s, out); }
   /** points along what is left of a vehicle's trip (this group's frame), and its length (m) */
@@ -724,7 +727,7 @@ export class Traffic {
 
   /** take an agent's car off the road (e.g. after a jump in time) */
   remove(agent: unknown) {
-    const v = this.vehicles.find((x) => x.agent === agent);
+    const v = this.byAgent.get(agent);
     if (v) this.release(v);
   }
 
@@ -807,7 +810,9 @@ export class Traffic {
         if (c > maxCost) continue;   // (bounded searches give up instead of exploring the whole network)
         if (seen[b] !== st || c < g[b]) {
           g[b] = c; prev[b] = a; seen[b] = st;
-          heap.push(astar ? c + Math.hypot(ex[b] - gx, ez[b] - gz) / 14 : c, b);
+          // weighted A* (straight line at 10 m/s, ~1.4x an admissible estimate): far fewer lanes searched
+          // on long trips, routes at most slightly longer than the best (drivers are not perfect either)
+          heap.push(astar ? c + Math.hypot(ex[b] - gx, ez[b] - gz) / 10 : c, b);
         }
       }
     }
@@ -929,7 +934,10 @@ export class Traffic {
     while (this.acc >= STEP && n < 4) { this.step(STEP); this.acc -= STEP; n++; }
     if (n === 4) this.acc = Math.min(this.acc, STEP);   // fell behind (a long frame): drop time, never spiral
     this.pose(this.acc);
+    this.lastSteps = n;
   }
+  /** simulation steps run in the last update (telemetry) */
+  lastSteps = 0;
 
   private step(dt: number) {
     this.time += dt;

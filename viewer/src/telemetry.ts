@@ -8,6 +8,9 @@ const ENDPOINT = '/__metrics';
 const FLUSH_MS = 5000;
 const KEEP_RECENT = 600; // frames kept for snapshots
 
+/** what a frame did (to find what the slow ones have in common) */
+export type FrameTags = Record<string, boolean>;
+
 export interface FrameInfo {
   interval: number;   // ms since previous frame (what the user feels)
   cpu: number;        // ms spent in our update + render submit
@@ -82,6 +85,21 @@ class Telemetry {
     post({ type: 'error', session: this.session, t: this.now(), kind, message: message.slice(0, 4000) });
   }
 
+  // per tag: frames that had it, and slow frames (> 20 ms) that had it
+  private tagAll: Record<string, number> = {};
+  private tagSlow: Record<string, number> = {};
+  private slowN = 0; private allN = 0;
+  /** the interval measured now belongs to the previous frame's work: pass that frame's tags */
+  tags(interval: number, tags: FrameTags) {
+    if (!TELEMETRY) return;
+    const slow = interval > 20;
+    this.allN++; if (slow) this.slowN++;
+    for (const [k, on] of Object.entries(tags)) if (on) {
+      this.tagAll[k] = (this.tagAll[k] ?? 0) + 1;
+      if (slow) this.tagSlow[k] = (this.tagSlow[k] ?? 0) + 1;
+    }
+  }
+
   frame(f: FrameInfo) {
     if (!TELEMETRY) return;
     this.frames.push(f);
@@ -111,6 +129,9 @@ class Telemetry {
       gpu: stats(this.gpu),
       longFrames: { over20: intervals.filter((x) => x > 20).length, over33: intervals.filter((x) => x > 33).length,
         over50: intervals.filter((x) => x > 50).length },
+      // share of frames with each tag, among all frames and among slow ones (> 20 ms)
+      slowTags: this.allN ? { frames: this.allN, slow: this.slowN, all: Object.fromEntries(Object.entries(this.tagAll).map(([k, v]) => [k, +(v / this.allN).toFixed(2)])),
+        inSlow: this.slowN ? Object.fromEntries(Object.entries(this.tagSlow).map(([k, v]) => [k, +(v / this.slowN).toFixed(2)])) : {} } : undefined,
       drawCalls: stats(f.map((x) => x.drawCalls))?.avg,
       triangles: stats(f.map((x) => x.triangles))?.avg,
       memMB: (performance as any).memory ? Math.round((performance as any).memory.usedJSHeapSize / 1e6) : undefined,
@@ -118,6 +139,7 @@ class Telemetry {
     }, beacon);
     this.frames = [];
     this.gpu = [];
+    this.tagAll = {}; this.tagSlow = {}; this.slowN = this.allN = 0;
     this.idle = 0;
   }
 

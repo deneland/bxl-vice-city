@@ -126,6 +126,8 @@ export class TileManager {
   /** ms per frame for integrating new tiles */
   arriveMs = 3;
   arriveQuads = 300_000;
+  /** tiles integrated in the last update (telemetry) */
+  lastArrived = 0;
   private showB = new Set<Node>();
   private readyCount = 0;
   private workers: Worker[];
@@ -218,6 +220,7 @@ export class TileManager {
       this.onMesh(this.arrived[k++]);
     }
     if (k) this.arrived.splice(0, k);
+    this.lastArrived = k;
     const visit = (n: Node) => {
       n.used = frame;
       const d = n.box.distanceToPoint(cam);

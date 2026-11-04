@@ -674,6 +674,7 @@ export class Agents {
   private anonShown = new Map<number, object>();   // anonymous parked cars on screen: place -> key
   private anonCars = new Map<number, { kind: string; paint: number; ag: number; f: number }>();
   private parkedAt: [number, number] | null = null;   // focus at the last parked-car refresh
+  private parkedT = 0; private parkedMore = false;
   promoStats = { ok: 0, fail: 0, ms: 0 };   // (diagnostics)
 
   /** timeline trips near the focus get a vehicle / walker (as far as the frame budget allows) */
@@ -700,15 +701,22 @@ export class Agents {
   private refreshParked() {
     const P = this.parking, f = this.focus;
     if (!P || !f) return;
-    if (this.parkedAt && Math.hypot(f[0] - this.parkedAt[0], f[1] - this.parkedAt[1]) < 25) return;
+    if (this.parkedAt && !this.parkedMore && Math.hypot(f[0] - this.parkedAt[0], f[1] - this.parkedAt[1]) < 25) return;
+    const t = performance.now();
+    if (t - this.parkedT < 200) return;   // (fast flights: at most 5 refreshes a second)
+    this.parkedT = t;
     this.parkedAt = [f[0], f[1]];
+    let budget = 300;                     // new parked cars per refresh; the rest next time
+    this.parkedMore = false;
     for (const a of this.shownSet) this.showParked(a);            // hides the ones now too far
     const r2 = this.radius.park ** 2;
     for (const [k, key] of this.anonShown)                         // anonymous cars: same
       if ((P.x[k] - f[0]) ** 2 + (P.z[k] - f[1]) ** 2 > r2) { this.traffic.unpark(key); this.anonShown.delete(k); }
     P.forEachNear(f[0], f[1], this.radius.park, (k, owner) => {   // shows the ones now near
+      if (budget <= 0) { this.parkedMore = true; return; }
       if (owner === Parking.ANON) {
         if (!this.anonShown.has(k)) {
+          budget--;
           const key = { anonPlace: k };
           let car = this.anonCars.get(k);
           if (!car) {   // (once per place: the same car stands there whenever you come back)
@@ -721,7 +729,7 @@ export class Agents {
         return;
       }
       const a = owner as Agent;
-      if (a && !a.shown && a.parked === k) this.showParked(a);
+      if (a && !a.shown && a.parked === k) { budget--; this.showParked(a); }
     });
   }
 
@@ -734,11 +742,14 @@ export class Agents {
     for (const [, set] of this.alighting) for (const a of set)
       if (now - a.rideT > 900) { set.delete(a); a.ride = 0; this.depart(a, now); }
     if (!this.focus) return;
+    let demote = 80;   // (after a jump of the view, hundreds are far away at once: spread over seconds)
     for (const a of this.drivingSet) {
+      if (demote <= 0) break;
       const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
       const p = a.mode === 'walk' ? this.peds?.positionOf(a) : this.traffic.positionOfAgent(a);
       if (!p || this.inZone([p.x, p.z], r + 150)) continue;
       const left = a.mode === 'walk' ? this.peds?.routeAhead(a).len ?? 0 : this.traffic.routeLeft(a);
+      demote--;
       if (a.mode === 'walk') this.peds?.remove(a); else this.traffic.remove(a);
       const from = a.plan[a.i], to = a.plan[a.i + 1];
       const t: Travel = { t0: a.departed, t1: now + left / (a.mode === 'walk' ? 1.3 : 7) + 5,
