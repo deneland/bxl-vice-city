@@ -164,13 +164,16 @@ async function main() {
     if (on && !traffic) {
       const n = await network;
       if (!n) { trafficOn = false; return; }
+      // car paint colours measured on the parked cars in the LiDAR (pipeline vehicles.py)
+      const palette = await fetch(`vehicles/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
       traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: 12, train: 3 },
-        deferred.litMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
-        (node) => n.net.nodes[node]?.[4] === 1);                        // region edge: through traffic
-      traffic.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
-      fx.add(traffic.mesh, traffic.lights);
+        deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
+        (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
+        palette?.palette ?? []);
+      traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
+      fx.add(traffic.group, traffic.lights);
     }
-    if (traffic) traffic.mesh.visible = traffic.lights.visible = trafficOn;
+    if (traffic) traffic.group.visible = traffic.lights.visible = trafficOn;
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
     dirty = true;
   };

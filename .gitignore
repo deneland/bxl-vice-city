@@ -9,3 +9,4 @@ data/metrics/
 .env
 viewer/public/lights/
 viewer/public/roads/
+viewer/public/vehicles/

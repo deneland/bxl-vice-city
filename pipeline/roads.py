@@ -97,6 +97,21 @@ def consolidate(edges, node_xy, node_sig, vs):
         p = np.array(e[6]).reshape(-1, 3)[:, :2] * vs
         return float(np.hypot(*np.diff(p, axis=0).T).sum())
 
+    # tracks get their own copy of nodes shared with roads (cars and trams do not interact yet), so road
+    # intersections can be merged without bending the tracks
+    roadn = {n for e in edges if e[2] == KIND["road"] for n in (e[0], e[1])}
+    copy = {}
+    for e in edges:
+        if e[2] == KIND["road"]:
+            continue
+        for k in (0, 1):
+            if e[k] in roadn:
+                if e[k] not in copy:
+                    copy[e[k]] = len(node_xy)
+                    node_xy.append(list(node_xy[e[k]]))
+                    node_sig.append(0)
+                    parent.append(len(parent))
+                e[k] = copy[e[k]]
     for e in edges:
         if e[2] == KIND["road"] and e[0] != e[1] and length(e) < MERGE:
             parent[find(e[0])] = find(e[1])
@@ -192,17 +207,81 @@ def tram_directions(edges, vs):
             if best is None or d[i] < best[0]:
                 best = (d[i], q[i])
         if best is None:
+            # single track: follow a one-way road running alongside (roundabouts, one-way streets)
+            rd = road_along(e, edges, vs)
+            if rd is None:
+                continue
+            if rd < 0:
+                reverse(e, vs)
+            e[3] = 1
+            n += 1
             continue
         rel = best[1] - P
         left = D[0] * rel[1] - D[1] * rel[0] > 0           # other track on the left (x east, y north)
-        if not left:                                       # reverse: travel the other way
-            L = edge_length(e[6], vs)[-1]
-            e[0], e[1] = e[1], e[0]
-            e[6] = [c for i in range(len(e[6]) - 3, -1, -3) for c in e[6][i:i + 3]]
-            e[8] = sorted([[round(L - m, 1), c, -d] for m, c, d in e[8]])
+        if not left:                                       # travel the other way
+            reverse(e, vs)
         e[3] = 1
         n += 1
-    print(f"tram tracks: {n} of {len(trams)} given a direction (double track)")
+    # chains: a track continuing a one-way track through a node (and nothing else there) continues its direction
+    tram_all = [e for e in edges if e[2] == KIND["tram"]]
+    changed = True
+    while changed:
+        changed = False
+        deg = {}
+        for e in tram_all:
+            for k in (e[0], e[1]):
+                deg[k] = deg.get(k, 0) + 1
+        for e in tram_all:
+            if e[3]:
+                continue
+            for node, at_start in ((e[0], True), (e[1], False)):
+                if deg.get(node) != 2:
+                    continue
+                f = next(f for f in tram_all if f is not e and node in (f[0], f[1]))
+                if not f[3]:
+                    continue
+                into = f[1] == node                         # f arrives at the node
+                if into != at_start:                        # e must leave where f arrives (and vice versa)
+                    reverse(e, vs)
+                e[3] = 1
+                n += 1
+                changed = True
+                break
+    print(f"tram tracks: {n} of {len(trams)} given a direction")
+
+
+def reverse(e, vs):
+    L = edge_length(e[6], vs)[-1]
+    e[0], e[1] = e[1], e[0]
+    e[6] = [c for i in range(len(e[6]) - 3, -1, -3) for c in e[6][i:i + 3]]
+    e[8] = sorted([[round(L - m, 1), c, -d] for m, c, d in e[8]])
+
+
+def road_along(e, edges, vs):
+    """+1 / -1 if a one-way road runs alongside tram edge e (same / opposite direction), else None"""
+    p = np.array(e[6]).reshape(-1, 3)[:, :2]
+    if len(p) < 3:
+        return None
+    votes = 0
+    for k in range(1, len(p) - 1, max(1, len(p) // 6)):
+        P, D = p[k], p[k + 1] - p[k - 1]
+        D = D / (np.linalg.norm(D) or 1)
+        best = None
+        for o in edges:
+            if o[2] != KIND["road"] or not o[3]:
+                continue
+            q = np.array(o[6]).reshape(-1, 3)[:, :2]
+            d = np.hypot(*(q - P).T)
+            i = int(np.argmin(d))
+            if d[i] > 8.0 / vs or len(q) < 2:
+                continue
+            Do = q[min(i + 1, len(q) - 1)] - q[max(i - 1, 0)]
+            c = float(np.dot(Do, D)) / (np.linalg.norm(Do) or 1)
+            if abs(c) > 0.7 and (best is None or d[i] < best[0]):
+                best = (d[i], c)
+        if best:
+            votes += 1 if best[1] > 0 else -1
+    return None if votes == 0 else (1 if votes > 0 else -1)
 
 
 def build():

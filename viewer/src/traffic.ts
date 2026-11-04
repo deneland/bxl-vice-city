@@ -20,6 +20,7 @@
 // interact with cars yet) and choose their next track at random.
 import * as THREE from 'three/webgpu';
 import { CONTROL, KIND, type Lane } from './roads';
+import { buildModels } from './vehicleModels';
 
 const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
 const MIN_RADIUS = 5.5;      // m, car turning circle (path of the car's centre)
@@ -28,20 +29,44 @@ const LOOK = 90;             // m looked ahead for obstacles and curves
 const APPROACH = 30;         // m: signals / signs this close to a lane's end belong to the junction
 const PATIENCE = 6;          // s waiting at a junction before ignoring priority (if nothing is in the way)
 const NO_ROOM_PATIENCE = 8;  // s before entering even without room after the junction
-const STUCK = 45;            // s without moving: the vehicle is taken off and starts a new trip
+const FORCE = 20;            // s waiting at a junction (not for a light): go anyway, even through a conflict
+const STUCK = 90;            // s without moving (not queueing for a light): taken off, new trip (last resort)
 const THROUGH = 0.3;         // share of trips that start / end at the region edge
+const SWITCH_COS = Math.cos(50 * Math.PI / 180);   // trams / trains: sharpest track connection
+const ETA = 4;               // s: give way only to conflicting vehicles arriving within this time
+const QUEUE_COST = 6;        // s of routing cost per vehicle already on a lane
 const TRIM = 9;              // m: lanes end this far before the intersection; curves turn in that space
 
-interface Kind { len: number; wb: number; over: number; h: number; w: number; seg: number; gap: number;
-  amax: number; b: number; T: number; s0: number }
-// len: body length; wb: wheelbase; over: front overhang (bumper to front axle); seg/gap: carriages
-const TYPES: Record<string, Kind> = {
-  car: { len: 4.3, wb: 2.7, over: 0.85, h: 1.5, w: 1.8, seg: 1, gap: 0, amax: 2.4, b: 3.2, T: 1.2, s0: 2.0 },
-  van: { len: 5.6, wb: 3.5, over: 1.0, h: 2.3, w: 2.0, seg: 1, gap: 0, amax: 1.7, b: 2.6, T: 1.4, s0: 2.0 },
-  tram: { len: 10.5, wb: 7.5, over: 1.5, h: 3.3, w: 2.3, seg: 3, gap: 0.4, amax: 1.0, b: 1.3, T: 2.0, s0: 3.0 },
-  train: { len: 24, wb: 17, over: 3.5, h: 4.0, w: 2.9, seg: 4, gap: 0.8, amax: 0.6, b: 0.8, T: 3.0, s0: 5.0 },
+/** one body on two axles: model, length, front overhang (bumper to front axle), wheelbase */
+interface Section { model: string; len: number; h: number; over: number; wb: number }
+/** vehicle type: its sections (carriages, front first), the gap between them, driving parameters */
+interface Kind { name: string; secs: Section[]; gap: number; total: number; amax: number; b: number; T: number; s0: number }
+
+const MODELS = buildModels();
+const sec = (model: string, over: number, wb: number): Section => ({ model, len: MODELS[model].len, h: MODELS[model].h, over, wb });
+const kind = (name: string, secs: Section[], gap: number, amax: number, b: number, T: number, s0: number): Kind =>
+  ({ name, secs, gap, total: secs.reduce((a, x) => a + x.len, 0) + gap * (secs.length - 1), amax, b, T, s0 });
+const CAR = [2.4, 3.2, 1.2, 2.0] as const;
+const TYPES = {
+  hatch: kind('hatch', [sec('hatch', 0.75, 2.5)], 0, ...CAR),
+  sedan: kind('sedan', [sec('sedan', 0.9, 2.75)], 0, ...CAR),
+  estate: kind('estate', [sec('estate', 0.9, 2.8)], 0, ...CAR),
+  suv: kind('suv', [sec('suv', 0.9, 2.75)], 0, ...CAR),
+  van: kind('van', [sec('van', 0.9, 3.6)], 0, 1.7, 2.6, 1.4, 2.0),
+  bus: kind('bus', [sec('bus', 2.7, 6.0)], 0, 1.1, 1.8, 1.8, 2.5),
+  // STIB Flexity: T3000 ~32 m in 5 sections, T4000 ~43 m in 7
+  t3000: kind('t3000', [sec('tramCab', 0.8, 4.8), sec('tramMid', 0.8, 4.4), sec('tramPanto', 0.8, 4.4),
+    sec('tramMid', 0.8, 4.4), sec('tramRear', 0.8, 4.8)], 0.15, 1.0, 1.3, 2.0, 3.0),
+  t4000: kind('t4000', [sec('tramCab', 0.8, 4.8), sec('tramMid', 0.8, 4.4), sec('tramPanto', 0.8, 4.4), sec('tramMid', 0.8, 4.4),
+    sec('tramPanto', 0.8, 4.4), sec('tramMid', 0.8, 4.4), sec('tramRear', 0.8, 4.8)], 0.15, 1.0, 1.3, 2.0, 3.0),
+  train: kind('train', [0, 1, 2, 3].map(() => sec('carriage', 3, 18)), 0.8, 0.6, 0.8, 3.0, 5.0),
 };
-const CAR_COLORS = [0xf2f2f2, 0x1b1b1d, 0x7d8288, 0xb9bdc2, 0x22324f, 0x8c1c1c, 0x3a3f45, 0xe8e2d4];
+// road vehicle mix
+const ROAD_MIX: [Kind, number][] = [[TYPES.hatch, 0.27], [TYPES.sedan, 0.22], [TYPES.estate, 0.12], [TYPES.suv, 0.17],
+  [TYPES.van, 0.14], [TYPES.bus, 0.05]];
+const pickKind = () => { let r = Math.random(); for (const [k, w] of ROAD_MIX) { r -= w; if (r <= 0) return k; } return TYPES.hatch; };
+const VAN_WHITE = 0xeceeee, BUS_COLORS = [0xe9e9e4, 0xd0d3d6, 0x2f5597, 0xb22a2a], TRAM_SILVER = 0xb9bdc0, TRAIN = 0xcfd2d4;
+const ACCENTS = [0x8c1c1c, 0x1f3f7a, 0x3c6fb0, 0xc9b99a];   // a few real colours the aerial palette misses
 const LIGHT_COLORS = [new THREE.Color(0x30ff60), new THREE.Color(0xffb000), new THREE.Color(0xff2a1a)];
 const GREEN = 0, AMBER = 1, RED = 2;
 
@@ -77,7 +102,7 @@ interface Vehicle {
   trip: Path[];                // cars: lanes still to drive after the route planned so far
   dest: { p: Path; s: number } | null;   // cars: where to pull over (null: leave the region)
   arrive: number;              // when it started approaching its next junction (first come, first served)
-  first: number;               // first instance (box) index
+  inst: { mesh: THREE.InstancedMesh; i: number }[];   // per section: its model's instanced mesh, index
   stuck: number;               // s without moving
   block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
   why?: string;                // debugging: why it may not enter its next junction
@@ -214,7 +239,6 @@ function signalState(sig: Signal, t: number) {
 }
 
 export class Traffic {
-  readonly mesh: THREE.InstancedMesh;
   readonly lights: THREE.InstancedMesh;
   readonly vehicles: Vehicle[] = [];
   private paths: Path[] = [];
@@ -224,10 +248,13 @@ export class Traffic {
   private time = Math.random() * 1000;
 
   /** material: lit like the city (deferred.ts litMaterial); instance colours are the paint */
-  /** boundary: is this node where the network leaves the region (entry / exit for through traffic)? */
-  constructor(lanes: Lane[], counts = { car: 400, tram: 12, train: 3 },
-    material: THREE.Material = new THREE.MeshStandardNodeMaterial({ roughness: 0.55, metalness: 0.1 }),
-    private boundary: (node: number) => boolean = () => false) {
+  readonly group = new THREE.Group();
+
+  /** material: reads the model attributes vcol / vmat and the per-instance paint (deferred.ts vehicleMaterial);
+   *  boundary: is this node where the network leaves the region (entry / exit for through traffic)?;
+   *  palette: car paint colours (sRGB 0-255) with their shares (pipeline vehicles.py) */
+  constructor(lanes: Lane[], counts = { car: 400, tram: 12, train: 3 }, material: THREE.Material,
+    private boundary: (node: number) => boolean = () => false, palette: { rgb: number[]; share: number }[] = []) {
     // --- paths: lanes trimmed back from the junctions, so the curves have room to turn ---
     const incoming = new Map<number, Path[]>();
     for (const l of lanes) {
@@ -272,7 +299,7 @@ export class Traffic {
       for (const p of roads) p.approach!.signal = groups[Math.abs(p.approach!.dir.dot(ref)) > 0.6 ? 0 : 1];
     }
     // --- trip ends: kerbside (weighted by length) and region-edge entries / exits ---
-    const roads = this.paths.filter((p) => p.kind === KIND.road && p.end - p.start > 12);
+    const roads = this.paths.filter((p) => p.kind === KIND.road && p.end - p.start > 30);
     this.kerb = roads;
     this.kerbTotal = roads.reduce((a, p) => a + p.end - p.start, 0);
     this.entries = this.paths.filter((p) => p.kind === KIND.road && this.boundary(p.lane!.from) && p.end - p.start > 2);
@@ -281,28 +308,48 @@ export class Traffic {
     const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
     const plan: [string, Path[], number][] = [
       ['car', byKind(KIND.road), counts.car], ['tram', byKind(KIND.tram), counts.tram], ['train', byKind(KIND.rail), counts.train]];
-    let instances = 0;
+    const paints: number[][] = [];   // per vehicle, linear rgb
+    const carPaint = this.paintPicker(palette);
+    const counts2 = new Map<string, number>();
     for (const [type, pool, n] of plan) {
       if (!pool.length) continue;
       for (let i = 0; i < n; i++) {
-        const t = type === 'car' && Math.random() < 0.12 ? TYPES.van : TYPES[type];
-                // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
-        const ag = type === 'car' ? 0.75 + 0.65 * Math.random() ** 1.5 : 1;
+        const t = type === 'car' ? pickKind() : type === 'tram' ? (Math.random() < 0.3 ? TYPES.t4000 : TYPES.t3000) : TYPES.train;
+        const calm = t === TYPES.bus || type !== 'car';
+        // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
+        const ag = calm ? 1 : 0.75 + 0.65 * Math.random() ** 1.5;
         const v: Vehicle = { t, kind: pool[0].kind, route: [], hist: [], s: 0, v: 0, ag,
-          f: type === 'car' ? 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() : 0.95,
-          grant: null, inJunction: null, wait: 0, arrive: 0, first: instances, stuck: 0, trip: [], dest: null };
+          f: calm ? 0.95 : 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random(),
+          grant: null, inJunction: null, wait: 0, arrive: 0, inst: [], stuck: 0, trip: [], dest: null };
         if (type === 'car') this.newTrip(v, true); else this.place(v, pool);
         this.vehicles.push(v);
-        instances += t.seg;
+        for (const x of t.secs) counts2.set(x.model, (counts2.get(x.model) ?? 0) + 1);
+        const hex = t === TYPES.van ? (Math.random() < 0.65 ? VAN_WHITE : carPaint())
+          : t === TYPES.bus ? BUS_COLORS[Math.floor(Math.random() * BUS_COLORS.length)]
+            : t === TYPES.t3000 || t === TYPES.t4000 ? TRAM_SILVER : t === TYPES.train ? TRAIN : carPaint();
+        const c = new THREE.Color(hex);
+        paints.push([c.r, c.g, c.b]);
       }
     }
-    this.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, Math.max(1, instances));
-    this.mesh.frustumCulled = false;
-    const c = new THREE.Color();
-    for (const v of this.vehicles) {
-      c.set(v.kind === KIND.road ? CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)] : v.kind === KIND.tram ? 0xd9dad4 : 0x4a5a8c);
-      for (let k = 0; k < v.t.seg; k++) this.mesh.setColorAt(v.first + k, c);
+    // one instanced mesh per model; per-instance paint
+    const meshes = new Map<string, THREE.InstancedMesh>();
+    for (const [model, n] of counts2) {
+      const geo = MODELS[model].geo.clone();
+      geo.setAttribute('paint', new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3));
+      const m = new THREE.InstancedMesh(geo, material, n);
+      m.frustumCulled = false;
+      m.count = 0;
+      meshes.set(model, m);
+      this.group.add(m);
     }
+    this.vehicles.forEach((v, k) => {
+      for (const x of v.t.secs) {
+        const mesh = meshes.get(x.model)!, i = mesh.count++;
+        (mesh.geometry.getAttribute('paint') as THREE.BufferAttribute).setXYZ(i, paints[k][0], paints[k][1], paints[k][2]);
+        v.inst.push({ mesh, i });
+      }
+    });
+    this.meshes = [...meshes.values()];
     // --- signal heads: a small box at the right of each stop line ---
     const heads: { pos: THREE.Vector3; sig: Signal }[] = [];
     const right = (p: Path, s: number, d: number) => {
@@ -329,14 +376,45 @@ export class Traffic {
   get signalCount() { return this.lightAt.length; }
 
   /** put a vehicle somewhere on a random lane of its kind */
-  private place(v: Vehicle, pool = this.paths.filter((p) => p.kind === v.kind && p.end - p.start > 10)) {
+  private place(v: Vehicle, pool?: Path[]) {
+    // trams / trains come in at the region edge (as if from the rest of the line); else anywhere
+    if (!pool) {
+      const edge = this.paths.filter((p) => p.kind === v.kind && this.boundary(p.lane!.from));
+      pool = edge.length ? edge : this.paths.filter((p) => p.kind === v.kind && p.end - p.start > Math.min(v.t.total, 60));
+    }
     const p = pool[Math.floor(Math.random() * pool.length)];
-    v.route = [p]; v.hist = []; v.s = p.start + Math.random() * (p.end - p.start); v.v = p.speed * 0.5;
+    // the whole vehicle on the lane where possible (carriages behind the start would fold up)
+    const room = p.end - p.start - v.t.total;
+    const edge = this.boundary(p.lane!.from);
+    v.route = [p]; v.hist = []; v.v = p.speed * 0.5;
+    v.s = edge ? p.start : room > 0 ? p.start + v.t.total + Math.random() * room : p.end;
     v.grant = null; v.wait = 0;
     if (v.inJunction) v.inJunction.junction?.occ.delete(v);
     v.inJunction = null;
     this.plan(v);
   }
+
+  private meshes: THREE.InstancedMesh[] = [];
+
+  /** car paint: the measured palette (lifted a little: aerial colours are shaded roofs) plus a few accents */
+  private paintPicker(palette: { rgb: number[]; share: number }[]) {
+    const cols = palette.map((p) => ({ hex: new THREE.Color().setRGB(
+      Math.min(1, p.rgb[0] / 255 * 1.25), Math.min(1, p.rgb[1] / 255 * 1.25), Math.min(1, p.rgb[2] / 255 * 1.25),
+      THREE.SRGBColorSpace).getHex(), w: p.share * 0.9 }));
+    for (const a of ACCENTS) cols.push({ hex: a, w: (palette.length ? 0.1 : 1) / ACCENTS.length });
+    const total = cols.reduce((a, c) => a + c.w, 0);
+    return () => { let r = Math.random() * total; for (const c of cols) { r -= c.w; if (r <= 0) return c.hex; } return cols[0].hex; };
+  }
+
+  /** is this vehicle waiting for a light (itself, or at the back of a queue whose head is)? */
+  private atLight(v: Vehicle) {
+    let h = v;
+    for (let n = 0; n < 40 && h.block === 'leader' && h.blockBy; n++) h = h.blockBy;
+    return h.block === 'junction:light' || h.block === 'crossing';
+  }
+
+  /** for the shadow pass: let every vehicle mesh render in another layer too */
+  enableLayer(layer: number) { for (const m of this.meshes) m.layers.enable(layer); }
 
   private kerb: Path[] = []; private kerbTotal = 0;
   private entries: Path[] = []; private exits: Path[] = [];
@@ -344,7 +422,11 @@ export class Traffic {
 
   private kerbSpot(): { p: Path; s: number } {
     let r = Math.random() * this.kerbTotal;
-    for (const p of this.kerb) { r -= p.end - p.start; if (r <= 0) return { p, s: p.end + r }; }
+    for (const p of this.kerb) {
+      r -= p.end - p.start;
+      // keep away from the intersections at both ends
+      if (r <= 0) return { p, s: Math.min(p.end - 15, Math.max(p.start + 8, p.end + r)) };
+    }
     const p = this.kerb[0];
     return { p, s: (p.start + p.end) / 2 };
   }
@@ -398,7 +480,8 @@ export class Traffic {
         const db = heading(b, b.start);
         const turn = Math.atan2(da.x * db.y - da.y * db.x, da.dot(db));   // > 0: right (x east, z south)
         const pen = b.lane!.edge === a.lane!.edge ? 60 : turn < -0.5 ? 4 : turn > 0.5 ? 1.5 : 0;
-        const c = cost.get(a)! + (b.end - b.start + 10) / b.speed + pen;
+        // congestion: every vehicle already on the lane costs time (drivers avoid queues)
+        const c = cost.get(a)! + (b.end - b.start + 10) / b.speed + pen + b.occ.length * QUEUE_COST;
         if (c < (cost.get(b) ?? Infinity)) {
           cost.set(b, c); prev.set(b, a);
           sample(b, b.end, pos);
@@ -421,9 +504,10 @@ export class Traffic {
         next = v.trip.shift();
         if (!next) return;                          // the trip ends on this lane
       } else {
-        const opts = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1);
-        const fwd = opts.filter((n) => n.lane!.edge !== last.lane!.edge);
-        const pick = fwd.length ? fwd : opts;       // dead end: turn around
+        // rails: only connections a switch allows (no sharp bends, no reversing); none: end of the line
+        const dir = heading(last, last.end);
+        const pick = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1
+          && n.lane!.edge !== last.lane!.edge && dir.dot(heading(n, n.start)) > SWITCH_COS);
         if (!pick.length) return;                   // leaves the network: handled when it gets there
         next = pick[Math.floor(Math.random() * pick.length)];
       }
@@ -466,11 +550,11 @@ export class Traffic {
 
   /** is there room on the lane after junction curve c for vehicle v (counting vehicles still in curves into it)? */
   private room(v: Vehicle, c: Path) {
-    const out = c.to!, need = v.t.len * v.t.seg + v.t.s0;
+    const out = c.to!, need = v.t.total + v.t.s0;
     let free = out.end - out.start;
     const last = out.occ[0];                       // rearmost vehicle on the exit lane
-    if (last) free = last.s - last.t.len * last.t.seg - out.start;
-    for (const y of c.junction!.occ) if (y !== v && y.inJunction?.to === out) free -= y.t.len * y.t.seg + y.t.s0;
+    if (last) free = last.s - last.t.total - out.start;
+    for (const y of c.junction!.occ) if (y !== v && y.inJunction?.to === out) free -= y.t.total + y.t.s0;
     return free > need || (last !== undefined && last.v > 2) || (out.end - out.start < need && !last);   // a moving queue makes room
   }
 
@@ -524,12 +608,16 @@ export class Traffic {
     // pass 2: among the vehicles that could go, precedence (in order of arrival)
     cands.sort((a, b) => a.v.arrive - b.v.arrive);
     for (const x of cands) {
+      // deadlock breaker: waited long enough for something other than a light -> go
+      if (x.v.kind === KIND.road && x.v.wait > FORCE && x.v.why !== 'light') { x.v.grant = x.c; continue; }
       if (!x.free) continue;
       if (x.v.kind !== KIND.road) { x.v.grant = x.c; continue; }   // trams / trains: their own signals, not modelled
       const j = x.c.junction!, signalled = !!x.c.from!.approach!.signal;
       let ok = true;
       for (const y of cands) {
         if (y === x || !y.free || y.c.junction !== j || !this.conflicts(j, x.c, y.c)) continue;
+        // only vehicles that will actually be there soon matter (not one far back or standing still)
+        if (y.d / Math.max(y.v.v, 1.5) > ETA) continue;
         if (y.v.grant === y.c) { ok = false; x.v.why = 'granted other'; break; }   // allowed in before x
         const patient = !signalled && x.v.wait > PATIENCE && x.v.wait >= y.v.wait;   // breaks priority cycles
         if (!patient && this.before(y.v, y.c, x.v, x.c)) { ok = false; x.v.why = 'yield'; break; }
@@ -554,12 +642,12 @@ export class Traffic {
           if (dd > LOOK) break;
           // curve limits scale with sqrt(lateral acceleration); brake for them late and firmly
           const vm = Math.min(p.vmax[k] * Math.sqrt(v.ag), p.speed * v.f);
-          v0 = Math.min(v0, Math.sqrt(vm * vm + 2 * t.b * v.ag * 0.8 * Math.max(0, dd - t.len / 2)));
+          v0 = Math.min(v0, Math.sqrt(vm * vm + 2 * t.b * v.ag * 0.8 * Math.max(0, dd - t.total / 2)));
         }
         if (gap === Infinity) {                              // vehicle ahead on this path
           for (const o of p.occ) {
             if (o === v || o.s <= from) continue;
-            gap = d + o.s - o.t.len * o.t.seg - (o.t.seg - 1) * o.t.gap; vLead = o.v; v.block = 'leader'; v.blockBy = o;
+            gap = d + o.s - o.t.total; vLead = o.v; v.block = 'leader'; v.blockBy = o;
             break;
           }
         }
@@ -580,7 +668,7 @@ export class Traffic {
       if (gap < Infinity) a -= amax * Math.pow(Math.max(sStar, 0) / Math.max(gap - 0.5, 0.1), 2);
       v.v = Math.max(0, vv + Math.max(a, -9) * dt);
       v.wait = v.v < 0.5 && v.route.some((p, k) => k > 0 && p.junction && v.grant !== p) ? v.wait + dt : 0;
-      v.stuck = v.v < 0.2 ? v.stuck + dt : 0;
+      v.stuck = v.v < 0.2 && !this.atLight(v) ? v.stuck + dt : 0;
       if (v.stuck > STUCK) { this.newTrip(v); continue; }                  // gridlock safety valve
       if (v.dest && v.route.length === 1 && v.route[0] === v.dest.p && v.s > v.dest.s - 2 && v.v < 1) {
         this.newTrip(v);                                                    // arrived: park, next trip
@@ -593,21 +681,22 @@ export class Traffic {
     // boxes: two axles on the path per box
     for (const v of this.vehicles) {
       const t = v.t;
-      for (let k = 0; k < t.seg; k++) {
-        const fb = v.s - k * (t.len + t.gap);              // this box's front bumper
-        this.at(v, fb - t.over, this.front);
-        this.at(v, fb - t.over - t.wb, this.rear);
+      let fb = v.s;                                         // front bumper of the section
+      t.secs.forEach((x, k) => {
+        this.at(v, fb - x.over, this.front);
+        this.at(v, fb - x.over - x.wb, this.rear);
         const dir = tmp.subVectors(this.front, this.rear);
         dir.divideScalar(dir.length() || 1);
-        this.pos.copy(this.front).addScaledVector(dir, t.over - t.len / 2);   // body centre, along the axle line
+        this.pos.copy(this.front).addScaledVector(dir, x.over - x.len / 2);   // body centre, along the axle line
         this.e.set(0, Math.atan2(-dir.z, dir.x), Math.asin(Math.max(-1, Math.min(1, dir.y))));
         this.q.setFromEuler(this.e);
-        this.pos.y += t.h / 2;
-        this.m4.compose(this.pos, this.q, this.scl.set(t.len, t.h, t.w));
-        this.mesh.setMatrixAt(v.first + k, this.m4);
-      }
+        this.pos.y += x.h / 2;
+        this.m4.compose(this.pos, this.q, this.scl.set(1, 1, 1));
+        v.inst[k].mesh.setMatrixAt(v.inst[k].i, this.m4);
+        fb -= x.len + t.gap;
+      });
     }
-    this.mesh.instanceMatrix.needsUpdate = true;
+    for (const m of this.meshes) m.instanceMatrix.needsUpdate = true;
     // signal heads
     let changed = false;
     for (const l of this.lightAt)
@@ -618,6 +707,7 @@ export class Traffic {
 
   /** move on to the next path when the front passes the end of the current one */
   private advance(v: Vehicle) {
+    this.plan(v);   // keep the planned route PLAN m ahead (long lanes: it has to grow before the lane ends)
     while (v.s > v.route[0].end) {
       const over = v.s - v.route[0].end;
       v.hist.unshift(v.route.shift()!);
@@ -634,7 +724,7 @@ export class Traffic {
     // leave the junction once the rear is out of the curve
     if (v.inJunction && v.route[0] !== v.inJunction) {
       const behind = v.route[0] === v.inJunction.to ? v.s - v.route[0].start : Infinity;
-      if (behind > v.t.len * v.t.seg) { v.inJunction.junction?.occ.delete(v); v.inJunction = null; }
+      if (behind > v.t.total) { v.inJunction.junction?.occ.delete(v); v.inJunction = null; }
     }
   }
 
@@ -646,6 +736,11 @@ export class Traffic {
       const prev = v.hist[h++];
       s = prev.end - (p.start - s);
       p = prev;
+    }
+    if (s < 0) {   // before the start of what we know (just entered the region): continue straight back
+      sample(p, 0, out);
+      const d = sample(p, Math.min(2, p.length), tmp2).sub(out).normalize();
+      return out.addScaledVector(d, s);
     }
     return sample(p, s, out);
   }

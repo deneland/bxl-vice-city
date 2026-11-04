@@ -13,7 +13,7 @@
 // A frame with only moving vehicles costs their own geometry plus a few full-screen passes.
 import * as THREE from 'three/webgpu';
 import {
-  dot, float, fract, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
+  attribute, dot, float, fract, getViewPosition, max, min, mix, mrt, output, perspectiveDepthToViewZ, renderOutput, saturation,
   normalWorld, positionWorld, select, smoothstep, step, texture, uniform, uv, vec2, vec3, vec4,
 } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
@@ -122,7 +122,7 @@ export class Deferred {
 
   /** Light arriving at a surface (multiply by albedo): sun (with shadows) and sky. Shared by the city
    *  (resolve pass) and forward-lit objects such as vehicles, so both look the same. */
-  light(n: any, world: any): any {
+  light(n: any, world: any, vehicleShadows = true): any {
     // three.js physical lights on a rough dielectric: Lambert diffuse (albedo / π) from sun and hemisphere
     const hemi = mix(this.groundCol, this.skyCol, n.y.mul(0.5).add(0.5));
     let sun: any = this.sunCol.mul(max(dot(n, this.sunDir), 0));
@@ -141,7 +141,9 @@ export class Deferred {
         return select(inside, lit.mul(0.25), float(1));
       };
       // depth range 5000 m: 1e-4 ≈ 0.5 m
-      const sh = min(lookup(this.stat, STATIC_SIZE, 1e-4), lookup(this.dyn, DYN_SIZE, 5e-5));
+      // (vehicles skip the vehicle shadow map: at its resolution they would shadow themselves)
+      const st = lookup(this.stat, STATIC_SIZE, 1e-4);
+      const sh = vehicleShadows ? min(st, lookup(this.dyn, DYN_SIZE, 5e-5)) : st;
       if (DEBUG_SHADOW) return vec3(lookup(this.stat, STATIC_SIZE, 1e-4), lookup(this.dyn, DYN_SIZE, 5e-5), 0).mul(Math.PI);
       sun = sun.mul(sh);
     }
@@ -155,6 +157,19 @@ export class Deferred {
     let l = this.light(normalWorld, positionWorld);
     if (extra) l = l.add(extra(positionWorld));
     m.colorNode = vec4(l, 1);
+    return m;
+  }
+
+  /** material for the voxel vehicle models (vehicleModels.ts): albedo from the model's fixed colours
+   *  (vcol) or the instance's paint (vmat 1); head / tail lights (vmat 2 / 3) glow, mostly at night */
+  vehicleMaterial(extra?: (world: any) => any) {
+    const m = new THREE.MeshBasicNodeMaterial();
+    const kind = attribute('vmat', 'float').add(0.5).floor();   // (interpolated: not exactly an integer)
+    const alb = select(kind.equal(1), attribute('paint', 'vec3'), attribute('vcol', 'vec3'));
+    let l = this.light(normalWorld, positionWorld, false);
+    if (extra) l = l.add(extra(positionWorld));
+    const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
+    m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1))), 1);
     return m;
   }
 
