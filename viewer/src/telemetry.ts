@@ -2,7 +2,11 @@
 // Vite dev server (POST /__metrics, see vite.config.ts), which appends them to
 // data/metrics/. Nothing is sent in production builds.
 
-export const TELEMETRY = import.meta.env.DEV && new URLSearchParams(location.search).get('telemetry') !== '0';
+import { config } from './config';
+
+export const TELEMETRY = import.meta.env.DEV && config.telemetry;
+/** ms: a frame interval this long is a missed refresh at 60 Hz (shorter ones are callback jitter) */
+export const MISSED = 28;
 
 const ENDPOINT = '/__metrics';
 const FLUSH_MS = 5000;
@@ -46,7 +50,6 @@ class Telemetry {
   private recent: FrameInfo[] = [];
   private env: Record<string, unknown> = {};
   private state: () => Record<string, unknown> = () => ({});
-  private timer = 0;
 
   start() {
     if (!TELEMETRY) return;
@@ -67,7 +70,7 @@ class Telemetry {
     }
     addEventListener('pagehide', () => this.flush('pagehide', true));
     document.addEventListener('visibilitychange', () => { if (document.hidden) this.flush('hidden', true); });
-    this.timer = window.setInterval(() => this.flush('interval'), FLUSH_MS);
+    window.setInterval(() => this.flush('interval'), FLUSH_MS);
     post({ type: 'start', session: this.session, env: this.env });
   }
 
@@ -92,7 +95,7 @@ class Telemetry {
   /** the interval measured now belongs to the previous frame's work: pass that frame's tags */
   tags(interval: number, tags: FrameTags) {
     if (!TELEMETRY) return;
-    const slow = interval > 28;   // a missed refresh at 60 Hz (shorter ones are callback jitter)
+    const slow = interval > MISSED;
     this.allN++; if (slow) this.slowN++;
     for (const [k, on] of Object.entries(tags)) if (on) {
       this.tagAll[k] = (this.tagAll[k] ?? 0) + 1;
@@ -129,7 +132,7 @@ class Telemetry {
       gpu: stats(this.gpu),
       longFrames: { over20: intervals.filter((x) => x > 20).length, over33: intervals.filter((x) => x > 33).length,
         over50: intervals.filter((x) => x > 50).length },
-      // share of frames with each tag, among all frames and among missed ones (> 28 ms)
+      // share of frames with each tag, among all frames and among missed ones (> MISSED)
       slowTags: this.allN ? { frames: this.allN, slow: this.slowN, all: Object.fromEntries(Object.entries(this.tagAll).map(([k, v]) => [k, +(v / this.allN).toFixed(2)])),
         inSlow: this.slowN ? Object.fromEntries(Object.entries(this.tagSlow).map(([k, v]) => [k, +(v / this.slowN).toFixed(2)])) : {} } : undefined,
       drawCalls: stats(f.map((x) => x.drawCalls))?.avg,
@@ -152,7 +155,6 @@ class Telemetry {
     return id;
   }
 
-  stop() { clearInterval(this.timer); }
   private now() { return Math.round(performance.now() - this.t0); }
 }
 

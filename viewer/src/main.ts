@@ -1,3 +1,6 @@
+import { config } from './config';
+import { H, brusselsInstant, brusselsNow, weekday } from './clock';
+import { DynamicResolution } from './dynres';
 import * as THREE from 'three/webgpu';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
@@ -29,16 +32,14 @@ interface Manifest {
 type Vec3 = [number, number, number];
 export interface View { pos: Vec3; target: Vec3 }
 
-const params = new URLSearchParams(location.search);
-const ROI = params.get('roi') ?? 'schaerbeek';
-const SHADOWS = params.get('shadows') !== '0';   // ?shadows=0 to turn off
+const ROI = config.roi;
+const SHADOWS = config.shadows;
 // render every animation frame (benchmarks); default: only when something changed
 // (continuous=city: also redraw the cached city layer every frame, the cost of a moving camera)
-const CONTINUOUS = params.get('continuous') === '1' || params.get('continuous') === 'city';
-const CITY_ALWAYS = params.get('continuous') === 'city';
-const PROF = params.get('prof') === '1';   // per-section CPU times in the HUD
-const MISSED = 28;   // ms: a frame interval this long is a missed refresh at 60 Hz (not just callback jitter)
-const GPU_TIMING = params.get('gpu') !== '0' && (TELEMETRY || params.get('gpu') === '1');
+const CONTINUOUS = config.continuous;
+const CITY_ALWAYS = config.cityAlways;
+const PROF = config.prof;   // per-section CPU times in the HUD
+const GPU_TIMING = config.gpu !== '0' && (TELEMETRY || config.gpu === '1');
 const SKY = new THREE.Color(0xbcd3e6);
 const LAT = 50.866, LON = 4.375; // Schaerbeek
 
@@ -65,7 +66,7 @@ async function main() {
   const tStart = performance.now();
   const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`, { cache: 'no-store' })).json();
   const L0 = manifest.levels[0];
-  const VS = L0.voxelSize, CH = manifest.tileSize, NZ = L0.size[2];
+  const VS = L0.voxelSize, CH = manifest.tileSize;
   document.getElementById('attr')!.textContent = manifest.attribution;
 
   // scene frame: origin at the home point, ground ≈ y 0
@@ -74,13 +75,13 @@ async function main() {
   const groundGuess = 20; // voxels above z0, refined once chunks arrive
 
   // ?backend=webgl: force WebGL2 (what Firefox and Safari get); default: WebGPU where available
-  const renderer = new THREE.WebGPURenderer({ antialias: false, trackTimestamp: GPU_TIMING, forceWebGL: params.get('backend') === 'webgl' });  // FXAA in deferred.ts
+  const renderer = new THREE.WebGPURenderer({ antialias: false, trackTimestamp: GPU_TIMING, forceWebGL: config.forceWebGL });  // FXAA in deferred.ts
   // Dynamic resolution: render at most MP megapixels (high-DPI screens would otherwise draw 4-8 MP every
   // frame), and lower the internal resolution while moving if frames get slow; raise it again when smooth.
-  const MP = Number(params.get('mp') ?? 3.5) * 1e6, DYNRES = params.get('dynres') !== '0';
-  const maxRatio = () => Math.min(devicePixelRatio, 2, Math.sqrt(MP / (innerWidth * innerHeight)));
-  let pixelRatio = maxRatio();
-  renderer.setPixelRatio(pixelRatio);
+  const MP = config.megapixels * 1e6;
+  const res = new DynamicResolution(() => Math.min(devicePixelRatio, 2, Math.sqrt(MP / (innerWidth * innerHeight))),
+    () => resize(), config.dynres);
+  renderer.setPixelRatio(res.ratio);
   renderer.setSize(innerWidth, innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -140,7 +141,7 @@ async function main() {
     pos: camera.position.toArray().map(round) as Vec3,
     target: controls.target.toArray().map(round) as Vec3,
   });
-  const cam = params.get('cam')?.split(',').map(Number);
+  const cam = config.cam;
   if (cam?.length === 6 && cam.every(Number.isFinite)) setView({ pos: cam.slice(0, 3) as Vec3, target: cam.slice(3) as Vec3 });
 
   const hemi = new THREE.HemisphereLight(0xdfeeff, 0x5a5040, 1.6);
@@ -192,14 +193,14 @@ async function main() {
     if (roads) roads.visible = on;
     dirty = true;
   };
-  if (params.get('roads') === '1') setRoads(true);
+  if (config.roads) setRoads(true);
   let traffic: Traffic | null = null;
   let agents: Agents | null = null;
   let peds: Pedestrians | null = null;
   let transit: Transit | null = null;
   // agent clock: seconds of the day; runs on from the chosen time (live: the Brussels clock)
   let clockBase = 0, clockAt = performance.now();
-  const agentTime = () => Math.min(24 * 3600 - 1, clockBase + (performance.now() - clockAt) / 1000);
+  const agentTime = () => Math.min(24 * H - 1, clockBase + (performance.now() - clockAt) / 1000);
   let trafficOn = false;
   const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   let buildingTraffic = false;   // (set-up awaits frames: a second T press must not start another)
@@ -207,40 +208,47 @@ async function main() {
     trafficOn = on;
     if (on && !traffic && !buildingTraffic) {
       buildingTraffic = true;
-      // all data files at once (they used to be fetched one after another)
-      const json = (u: string) => fetch(u).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      const [n, palette, tt, places, pk] = await Promise.all([network,
-        json(`vehicles/${ROI}.json`),    // car paint colours measured on the parked cars in the LiDAR (vehicles.py)
-        json(`transit/${ROI}.json`),     // STIB lines from the timetable (transit.py); without it trams wander
-        json(`places/${ROI}.json`),      // homes and destinations of the people (places.py)
-        json(`parking/${ROI}.json`)]);   // kerbside parking places (parking.py)
-      if (!n) { trafficOn = false; return; }
-      // (a frame between the big set-up steps: none of them blocks for long on a slow CPU)
-      await nextFrame();
-      traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: tt ? 0 : 12, train: 3 },
-        deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
-        (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
-        palette?.palette ?? []);
-      if (tt) transit = new Transit(tt, traffic, VS);
-      traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
-      fx.add(traffic.group, traffic.lights);
-      await nextFrame();
-      // pedestrians on the pavements (both sides of every street), crossing at intersections
-      peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial((w) => lampLightAt(w, 0.8).mul(night)), traffic);
-      peds.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
-      await peds.build(nextFrame);
-      fx.add(peds.mesh);
-      if (roads) roads.add(peds.overlay());
-      // population in proportion to the homes (the first 1.5 km region: 5224 homes, 8000 drivers)
-      const k = places ? places.homes.length / 5224 : 1;
-      await nextFrame();
-      const parking = pk ? new Parking(pk, VS) : null;
-      if (places) agents = new Agents(places, traffic, VS, Number(params.get('agents') ?? Math.round(8000 * k)), peds,
-        Number(params.get('walkers') ?? Math.round(10000 * k)), Number(params.get('cyclists') ?? Math.round(1500 * k)), parking);
-      if (agents && tt) {   // tram / bus riders: stops, and who gets on / off when a vehicle stops
-        agents.setStops(tt.stops);
-        const ag = agents;
-        traffic.onDwell = (id) => ag.onDwell(id);
+      try {
+        // all data files at once (they used to be fetched one after another)
+        const json = (u: string) => fetch(u).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        const [n, palette, tt, places, pk] = await Promise.all([network,
+          json(`vehicles/${ROI}.json`),    // car paint colours measured on the parked cars in the LiDAR (vehicles.py)
+          json(`transit/${ROI}.json`),     // STIB lines from the timetable (transit.py); without it trams wander
+          json(`places/${ROI}.json`),      // homes and destinations of the people (places.py)
+          json(`parking/${ROI}.json`)]);   // kerbside parking places (parking.py)
+        if (!n) { trafficOn = false; return; }
+        // (a frame between the big set-up steps: none of them blocks for long on a slow CPU)
+        await nextFrame();
+        traffic = new Traffic(n.lanes, { car: config.cars, tram: tt ? 0 : 12, train: 3 },
+          deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
+          (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
+          palette?.palette ?? []);
+        if (tt) transit = new Transit(tt, traffic, VS);
+        traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
+        fx.add(traffic.group, traffic.lights);
+        await nextFrame();
+        // pedestrians on the pavements (both sides of every street), crossing at intersections
+        peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial((w) => lampLightAt(w, 0.8).mul(night)), traffic);
+        peds.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
+        await peds.build(nextFrame);
+        fx.add(peds.mesh);
+        if (roads) roads.add(peds.overlay());
+        // population in proportion to the homes (the first 1.5 km region: 5224 homes, 8000 drivers)
+        const k = places ? places.homes.length / 5224 : 1;
+        await nextFrame();
+        const parking = pk ? new Parking(pk, VS) : null;
+        if (places) agents = new Agents(places, traffic, VS, config.agents ?? Math.round(8000 * k), peds,
+          config.walkers ?? Math.round(10000 * k), config.cyclists ?? Math.round(1500 * k), parking);
+        if (agents && tt) {   // tram / bus riders: stops, and who gets on / off when a vehicle stops
+          agents.setStops(tt.stops);
+          const ag = agents;
+          traffic.onDwell = (id) => ag.onDwell(id);
+        }
+      } catch (e) {   // (whatever failed: traffic stays off, and T can try again)
+        console.error('traffic set-up failed', e);
+        trafficOn = false;
+      } finally {
+        buildingTraffic = false;
       }
     }
     if (traffic) traffic.group.visible = traffic.lights.visible = trafficOn;
@@ -253,30 +261,15 @@ async function main() {
   const timeInput = document.getElementById('time') as HTMLInputElement;
   const timeLabel = document.getElementById('time-label')!;
   const liveBtn = document.getElementById('live') as HTMLButtonElement;
-  const brusselsNow = () => {  // [YYYY-MM-DD, fractional hours] on the Brussels clock
-    const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Brussels', hourCycle: 'h23',
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      .formatToParts(new Date()).map((x) => [x.type, x.value]));
-    return [`${p.year}-${p.month}-${p.day}`, Number(p.hour) + Number(p.minute) / 60 + Number(p.second) / 3600] as const;
-  };
-  let day = params.get('date') ?? brusselsNow()[0];
-  let live = !params.has('time');
+  let day = config.date ?? brusselsNow()[0];
+  let live = config.time === null;
   let weather: Weather | null = null;   // null: unknown (not loaded or service down) -> clear-sky look
   const precip = new Precipitation();
   scene.add(precip.mesh);
   let precipOn = false;
-  const brusselsOffset = (d: Date) => {  // minutes ahead of UTC (CET/CEST)
-    const tz = new Intl.DateTimeFormat('en', { timeZone: 'Europe/Brussels', timeZoneName: 'shortOffset' })
-      .formatToParts(d).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT+1';
-    const m = tz.match(/GMT([+-]\d+)(?::(\d+))?/);
-    return m ? Number(m[1]) * 60 + Math.sign(Number(m[1])) * Number(m[2] ?? 0) : 60;
-  };
   const setTime = (hours: number) => {
-    const [y, mo, d] = day.split('-').map(Number);
-    let t = new Date(Date.UTC(y, mo - 1, d) + hours * 3600e3);
-    t = new Date(t.getTime() - brusselsOffset(t) * 60e3);
-    const { az, alt } = sunPosition(t, LAT, LON);
-    clockBase = hours * 3600; clockAt = performance.now();
+    const { az, alt } = sunPosition(brusselsInstant(day, hours), LAT, LON);
+    clockBase = hours * H; clockAt = performance.now();
     const l = lighting(alt);
     const fog = applyWeather(weather ?? presetWeather('clear'), l);
     (scene.fog as THREE.Fog).near = fog.fogNear;
@@ -306,11 +299,11 @@ async function main() {
     timeInput.value = String(h);
     setTime(h);
   };
-  timeInput.value = params.get('time') ?? String(brusselsNow()[1]);
+  timeInput.value = config.time ?? String(brusselsNow()[1]);
   timeInput.addEventListener('input', () => { live = false; setTime(Number(timeInput.value)); });
   liveBtn.addEventListener('click', () => { live = true; tick(); });
   setInterval(tick, 30e3);
-  const wPreset = params.get('weather');
+  const wPreset = config.weather;
   const updateWeather = async () => {
     try {
       weather = wPreset ? presetWeather(wPreset) : await fetchWeather(LAT, LON);
@@ -321,10 +314,10 @@ async function main() {
   if (!wPreset) setInterval(updateWeather, 10 * 60e3);
 
   // --- level-of-detail tiles ------------------------------------------------
-  const ERR = Number(params.get('err') ?? 8);           // max on-screen size of one voxel, px
-  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, params.get('lod') === '0' ? 0 : ERR, renderer);
+  const ERR = config.err;           // max on-screen size of one voxel, px
+  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
-  lod.budgetFaces = Number(params.get('budget') ?? 16) * 1e6;  // resident faces, millions (the face atlas holds 33.5M: slack)
+  lod.budgetFaces = config.budget * 1e6;  // resident faces, millions (the face atlas holds 33.5M: slack)
   const t0 = performance.now();
   let loadMs = 0;
   const ready = new Promise<void>((resolve) => {
@@ -338,13 +331,12 @@ async function main() {
   });
   // traffic, people and their day plans after the first full view of the city: the city comes first
   // (they competed for the main thread), people and cars appear a moment later
-  if (params.get('traffic') !== '0') ready.then(() => setTraffic(true));
+  if (config.traffic) ready.then(() => setTraffic(true));
 
   // --- CPU voxel access, walking, picking ---------------------------------
   const vox = new Voxels(`tiles/${ROI}`, CH, L0, world, lod.query);
   const crosshair = document.getElementById('crosshair')!;
   const walkHint = document.getElementById('walk-hint')!;
-  let mapView: View | null = null;
   const walk = new Walk(camera, renderer.domElement, vox, (active) => {
     dirty = true;
     controls.enabled = !active;
@@ -358,10 +350,8 @@ async function main() {
       const p = camera.position.clone();
       const back = camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize().multiplyScalar(-60);
       setView({ pos: [p.x + back.x, p.y + 50, p.z + back.z], target: [p.x, p.y - 1.7, p.z] });
-      mapView = null;
       telemetry.event('walk', { on: false });
     } else {
-      mapView = getView();
       walk.enter(controls.target.clone()).then(() => telemetry.event('walk', { on: walk.active }));
     }
   };
@@ -422,7 +412,7 @@ async function main() {
     cityDirty = true;
     telemetry.event('view-mode', { mode: labels ? 'classes' : 'colour' });
   };
-  setMode(params.get('mode') === 'labels');
+  setMode(config.labels);
 
   // --- input ---------------------------------------------------------------
   let snapshotRequested = false;
@@ -441,66 +431,20 @@ async function main() {
   let dirty = true; // something outside camera/tiles changed: draw the next tick
   setTime(Number(timeInput.value));
   updateWeather();
-  setTilt(params.get('tilt') === '1');
+  setTilt(config.tilt);
   const resize = () => {
     dirty = true;
     cityDirty = true;
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(pixelRatio);
+    renderer.setPixelRatio(res.ratio);
     renderer.setSize(innerWidth, innerHeight);
     const s = renderer.getDrawingBufferSize(new THREE.Vector2());
     deferred.setSize(s.x, s.y);
   };
-  window.addEventListener('resize', () => { pixelRatio = Math.min(pixelRatio, maxRatio()); resize(); });
-  // adapt to the frame rate while moving (full redraws): average interval over ~1 s
-  // Only lowered when the GPU is what is slow: if the main thread's own work (simulation, loading) takes
-  // most of the frame, fewer pixels would not help (a real laptop lost half its resolution to the start-up
-  // work and kept it). Not judged at all while tiles load or the agents re-plan.
-  let resAcc = 0, resN = 0, resCpu = 0, resSlow = 0, resGood = 0, resAt = performance.now();
-  let lowered: { from: number; slow: number } | null = null, noHelpUntil = 0;
-  const adaptResolution = (interval: number, moving: boolean, now: number, cpu: number) => {
-    if (!DYNRES) return;
-    if (moving) { resAcc += interval; resCpu += cpu; resN++; if (interval > MISSED) resSlow++; }
-    if (now - resAt < 1000) return;
-    resAt = now;
-    if (resN < 20) { resAcc = resCpu = resN = resSlow = 0; return; }      // not enough moving frames to judge
-    const avg = resAcc / resN, cpuAvg = resCpu / resN, slow = resSlow / resN;
-    resAcc = resCpu = resN = resSlow = 0;
-    const busy = lod.stats.loading > 0 || (agents?.replanning ?? 0) > 0;
-    const max = maxRatio(), min = Math.max(0.5, max * 0.6);
-    // did the last step down help? If the slow share did not drop by a quarter, the GPU is not limited by
-    // pixels (a real Intel laptop: geometry-bound, 25 % slow at 0.6 as at 1.0): back up, and leave it
-    if (lowered) {
-      const helped = slow < lowered.slow * 0.75;
-      if (!helped) {
-        pixelRatio = lowered.from; resize();
-        noHelpUntil = now + 120_000;
-        telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2), reverted: true });
-      }
-      lowered = null;
-      if (!helped) return;
-    }
-    // What you notice is missed frames (a 60 Hz display shows one as a 33 ms stutter), not the average.
-    // (Frames of 20-25 ms followed by shorter ones are callback jitter, not misses: Firefox on the Intel test
-    // laptop shows ~25 % of those while missing only ~2 %.) More than 8 % missed while moving, CPU not the
-    // bottleneck -> 10 % fewer pixels per side.
-    if ((slow > 0.08 || avg > 22) && pixelRatio > min && !busy && cpuAvg < avg * 0.6 && now > noHelpUntil) {
-      lowered = { from: pixelRatio, slow };
-      pixelRatio = Math.max(min, pixelRatio * 0.9);
-      resGood = 0;
-      resize();
-      telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
-    } else if (slow < 0.02 && avg < 17.5 && pixelRatio < max) {   // smooth for a while: try more pixels
-      if (++resGood >= 3) {
-        pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize();
-        telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
-      }
-    } else resGood = 0;
-  };
-
+  window.addEventListener('resize', () => { res.clamp(); resize(); });
   telemetry.setState(() => ({
-    view: getView(), lod: lod.stats, errPx: lod.errPx, pixelRatio: +pixelRatio.toFixed(2),
+    view: getView(), lod: lod.stats, errPx: lod.errPx, pixelRatio: +res.ratio.toFixed(2),
     screen: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
   }));
 
@@ -537,8 +481,7 @@ async function main() {
       transit?.setFocus(f.x - fx.position.x, f.z - fx.position.z);
       if (agents) agents.budgetMs = wasMoving ? 1 : 2;   // (moving: the frame needs its time for the city)
       prof.begin('agents'); agents?.update(now, day); prof.end('agents');
-      const [y, mo, d] = day.split('-').map(Number);
-      prof.begin('transit'); transit?.update(now, (new Date(Date.UTC(y, mo - 1, d)).getUTCDay() + 6) % 7); prof.end('transit');   // 0 Monday
+      prof.begin('transit'); transit?.update(now, weekday(day)); prof.end('transit');
       prof.begin('traffic'); traffic.update(Math.min(interval, 100) / 1000, now); prof.end('traffic');
       prof.begin('peds'); peds?.update(Math.min(interval, 100) / 1000); prof.end('peds');
     }
@@ -556,10 +499,10 @@ async function main() {
     prof.begin('lod');
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
     prof.end('lod');
-    if (lastTickRendered) adaptResolution(interval, moving, now, lastCpu);
+    if (lastTickRendered) res.frame(interval, moving, now, lastCpu, lod.stats.loading > 0 || (agents?.replanning ?? 0) > 0);
     const cityChanged = CITY_ALWAYS || moving || tilesChanged || cityDirty;
     // (a city shadow rebuild in slices needs frames to finish, also when nothing else changes)
-    if (!(cityChanged || precipOn || trafficOn || dirty || snapshotRequested || deferred.shadowBusy)) {
+    if (!(CONTINUOUS || cityChanged || precipOn || trafficOn || dirty || snapshotRequested || deferred.shadowBusy)) {
       // nothing changed: draw nothing, the GPU stays idle
       lastTickRendered = false;
       skipped++;
@@ -687,7 +630,7 @@ async function main() {
       `${renderer.info.render.drawCalls} draws · ${lod.stats.loading ? `loading ${lod.stats.loading}` : `${lod.stats.ready}/${lod.stats.total} tiles in memory`}` +
       ` (${(lod.stats.residentFaces / 1e6).toFixed(1)}M faces)` +
       `${loadMs ? ` · first view ${(loadMs / 1000).toFixed(1)} s` : ''} · err ${lod.errPx}px` +
-      ` · ${renderer.domElement.width}×${renderer.domElement.height} (×${pixelRatio.toFixed(2)})` +
+      ` · ${renderer.domElement.width}×${renderer.domElement.height} (×${res.ratio.toFixed(2)})` +
       ` · shadows ${SHADOWS ? 'on' : 'off'}${tiltOn ? ' · tilt-shift' : ''}${walk.active ? ' · walking' : ''}` +
       (TELEMETRY ? ' · telemetry on' : '') + (PROF ? `\ncpu ms avg/max: ${prof.line(8)}` : '') + (now < flashUntil ? '\nsnapshot sent ✓' : '');
   }

@@ -37,7 +37,6 @@ export class FaceAtlas {
     this.free = [[0, (rows * FaceAtlas.W) / FaceAtlas.BLOCK]];   // [first block, blocks], sorted
   }
   private ready = false;
-  get capacity() { return this.rows * FaceAtlas.W; }
   // allocation in blocks of BLOCK texels (a tile's range may span rows: the shader indexes texels linearly)
   static readonly BLOCK = 256;
   private blocks(n: number) { return Math.max(1, Math.ceil(n / FaceAtlas.BLOCK)); }
@@ -138,7 +137,6 @@ export class TileManager {
   stats: LodStats = { perLevel: [], faces: 0, quads: 0, loading: 0, ready: 0, total: 0, residentFaces: 0, evicted: 0 };
   private frame = 0;
   private resident = 0;   // faces held in memory
-  private quadsResident = 0;
   readonly atlas: FaceAtlas;
   private evicted = 0;
   /** keep at most this many faces meshed (4 bytes each in the atlas + 12 per merged quad); least recently used go first */
@@ -266,14 +264,14 @@ export class TileManager {
     if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh = null; }
     if (n.start >= 0) { this.atlas.release(n.start, n.faces); n.start = -1; }
     this.resident -= n.faces;
-    this.quadsResident -= n.quads;
     n.faces = 0; n.quads = 0;
     n.state = 'idle';
     this.readyCount--;
     this.evicted++;
   }
 
-  private evict(target = this.budgetFaces) {
+  private evict() {
+    const target = this.budgetFaces;
     if (this.resident <= target) return;
     const cand = this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame)
       .sort((a, b) => a.used - b.used);
@@ -340,7 +338,6 @@ export class TileManager {
     n.faces = faces;
     n.quads = quads;
     this.resident += faces;
-    this.quadsResident += quads;
     if (!faces) return;
     const g = new THREE.InstancedBufferGeometry();
     g.index = voxelGeometryBase.index;

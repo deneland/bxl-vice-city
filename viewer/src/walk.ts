@@ -1,13 +1,14 @@
 // First-person walking at street level: mouse look (pointer lock), WASD / arrows, shift to run.
 // Collision against L0 voxels: walls stop you, kerbs and steps up to STEP are climbed, gravity
 // pulls you down. Vegetation is passable (the LiDAR canopy would otherwise trap you under trees).
+import { C_GROUND } from './tileFormat';
 import * as THREE from 'three/webgpu';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import type { Voxels } from './voxels';
 
 const EYE = 1.7, HEIGHT = 1.8, RADIUS = 0.25, STEP = 0.6;   // metres
 const WALK = 3, RUN = 10, GRAVITY = 9.8;
-const C_GROUND = 2, PASSABLE = new Set([3, 4, 5]);               // LiDAR veg classes
+const PASSABLE = new Set([3, 4, 5]);               // LiDAR veg classes
 
 export class Walk {
   active = false;

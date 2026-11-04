@@ -2,6 +2,8 @@
 // garages from OSM) and who stands in them. Garage places are never drawn: cars drive in and are gone.
 // Positions in the traffic group's frame (x east, z south); heading in that frame.
 
+import { rng } from './rng';
+
 export interface ParkingData { spots: [number, number, number, number?][] }   // x, y (voxels), heading (rad, x east / y north), kind
 export const GARAGE = 2;   // kind: 0 kerb, 1 car park, 2 garage
 
@@ -33,11 +35,8 @@ export class Parking {
    *  places is taken by them, so the kerbs are about as full as real ones; they never leave */
   static readonly ANON = { anon: true };
   fillAnon(share: number, seed = 7) {
-    let s = seed;
-    for (let i = 0; i < this.size; i++) {
-      s = (s * 1103515245 + 12345) >>> 0;
-      if ((s >>> 8) / 16777216 < share && this.owner[i] === null) this.owner[i] = Parking.ANON;
-    }
+    const r = rng(seed);
+    for (let i = 0; i < this.size; i++) if (r() < share && this.owner[i] === null) this.owner[i] = Parking.ANON;
   }
 
   /** nearest free place within max metres of (x, z), or -1. Rings of cells outward from the nearest: stops

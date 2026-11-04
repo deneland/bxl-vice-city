@@ -32,15 +32,17 @@ later steps read earlier outputs.
 
 | step | script | reads | writes |
 |---|---|---|---|
-| 1 | `voxelize.py` | LiDAR | voxel tiles (`viewer/public/tiles/`), vehicle footprints |
+| 1 | `voxelize.py` | LiDAR | voxel tiles (`viewer/public/tiles/`), parked-car footprints and colours |
 | 2 | `streetview.py fetch / calibrate / project` | Mapillary, tiles | photo colours and labels layer |
 | 3 | `roads.py` | OSM, tiles (ground heights) | road / tram / footpath network |
 | 4 | `voxelize.py` again | LiDAR, photo layer, road network | final tiles: photo colours, streets tidied |
-| 5 | `places.py`, `transit.py`, `lights.py`, `vehicles.py` | OSM, GTFS, Mapillary, tiles | homes and destinations, timetable, street lamps, car colours |
+| 5 | `places.py`, `transit.py`, `lights.py`, `vehicles.py` | OSM, GTFS, Mapillary, tiles, car colours | homes and destinations, timetable, street lamps, car paint palette |
 | 6 | `parking.py` | footprints, roads, transit, OSM | kerbside, car-park and garage places |
 
 `voxelize.py` streams the LAS files once into `data/cache/points/` and reuses that cache; a full
-Schaerbeek build takes ~7 minutes. The viewer serves the newest build (`manifest.json`).
+Schaerbeek build takes ~7 minutes. The viewer serves the newest build (`manifest.json`). Shared code
+(config, region argument, coordinate transforms, OSM / Mapillary access, the tile and road formats) is in
+`pipeline/common.py`. Lint: `uv run ruff check`.
 
 ## Viewer
 
@@ -51,8 +53,8 @@ npm run check        # type check
 npm run build        # production build
 ```
 
-URL parameters (for tests and screenshots): `time=8.5`, `date=2026-11-04`, `weather=clear`,
-`roads=1` (draw the road network), `telemetry=0`.
+URL parameters (tests, screenshots, tuning) are all listed in `viewer/src/config.ts`, e.g. `time=8.5`,
+`date=2026-11-04`, `weather=clear`, `roads=1` (draw the road network), `telemetry=0`.
 
 ## Measuring
 

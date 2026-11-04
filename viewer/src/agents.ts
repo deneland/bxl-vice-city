@@ -6,7 +6,11 @@
 //
 // Agents are kept apart from vehicles: an agent exists all day, its car only while it drives. That is
 // what will let the simulation run in detail only near the camera when the region grows.
-import type { Spot, Traffic } from './traffic';
+import { MinHeap } from './heap';
+import { rng } from './rng';
+import { H, M, weekday as weekdayOf } from './clock';
+import type { Traffic } from './traffic';
+import type { Spot } from './paths';
 import type { Pedestrians, WalkSpot } from './pedestrians';
 import { Parking } from './parking';
 import { prof } from './prof';
@@ -45,51 +49,16 @@ export interface Agent {
 /** a trip far from the camera: no vehicle, just where from / to and when */
 interface Travel { t0: number; t1: number; pa: [number, number] | null; pb: [number, number] | null }
 
-/** min-heap of timed events (departures, arrivals of timeline trips) */
+/** timed events (departures, arrivals of timeline trips); an agent re-planned since (a.ver) skips its old ones */
 class Events {
-  private t: number[] = []; private a: Agent[] = []; private v: number[] = [];
-  get size() { return this.t.length; }
-  clear() { this.t.length = this.a.length = this.v.length = 0; }
-  push(t: number, a: Agent) {
-    let i = this.t.length;
-    this.t.push(t); this.a.push(a); this.v.push(a.ver);
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.t[p] <= t) break;
-      this.t[i] = this.t[p]; this.a[i] = this.a[p]; this.v[i] = this.v[p]; i = p;
-    }
-    this.t[i] = t; this.a[i] = a; this.v[i] = a.ver;
-  }
-  peek() { return this.t.length ? this.t[0] : Infinity; }
-  pop(): Agent | null {
-    const { t, a, v } = this;
-    const top = a[0], tv = v[0];
-    const lt = t.pop()!, la = a.pop()!, lv = v.pop()!;
-    if (t.length) {
-      let i = 0;
-      for (;;) {
-        let c = 2 * i + 1;
-        if (c >= t.length) break;
-        if (c + 1 < t.length && t[c + 1] < t[c]) c++;
-        if (t[c] >= lt) break;
-        t[i] = t[c]; a[i] = a[c]; v[i] = v[c]; i = c;
-      }
-      t[i] = lt; a[i] = la; v[i] = lv;
-    }
-    return tv === top.ver ? top : null;   // stale entries are skipped
-  }
+  private h = new MinHeap<Agent>();
+  get size() { return this.h.size; }
+  clear() { this.h.clear(); }
+  push(t: number, a: Agent) { this.h.push(t, a, a.ver); }
+  peek() { return this.h.peek(); }
+  pop(): Agent | null { const a = this.h.pop(); return a && this.h.poppedTag === a.ver ? a : null; }
 }
 
-// --- seeded randomness ---------------------------------------------------------------
-function rng(seed: number) {
-  return () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-const H = 3600, M = 60;
 const VISITS = new Set(['shop', 'dinner', 'errand', 'pickup-food']);   // purposes that need the place open
 const VISIT_REACH = 1500;   // m: how far a closed place may be swapped for an open one
 
@@ -391,7 +360,7 @@ export class Agents {
   /** the day's plan for an agent (seeded by agent and date: the same every time for that day) */
   private makePlan(a: Agent, date: string): Activity[] {
     const [y, m, d] = date.split('-').map(Number);
-    const wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();   // 0 Sunday … 3 Wednesday … 6 Saturday
+    const wd = (weekdayOf(date) + 1) % 7;   // (the plans count from Sunday: 0 Sunday … 3 Wednesday … 6 Saturday)
     const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
     const r = rng(a.id * 7919 + y * 372 + m * 31 + d);
     if (a.mode === 'walk') return this.walkPlan(a, r, wd);
@@ -796,7 +765,7 @@ export class Agents {
       const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
       const p = a.mode === 'walk' ? this.peds?.positionOf(a) : this.traffic.positionOfAgent(a);
       if (!p || this.inZone([p.x, p.z], r + 150)) continue;
-      const left = a.mode === 'walk' ? this.peds?.routeAhead(a).len ?? 0 : this.traffic.routeLeft(a);
+      const left = a.mode === 'walk' ? this.peds?.routeAhead(a, false).len ?? 0 : this.traffic.routeLeft(a);
       demote--;
       if (a.mode === 'walk') this.peds?.remove(a); else this.traffic.remove(a);
       const from = a.plan[a.i], to = a.plan[a.i + 1];
@@ -887,6 +856,4 @@ export class Agents {
   }
 
   /** agents on the way: in detail, as timelines */
-  get driving() { return this.list.filter((a) => a.driving).length; }
-  get onTheWay() { return this.travelling.size; }
 }

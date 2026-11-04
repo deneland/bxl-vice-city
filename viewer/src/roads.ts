@@ -2,6 +2,7 @@
 // Lanes are derived here: each direction of travel follows the centreline shifted to the right.
 // Debug overlay: R key / ?roads=1.
 import * as THREE from 'three/webgpu';
+import { cumulative } from './polyline';
 
 export interface RoadNetwork {
   nodes: [number, number, number, number, number][];    // voxel coords: x east, y north, z ground; signals; region edge
@@ -105,9 +106,7 @@ export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
     for (const [a, b, line, sign] of dirs) {
       const bikeOnly = !!oneway && sign < 0;   // cycling against the traffic, at the kerb
       const pts = offsetLine(line, bikeOnly ? HALF_LANE + 1 : off);
-      const cum = new Float32Array(pts.length / 3);
-      for (let i = 1; i < cum.length; i++)
-        cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
+      const cum = cumulative(pts);
       const length = cum[cum.length - 1];
       const controls = ctl.filter(([, , dr]) => dr === 0 || dr === sign)
         .map(([m, code]) => ({ s: (sign > 0 ? m : len - m) * (length / (len || 1)), code })).sort((x, y) => x.s - y.s);

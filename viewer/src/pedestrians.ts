@@ -5,6 +5,8 @@
 import * as THREE from 'three/webgpu';
 import { crosswalkKey, KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
+import { cumulative, pointAt } from './polyline';
+import { MinHeap } from './heap';
 
 const DEFAULT_PAVEMENT = [6, 6, 6, 7, 8.5, 9.5, 10];   // m from the centreline, by road rank (no facade found)
 const RED_PATIENCE = 120;   // s at a red light before walking anyway (when no car is near)
@@ -18,22 +20,13 @@ interface Walker {
 export interface WalkSpot { seg: Seg; s: number }
 
 function polyline(pts: number[]) {
-  const n = pts.length / 3, cum = new Float32Array(n);
-  for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 2] - pts[i * 3 - 1]);
-  return { pts: new Float32Array(pts), cum, len: cum[n - 1] };
+  const cum = cumulative(pts, true);   // (walking distance: horizontal)
+  return { pts: new Float32Array(pts), cum, len: cum[cum.length - 1] };
 }
-function at(seg: Seg, s: number, out: THREE.Vector3) {
-  const { pts, cum } = seg;
-  s = Math.min(Math.max(s, 0), seg.len);
-  let lo = 0, hi = cum.length - 1;
-  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; }
-  const d = cum[hi] - cum[lo], k = d > 0 ? (s - cum[lo]) / d : 0;
-  return out.set(pts[lo * 3] + (pts[hi * 3] - pts[lo * 3]) * k, pts[lo * 3 + 1] + (pts[hi * 3 + 1] - pts[lo * 3 + 1]) * k,
-    pts[lo * 3 + 2] + (pts[hi * 3 + 2] - pts[lo * 3 + 2]) * k);
-}
+const at = (seg: Seg, s: number, out: THREE.Vector3) => pointAt(seg.pts, seg.cum, s, out);
 
 // --- voxel person (0.125 m), x forward, y up, z across; limb: 0 body, 1/2 legs, 3/4 arms -----------------
-export const PV = 0.125;
+const PV = 0.125;
 function personGeometry() {
   // [x0, x1, y0, y1, z0, z1, material, limb] in voxels; materials: 1 shirt, 2 skin, 3 trousers, 4 hair/shoes
   const boxes: number[][] = [
@@ -79,10 +72,9 @@ export class Pedestrians {
   private segs: Seg[] = [];
   private adj = new Map<number, { seg: Seg; fwd: boolean }[]>();   // graph vertex -> segments leaving it
   private walkers: Walker[] = [];
+  private byAgent = new Map<unknown, Walker>();
   private free: number[] = [];
   private busy = new Map<number, number>();     // crosswalk key -> people on it
-  /** crosswalks linked into the walking network (mapped in OSM) */
-  crosswalks = 0;
   private grid = new Map<string, { seg: Seg; s: number; x: number; z: number }[]>();
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: unknown) => void) | null = null;
@@ -183,7 +175,7 @@ export class Pedestrians {
       if (!seg) return null;
       return { v: atStart ? seg.a : seg.b, p: at(seg, atStart ? 0 : seg.len, new THREE.Vector3()) };
     };
-    for (const [node, list] of inc) {
+    for (const [, list] of inc) {
       list.sort((x, y) => x.ang - y.ang);   // counter-clockwise
       for (let k = 0; k < list.length; k++) {
         const A = list[k], B = list[(k + 1) % list.length];
@@ -214,7 +206,6 @@ export class Pedestrians {
       for (let t = 0; t <= seg.len; t += 0.5) { at(seg, t, tmp); const d = (tmp.x - q.x) ** 2 + (tmp.z - q.z) ** 2; if (d < bd) { bd = d; bs = t; } }
       return { s: bs, d: Math.sqrt(bd) };
     };
-    let nX = 0;
     net.edges.forEach((e, ei) => {
       const xw = e[11];
       if (e[2] !== KIND.road || !xw?.length) return;
@@ -233,10 +224,8 @@ export class Pedestrians {
         if (l.d > 25 || r.d > 25) return;   // (no pavement near: a crosswalk to nowhere)
         const vl = cut(L, l.s), vr = cut(R, r.s);
         link(vl, vr, at(L, l.s, new THREE.Vector3()), at(R, r.s, new THREE.Vector3()), crosswalkKey(ei, i));
-        nX++;
       });
     });
-    this.crosswalks = nX;
     yield;
     // --- footpaths (parks, squares): their own network, linked to the pavements where they end near one ---
     if (net.paths?.length) {
@@ -407,31 +396,10 @@ export class Pedestrians {
     const maxCost = start.distanceTo(goal) * 2.5 + 400;   // m: generous detours
     type Node = { v: number; cost: number; prev: Node | null; via: { seg: Seg; fwd: boolean } | null };
     const best = new Map<number, number>();
-    // binary min-heap on (estimated total cost)
-    const hk: number[] = [], hn: Node[] = [];
-    const hpush = (k: number, n: Node) => {
-      let i = hk.length; hk.push(k); hn.push(n);
-      while (i > 0) { const q = (i - 1) >> 1; if (hk[q] <= k) break; hk[i] = hk[q]; hn[i] = hn[q]; i = q; }
-      hk[i] = k; hn[i] = n;
-    };
-    const hpop = () => {
-      const top = hn[0], lk = hk.pop()!, ln = hn.pop()!;
-      if (hk.length) {
-        let i = 0;
-        for (;;) {
-          let c = 2 * i + 1;
-          if (c >= hk.length) break;
-          if (c + 1 < hk.length && hk[c + 1] < hk[c]) c++;
-          if (hk[c] >= lk) break;
-          hk[i] = hk[c]; hn[i] = hn[c]; i = c;
-        }
-        hk[i] = lk; hn[i] = ln;
-      }
-      return top;
-    };
+    const heap = new MinHeap<Node>();   // by estimated total cost
     const push = (n: Node, s: Seg, fwd: boolean) => {
       at(s, fwd ? s.len : 0, p);
-      hpush(n.cost + p.distanceTo(goal), n);
+      heap.push(n.cost + p.distanceTo(goal), n);
     };
     // start at both ends of the first segment
     for (const fwd of [true, false]) {
@@ -440,8 +408,8 @@ export class Pedestrians {
       push(n, from.seg, fwd);
     }
     let guard = 0;
-    while (hk.length && guard++ < 60000) {
-      const n = hpop();
+    while (heap.size && guard++ < 60000) {
+      const n = heap.pop()!;
       if (n.cost > (best.get(n.v) ?? Infinity)) continue;
       for (const e of this.adj.get(n.v) ?? []) {
         if (e.seg === to.seg) {   // reached the goal segment
@@ -486,11 +454,12 @@ export class Pedestrians {
     }
     if (w.k >= segs.length) { this.free.push(w.idx); return 0; }
     this.walkers.push(w);
+    this.byAgent.set(w.agent, w);
     return total;
   }
 
   remove(agent: unknown) {
-    const w = this.walkers.find((x) => x.agent === agent);
+    const w = this.byAgent.get(agent);
     if (w) this.release(w);
   }
   clear() { for (const w of this.walkers.slice()) this.release(w); for (const a of [...this.standing.keys()]) this.unstand(a); }
@@ -499,6 +468,7 @@ export class Pedestrians {
     this.mesh.setMatrixAt(w.idx, new THREE.Matrix4().makeScale(0, 0, 0));
     this.free.push(w.idx);
     this.walkers.splice(this.walkers.indexOf(w), 1);
+    this.byAgent.delete(w.agent);
   }
 
   /** scene position of a pavement / footpath spot */
@@ -507,7 +477,7 @@ export class Pedestrians {
   /** the instance of an agent (for picking) */
   agentAt(i: number) { return this.walkers.find((w) => w.idx === i)?.agent ?? [...this.standing].find(([, k]) => k === i)?.[0] ?? null; }
   positionOf(agent: unknown, out = new THREE.Vector3()) {
-    const w = this.walkers.find((x) => x.agent === agent);
+    const w = this.byAgent.get(agent);
     if (!w) {
       const i = this.standing.get(agent);
       if (i === undefined) return null;
@@ -517,9 +487,9 @@ export class Pedestrians {
     const { seg, fwd } = w.segs[w.k];
     return at(seg, fwd ? w.s : seg.len - w.s, out);
   }
-  /** what is left of a walk: points (this group's frame) and length */
-  routeAhead(agent: unknown) {
-    const w = this.walkers.find((x) => x.agent === agent);
+  /** what is left of a walk: points (this group's frame; points = false: none) and length */
+  routeAhead(agent: unknown, points = true) {
+    const w = this.byAgent.get(agent);
     const pts: number[] = [];
     let len = 0;
     if (!w) return { pts, len };
@@ -527,7 +497,7 @@ export class Pedestrians {
     for (let k = w.k; k < w.segs.length; k++) {
       const { seg, fwd } = w.segs[k];
       const s0 = k === w.k ? w.s : 0, s1 = k === w.segs.length - 1 ? w.end : seg.len;
-      for (let s = s0; s <= s1; s += 2) { at(seg, fwd ? s : seg.len - s, p); pts.push(p.x, p.y + 0.3, p.z); }
+      if (points) for (let s = s0; s <= s1; s += 2) { at(seg, fwd ? s : seg.len - s, p); pts.push(p.x, p.y + 0.3, p.z); }
       len += Math.max(0, s1 - s0);
     }
     return { pts, len };

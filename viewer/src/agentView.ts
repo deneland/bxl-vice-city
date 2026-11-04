@@ -1,11 +1,12 @@
 // Click a vehicle: who drives it and their day (agents.ts); Follow keeps the camera on them, and the
 // rest of their trip is drawn on the street. Trams and trains just say what they are.
+import { hhmm } from './clock';
 import * as THREE from 'three/webgpu';
 import { PURPOSE, type Agent, type Agents } from './agents';
-import type { Traffic, Vehicle } from './traffic';
+import type { Traffic } from './traffic';
+import type { Vehicle } from './paths';
 import type { Pedestrians } from './pedestrians';
 
-const hhmm = (t: number) => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}:${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
 const TYPE_LABEL: Record<string, string> = {
   parent: 'parent, school run', commuterOut: 'works outside the area', commuterIn: 'comes in to work',
   shopper: 'running errands, shopping', evening: 'going out tonight', errands: 'errands', delivery: 'delivery driver',
@@ -117,12 +118,12 @@ export class AgentView {
         g.setAttribute('position', new THREE.Float32BufferAttribute(r.pts, 3));
         this.line.visible = r.pts.length > 3;
       } else this.line.visible = false;
-      this.render(false, now, v, walking ? P!.routeAhead(this.agent).len : -1);
+      this.render(false, v, walking ? P!.routeAhead(this.agent, false).len : -1);
       this.onChange();
     }
   }
 
-  private render(force: boolean, now = 0, v: Vehicle | null = null, walkLeft = -1) {
+  private render(force: boolean, v: Vehicle | null = null, walkLeft = -1) {
     const a = this.agent, A = this.agents(), t = this.traffic();
     let html = '';
     const btn = `<button data-act="follow">${this.following ? 'stop following' : 'follow'}</button> <button data-act="close">×</button>`;
@@ -134,7 +135,7 @@ export class AgentView {
         doing = a.ride === 1 ? `waiting at ${A.label(a, at.where)}` : a.ride === 2 ? 'on a tram / bus, away'
           : `coming back: gets off at ${A.label(a, at.where)}`;
       } else if ((a.driving || a.travel) && next) {
-        const left = walkLeft >= 0 ? walkLeft : v && t ? t.routeAhead(v).len : 0;
+        const left = walkLeft >= 0 ? walkLeft : v && t ? t.routeAhead(v, false).len : 0;
         const eta = walkLeft >= 0 ? walkLeft / 1.3 : v && t ? left / Math.max(4, t.speedOf(v)) : 0;
         doing = `${a.mode === 'walk' ? 'walking' : 'driving'} to ${A.label(a, next.where)}<br><span class="dim">${PURPOSE[next.purpose] ?? next.purpose}` +
           (left ? ` · ${Math.round(left)} m, about ${Math.max(1, Math.round(eta / 60))} min` : '') + '</span>';

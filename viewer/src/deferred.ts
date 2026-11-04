@@ -20,6 +20,7 @@ import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { night, windowsLit } from './nightlights';
 import { BOKEH, focalLength, focusDistance } from './tiltshift';
+import { config } from './config';
 
 /** Less clean: the city's voxels carry photo noise and grime, so models should too. Per-voxel brightness
  *  variation (voxel cell from the model-space position, nudged inside along the normal), darker towards
@@ -33,12 +34,11 @@ function weathered(vox: number, grime: number) {
 }
 
 /** per-voxel G-buffer outputs written by the voxel material (see voxelMaterial.ts mrtNode) */
-export const GBUF = ['output', 'emissive', 'normal'] as const;
+const GBUF = ['output', 'emissive', 'normal'] as const;
 
 /** layer of objects that cast shadows into the per-frame (vehicle) shadow map */
 export const DYNAMIC_SHADOW_LAYER = 1;
-const DEBUG_SHADOW = location.search.includes('dbg=shadow');
-const DEPTH_BLIT = new URLSearchParams(location.search).get('depthcopy') !== 'shader';   // (?depthcopy=shader: the old copy, for A/B)
+const DEBUG_SHADOW = config.debug === 'shadow';
 const STATIC_SIZE = 4096, DYN_SIZE = 1024, DYN_HALF = 120;   // texels; m half-width of the vehicle shadow box
 
 interface ShadowMap { rt: THREE.RenderTarget; cam: THREE.OrthographicCamera; mat: any }
@@ -48,7 +48,6 @@ export class Deferred {
   readonly fwd: THREE.RenderTarget;
   readonly glow: THREE.RenderTarget;
   private cityMRT = mrt({ output, emissive: vec4(0), normal: vec4(0.5, 1, 0.5, 0) });   // (normal stored x 0.5 + 0.5)
-  private restore: THREE.QuadMesh;
   private pipeline: THREE.RenderPipeline;
   private composite: any;
   private viewZ: any;
@@ -88,12 +87,6 @@ export class Deferred {
     (this.fwd as any).label = 'fwd'; (this.glow as any).label = 'glow';
     this.glow.depthTexture = this.fwd.depthTexture;   // shared: glows are hidden by city and vehicles
 
-    // copies the city depth into the forward target, so the forward layer is depth-tested against it
-    const m = new THREE.MeshBasicNodeMaterial({ colorWrite: false, depthTest: true, depthWrite: true });
-    m.depthFunc = THREE.AlwaysDepth;
-    m.depthNode = texture(this.city.depthTexture, uv()).x;
-    this.restore = new THREE.QuadMesh(m);
-
     if (shadows) {
       const mk = (size: number, half: number): ShadowMap => {
         const rt = new THREE.RenderTarget(size, size, { type: THREE.UnsignedByteType, depthBuffer: true });
@@ -127,7 +120,7 @@ export class Deferred {
     const glow = emi.rgb.add(win).mul(night);
     const fogged = mix(lit.add(glow), this.fogCol, smoothstep(this.fogNear, this.fogFar, dist));
     // (?dbg=holes: magenta where no geometry was drawn)
-    const bg: any = location.search.includes('dbg=holes') ? vec3(1, 0, 1) : vec3(this.background as any);
+    const bg: any = config.debug === 'holes' ? vec3(1, 0, 1) : vec3(this.background as any);
     const cityCol = select(depth.greaterThanEqual(1), bg, fogged);
     // forward layer is premultiplied (cleared to transparent black)
     const f = texture(this.fwd.texture, uv());
@@ -172,15 +165,6 @@ export class Deferred {
     }
     // (× 1.1: stands in for the faint specular of the rough material we used before)
     return hemi.add(sun).mul(1.1 / Math.PI);
-  }
-
-  /** material for opaque forward objects (vehicles), lit like the city; instance colours give the albedo */
-  litMaterial(extra?: (world: any) => any) {
-    const m = new THREE.MeshBasicNodeMaterial();
-    let l = this.light(normalWorld, positionWorld);
-    if (extra) l = l.add(extra(positionWorld));
-    m.colorNode = vec4(l, 1);
-    return m;
   }
 
   /** material for the voxel vehicle models (vehicleModels.ts): albedo from the model's fixed colours
@@ -380,25 +364,18 @@ export class Deferred {
   present(fwdScene: THREE.Scene, glowScene: THREE.Scene, camera: THREE.Camera) {
     const r = this.renderer;
     const autoClear = r.autoClear;
-    if (DEPTH_BLIT) {
-      // the city depth copied in by the GPU (a shader writing depth would disable early depth rejection
-      // for the vehicles drawn after it: hidden parked cars would all be shaded)
-      if (!this.fwdReady) {   // (the copy needs the target's framebuffer: it exists once it was drawn into)
-        r.setRenderTarget(this.fwd); r.clear(); r.setRenderTarget(null);
-        this.fwdReady = true;
-      }
-      r.copyTextureToTexture(this.city.depthTexture!, this.fwd.depthTexture!);
-      r.setRenderTarget(this.fwd);
-      r.setClearColor(0x000000, 0);
-      r.clear(true, false, false);
-      r.autoClear = false;
-    } else {
-      r.setRenderTarget(this.fwd);
-      r.setClearColor(0x000000, 0);
-      r.clear();
-      r.autoClear = false;
-      this.restore.render(r);
+    // the city depth copied in by the GPU, so the forward layer is depth-tested against it (a shader writing
+    // depth would disable early depth rejection for the vehicles drawn after it: hidden parked cars would
+    // all be shaded)
+    if (!this.fwdReady) {   // (the copy needs the target's framebuffer: it exists once it was drawn into)
+      r.setRenderTarget(this.fwd); r.clear(); r.setRenderTarget(null);
+      this.fwdReady = true;
     }
+    r.copyTextureToTexture(this.city.depthTexture!, this.fwd.depthTexture!);
+    r.setRenderTarget(this.fwd);
+    r.setClearColor(0x000000, 0);
+    r.clear(true, false, false);
+    r.autoClear = false;
     r.render(fwdScene, camera);
     r.setRenderTarget(this.glow);
     r.clear(true, false, false);

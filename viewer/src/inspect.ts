@@ -3,7 +3,7 @@ import * as THREE from 'three/webgpu';
 import { LABELS } from './voxelMaterial';
 import type { Voxels } from './voxels';
 
-const FLAG_FILL = 1, FLAG_PHOTO = 8;
+import { C_GROUND, FLAG_FILL, FLAG_PHOTO } from './tileFormat';
 const LIDAR: Record<number, string> = {
   0: 'never classified', 1: 'unclassified', 2: 'ground', 3: 'low vegetation', 4: 'medium vegetation',
   5: 'high vegetation', 6: 'building', 9: 'water', 10: 'rail', 64: 'vehicle (from geometry)',
@@ -47,7 +47,7 @@ export class Inspector {
     let ground = -1;
     for (let r = 0; r < 12 && ground < 0; r++)
       for (let dy = -r; dy <= r && ground < 0; dy++) for (let dx = -r; dx <= r && ground < 0; dx++)
-        for (let zz = 0; zz < this.vox.nz; zz++) if (this.vox.cls(x + dx, y + dy, zz) === 2) { ground = zz + 1; break; }
+        for (let zz = 0; zz < this.vox.nz; zz++) if (this.vox.cls(x + dx, y + dy, zz) === C_GROUND) { ground = zz + 1; break; }
 
     const lab = LABEL.get(rec.flags >> 4);
     const rgb = `rgb(${rec.r},${rec.g},${rec.b})`;

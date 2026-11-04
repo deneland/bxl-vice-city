@@ -31,7 +31,6 @@ export class Fleet {
   private frustum = new THREE.Frustum();
   private m4 = new THREE.Matrix4();
   private cam = new THREE.Vector3();
-  private shadowLayer = -1;
   private pick = new Int8Array(0);
   private counts!: Int32Array;   // per (model, lod): drawn this frame
   private at!: Int32Array;
@@ -101,9 +100,7 @@ export class Fleet {
     return h;
   }
   remove(h: number) { if (this.alive[h]) { this.alive[h] = 0; this.free.push(h); } }
-  clear() { this.alive.fill(0); this.free = []; this.top = 0; }
   setPose(h: number, m: THREE.Matrix4) { m.toArray(this.mat, h * 16); }
-  setLights(h: number, on: number) { this.lit[h] = on; }
 
   /** handle drawn as instance i of `mesh` in the last frame (picking), or -1 */
   handleAt(mesh: THREE.Object3D, i: number) {
@@ -115,7 +112,6 @@ export class Fleet {
 
   /** near models cast shadows into the vehicle shadow map (far ones are outside its box anyway) */
   enableLayer(layer: number) {
-    this.shadowLayer = layer;
     for (const ls of this.lods) ls[0].mesh.layers.enable(layer);
   }
 
@@ -171,7 +167,6 @@ export class Fleet {
         lod.paint.clearUpdateRanges(); lod.paint.addUpdateRange(0, n * 3); lod.paint.needsUpdate = true;
         lod.lights.clearUpdateRanges(); lod.lights.addUpdateRange(0, n); lod.lights.needsUpdate = true;
       }
-    if (this.shadowLayer >= 0) for (const ls of this.lods) ls[0].mesh.layers.enable(this.shadowLayer);
   }
 
   /** bodies drawn last frame (near, far) */

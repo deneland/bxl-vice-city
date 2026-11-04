@@ -2,7 +2,8 @@
 // A run appears at its first stop in the region at its time, drives stop to stop (traffic.ts waits at
 // each until the departure time) and leaves after its last stop in the region.
 import { KIND } from './roads';
-import type { Spot, Traffic } from './traffic';
+import type { Traffic } from './traffic';
+import type { Spot } from './paths';
 
 export interface TransitData {
   routes: [string, number, string][];               // name, mode (0 tram, 3 bus), colour
