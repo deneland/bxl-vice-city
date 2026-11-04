@@ -33,12 +33,19 @@ export class Fleet {
   private cam = new THREE.Vector3();
   private shadowLayer = -1;
   private pick = new Int8Array(0);
+  private counts!: Int32Array;   // per (model, lod): drawn this frame
+  private at!: Int32Array;
 
   constructor(models: Record<string, FleetModel>, private material: THREE.Material) {
     this.names = Object.keys(models);
     this.radius = Float32Array.from(this.names.map((n) => Math.hypot(models[n].len, models[n].h, models[n].w) / 2));
-    this.lods = this.names.map((n) => [this.makeLod(models[n].geo, 256), this.makeLod(models[n].far, 256)]);
+    // sized for a full view of parked and moving cars, so the buffers rarely have to grow (a regrow
+    // rebuilds the mesh: a spike)
+    const cars = new Set(['hatch', 'sedan', 'estate', 'suv', 'van']);
+    this.lods = this.names.map((n) => [this.makeLod(models[n].geo, cars.has(n) ? 2048 : 256), this.makeLod(models[n].far, cars.has(n) ? 2048 : 256)]);
     this.grow(GROW);
+    this.counts = new Int32Array(this.names.length * 2);
+    this.at = new Int32Array(this.names.length * 2);
   }
 
   private makeLod(base: THREE.BufferGeometry, cap: number): Lod {
@@ -119,7 +126,8 @@ export class Fleet {
     this.m4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.group.matrixWorld);
     this.frustum.setFromProjectionMatrix(this.m4, camera.coordinateSystem);
     this.cam.setFromMatrixPosition(camera.matrixWorld).applyMatrix4(this.m4.copy(this.group.matrixWorld).invert());
-    const counts = this.lods.map(() => [0, 0]);
+    const counts = this.counts;
+    counts.fill(0);
     const planes = this.frustum.planes, { mat, model, alive, radius } = this;
     const cx = this.cam.x, cy = this.cam.y, cz = this.cam.z;
     // pass 1: count per (model, lod), so buffers are big enough before writing
@@ -128,30 +136,34 @@ export class Fleet {
     for (let h = 0; h < this.top; h++) {
       if (!alive[h] || mat[h * 16 + 15] === 0) { pick[h] = -1; continue; }
       const o = h * 16, x = mat[o + 12], y = mat[o + 13], z = mat[o + 14], r = radius[model[h]];
-      const d = Math.hypot(x - cx, y - cy, z - cz);
+      const dx = x - cx, dy = y - cy, dz = z - cz, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       let vis = d < FAR;
       for (let p = 0; vis && p < 6; p++) {
         const n = planes[p].normal;
         if (n.x * x + n.y * y + n.z * z + planes[p].constant < -r) vis = false;
       }
       pick[h] = vis ? (d < NEAR ? 0 : 1) : -1;
-      if (vis) counts[model[h]][pick[h]]++;
+      if (vis) counts[model[h] * 2 + pick[h]]++;
     }
     // pass 2: write packed
-    const fill = this.lods.map((_, m) => [this.ensure(m, 0, counts[m][0]), this.ensure(m, 1, counts[m][1])]);
-    const at = this.lods.map(() => [0, 0]);
+    for (let m = 0; m < this.lods.length; m++) { this.ensure(m, 0, counts[m * 2]); this.ensure(m, 1, counts[m * 2 + 1]); }
+    const at = this.at;
+    at.fill(0);
+    const col = this.col, lit = this.lit;
     for (let h = 0; h < this.top; h++) {
       const l = pick[h];
       if (l < 0) continue;
-      const m = model[h], lod = fill[m][l], i = at[m][l]++;
-      lod.mesh.instanceMatrix.array.set(mat.subarray(h * 16, h * 16 + 16), i * 16);
-      (lod.paint.array as Float32Array).set(this.col.subarray(h * 3, h * 3 + 3), i * 3);
-      (lod.lights.array as Float32Array)[i] = this.lit[h];
+      const m = model[h], lod = this.lods[m][l], i = at[m * 2 + l]++;
+      const dst = lod.mesh.instanceMatrix.array as Float32Array, o = h * 16, d = i * 16;
+      for (let k = 0; k < 16; k++) dst[d + k] = mat[o + k];
+      const pa = lod.paint.array as Float32Array;
+      pa[i * 3] = col[h * 3]; pa[i * 3 + 1] = col[h * 3 + 1]; pa[i * 3 + 2] = col[h * 3 + 2];
+      (lod.lights.array as Float32Array)[i] = lit[h];
       lod.who[i] = h;
     }
     for (let m = 0; m < this.lods.length; m++)
       for (let l = 0; l < 2; l++) {
-        const lod = this.lods[m][l], n = at[m][l];
+        const lod = this.lods[m][l], n = at[m * 2 + l];
         lod.mesh.count = n;
         lod.mesh.visible = n > 0;
         if (!n) continue;

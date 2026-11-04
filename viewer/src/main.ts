@@ -540,13 +540,21 @@ async function main() {
       // city shadows: when the sun moved noticeably, or other tiles were loaded (once loading settles)
       if (tilesChanged) shadowTiles = true;
       const sunMoved = deferred.sunDir.value.angleTo(shadowSun) > 0.005;
-      if (sunMoved || (shadowTiles && !moving && !lod.stats.loading)) {
+      if (sunMoved) {   // (time slider: redraw at once, it has to follow the sun)
         prof.begin('shadowCity');
+        deferred.cancelStaticShadow();
         deferred.renderStaticShadow(cityScene, sun.target.position);
         prof.end('shadowCity');
         shadowSun.copy(deferred.sunDir.value);
-        shadowTiles = false;
         shadowRenders++;
+      } else if (shadowTiles && !moving && !lod.stats.loading && !deferred.shadowBusy) {
+        deferred.beginStaticShadow(cityScene, sun.target.position);   // other tiles: redraw in slices
+        shadowTiles = false;
+      }
+      if (deferred.shadowBusy && !sunMoved) {
+        prof.begin('shadowCity');
+        if (deferred.stepStaticShadow(cityScene)) shadowRenders++;
+        prof.end('shadowCity');
       }
       if (trafficOn || dynShadowDirty) {   // vehicles, around what you look at
         prof.begin('shadowDyn');

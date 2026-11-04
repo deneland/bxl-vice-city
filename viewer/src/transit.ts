@@ -68,21 +68,30 @@ export class Transit {
   private focus: [number, number] | null = null;
   /** only runs with a stop within this distance of the focus get a vehicle (m) */
   radius = 1500;
-  setFocus(x: number, z: number) { this.focus = [x, z]; }
+  setFocus(x: number, z: number) { if (this.focus) { this.focus[0] = x; this.focus[1] = z; } else this.focus = [x, z]; }
   /** ms per frame for starting runs (route searches between their stops) */
   budgetMs = 1.5;
   private under: [number, string, [number, number, number][]][] = [];
 
-  private start(run: [number, string, [number, number, number][]], from: number) {
+  /** start a run (from its stop `from`); false: not yet, its stop-to-stop routes are still being searched
+   *  (at most `budget` ms per frame; the run starts on a later frame) */
+  private start(run: [number, string, [number, number, number][]], from: number, stop: number) {
     const [ri, headsign, st] = run;
     if (this.focus) {
       const f = this.focus, r2 = this.radius * this.radius;
       if (!st.some(([stop]) => {
         const [x, y] = this.data.stops[stop];
         return (x * this.vs - f[0]) ** 2 + (-y * this.vs - f[1]) ** 2 < r2;
-      })) return;   // far from where you look
+      })) return true;   // far from where you look
     }
     const [line, mode, color] = this.data.routes[ri];
+    // routes between consecutive stops: search the missing ones within the frame budget first
+    for (let i = from; i + 1 < st.length; i++)
+      for (const ca of this.cands(st[i][0], mode)) for (const cb of this.cands(st[i + 1][0], mode)) {
+        if (this.traffic.hasStopRoute(ca.p, cb.p)) continue;
+        if (performance.now() > stop) return false;
+        this.traffic.routable(ca.p, cb.p);
+      }
     // per stop, the nearest candidate reachable from the previous stop's choice (trams: right track)
     const stops: { spot: Spot; dep: number; name: string; id: number }[] = [];
     for (const [stop, , dep] of st) {
@@ -92,6 +101,7 @@ export class Transit {
       if (spot) stops.push({ spot, dep, name: this.data.stops[stop][2], id: stop });
     }
     this.traffic.spawnTransit({ line, headsign, color, mode }, stops, Math.min(from, Math.max(0, stops.length - 2)));
+    return true;
   }
 
   /** `now`: seconds of the day; `weekday`: 0 Monday .. 6 Sunday */
@@ -115,11 +125,12 @@ export class Transit {
     // (runs under way after a jump: as many per frame as the budget allows; they start at the stop
     // they would be at by now)
     while (this.under.length && performance.now() < stop) {
-      const run = this.under.pop()!, st = run[2];
-      if (st[st.length - 1][2] <= now) continue;
+      const run = this.under[this.under.length - 1], st = run[2];
+      if (st[st.length - 1][2] <= now) { this.under.pop(); continue; }
       let k = 0;
       while (k + 1 < st.length && st[k + 1][1] <= now) k++;
-      this.start(run, k);
+      if (!this.start(run, k, stop)) break;   // (its routes are being searched: next frame)
+      this.under.pop();
     }
     // start runs early enough to drive in from the region edge to their first stop
     while (this.next < runs.length) {
@@ -127,7 +138,7 @@ export class Transit {
       const first = this.cands(st[0][0], mode)[0];
       const lead = first ? this.traffic.leadIn(first, mode) : 0;
       if (st[0][1] - lead > now || performance.now() > stop) break;
-      this.start(run, 0);
+      if (!this.start(run, 0, stop)) break;
       this.next++;
     }
   }

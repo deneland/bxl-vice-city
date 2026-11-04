@@ -44,6 +44,23 @@ interface Section { model: string; len: number; h: number; over: number; wb: num
 interface Kind { name: string; secs: Section[]; gap: number; total: number; amax: number; b: number; T: number; s0: number;
   maxV?: number }   // own top speed (bicycles), m/s
 
+const byS = (a: { s: number }, b: { s: number }) => a.s - b.s;
+/** index of the next junction curve on a route after the current path, or -1 */
+function nextJunction(route: Path[]) { for (let k = 1; k < route.length; k++) if (route[k].junction) return k; return -1; }
+/** a junction curve ahead that the vehicle may not enter yet */
+function waitingAtJunction(v: Vehicle) {
+  for (let k = 1; k < v.route.length; k++) if (v.route[k].junction && v.grant !== v.route[k]) return true;
+  return false;
+}
+const BLOCK = new Map<string, string>();
+/** 'junction:<reason>' (cached: built per vehicle per step otherwise) */
+function junctionBlock(why: string | undefined) {
+  const k = why || '?';
+  let b = BLOCK.get(k);
+  if (!b) { b = 'junction:' + k; BLOCK.set(k, b); }
+  return b;
+}
+const STEP = 1 / 20;   // s: simulation step (drawing interpolates in between)
 const MODELS = buildModels();
 const sec = (model: string, over: number, wb: number): Section => ({ model, len: MODELS[model].len, h: MODELS[model].h, over, wb });
 const kind = (name: string, secs: Section[], gap: number, amax: number, b: number, T: number, s0: number): Kind =>
@@ -364,7 +381,7 @@ export class Traffic {
       this.lightAt.push({ sig: h.sig, i, state: GREEN });
     });
     this.lights.count = heads.length;
-    this.update(0);
+    this.step(0); this.pose(0);
   }
 
   get count() { return this.vehicles.length; }
@@ -593,7 +610,11 @@ export class Traffic {
       const goal = to === 'edge' ? this.exits[Math.floor(Math.random() * this.exits.length)] : to.p;
       if (!o.p || !goal) return 0;
       if (goal === o.p && to !== 'edge' && to.s <= o.s + 5) return 0;
-      const lanes = this.route(o.p, goal, car.kind === 'bike');
+      // bounded: generous for any real trip (detours, queues), but an unreachable goal gives up early
+      // instead of searching the whole network (a frame spike)
+      const G = this.routeGraph(), ia = G.id.get(o.p), ib = G.id.get(goal);
+      const crow = ia !== undefined && ib !== undefined ? Math.hypot(G.ex[ia] - G.ex[ib], G.ez[ia] - G.ez[ib]) : 0;
+      const lanes = this.route(o.p, goal, car.kind === 'bike', crow / 3 + 600);
       if (!lanes) { this.failed++; if (from !== 'edge' && to !== 'edge') return 0; continue; }
       // where along the route (progress > 0: somewhere on the way)
       let k = 0, s = o.s;
@@ -787,6 +808,11 @@ export class Traffic {
   /** route for timetabled vehicles between two stops: the same pairs come back all day, so cached
    *  (without queues: buses and trams keep to their line anyway) */
   private stopRoutes = new Map<string, Path[] | null>();
+  /** is the stop-to-stop route between a and b known already (no search needed) */
+  hasStopRoute(a: Path, b: Path) {
+    const G = this.routeGraph();
+    return a === b || this.stopRoutes.has(`${G.id.get(a)}>${G.id.get(b)}`);
+  }
   stopRoute(a: Path, b: Path): Path[] | null {
     const G = this.routeGraph();
     const key = `${G.id.get(a)}>${G.id.get(b)}`;
@@ -883,29 +909,51 @@ export class Traffic {
 
   private now = 0;   // seconds of the day (timetables)
 
+  // The simulation (signals, junction grants, car following, routes) runs at a fixed STEP; drawing
+  // happens every frame, each vehicle extrapolated by its speed for the time since the last step
+  // (at most one STEP, so visually exact). Fewer, steadier simulation steps; same smooth motion.
+  private acc = 0;
   update(dt: number, now = 0) {
-    this.time += dt;
     this.now = now;
+    this.acc += dt;
+    let n = 0;
+    while (this.acc >= STEP && n < 4) { this.step(STEP); this.acc -= STEP; n++; }
+    if (n === 4) this.acc = Math.min(this.acc, STEP);   // fell behind (a long frame): drop time, never spiral
+    this.pose(this.acc);
+  }
+
+  private step(dt: number) {
+    this.time += dt;
     for (const sig of this.signals) sig.state = signalState(sig, this.time);
     // occupancy per path, sorted by position
-    const used = new Set<Path>();
+    // (two sets used in turn: no allocation per step)
+    const used = this.usedB; used.clear();
     for (const v of this.vehicles) { const p = v.route[0]; if (!used.has(p)) { used.add(p); p.occ.length = 0; } p.occ.push(v); }
-    for (const p of used) if (p.occ.length > 1) p.occ.sort((a, b) => a.s - b.s);
-    this.lastUsed.forEach((p) => { if (!used.has(p)) p.occ.length = 0; });
+    for (const p of used) if (p.occ.length > 1) p.occ.sort(byS);
+    for (const p of this.lastUsed) if (!used.has(p)) p.occ.length = 0;
+    this.usedB = this.lastUsed;
     this.lastUsed = used;
 
     // junction grants: in order of arrival, a vehicle near its next junction curve may enter if nothing
     // conflicting is in there and no conflicting vehicle with precedence is about to enter
-    const cands: { v: Vehicle; c: Path; d: number; free: boolean }[] = [];
-    const committed: { v: Vehicle; c: Path }[] = [];
+    // (candidate records are reused from step to step)
+    const cands = this.cands, committed = this.committed;
+    cands.length = 0; committed.length = 0;
+    let nRec = 0;
+    const rec = (v: Vehicle, c: Path, d: number) => {
+      const r = this.recPool[nRec] ??= { v, c, d, free: true };
+      nRec++;
+      r.v = v; r.c = c; r.d = d; r.free = true;
+      return r;
+    };
     for (const v of this.vehicles) {
-      const i = v.route.findIndex((p, k) => k > 0 && p.junction);
+      const i = nextJunction(v.route);
       if (i < 0) continue;
       const d = this.distTo(v, i);
       // a grant is final once the vehicle can no longer stop before the junction
-      if (v.grant === v.route[i] && d < (v.v * v.v) / (2 * v.t.b * 1.5) + 0.5) { committed.push({ v, c: v.route[i] }); continue; }
+      if (v.grant === v.route[i] && d < (v.v * v.v) / (2 * v.t.b * 1.5) + 0.5) { committed.push(rec(v, v.route[i], d)); continue; }
       v.grant = null;
-      if (d < (v.v * v.v) / (2 * v.t.b) + 15) cands.push({ v, c: v.route[i], d, free: true });
+      if (d < (v.v * v.v) / (2 * v.t.b) + 15) cands.push(rec(v, v.route[i], d));
       else { v.arrive = this.time; v.wait = 0; }
     }
     // pass 1: hard constraints (light, something conflicting inside, no room after the junction)
@@ -915,7 +963,7 @@ export class Traffic {
       const canStop = x.d > (x.v.v * x.v.v) / (2 * x.v.t.b * 1.5);
       x.v.why = '';
       if (sig && !(sig.state === GREEN || (sig.state === AMBER && !canStop))) x.v.why = 'light';
-      else if ([...j.occ].some((y) => y !== x.v && y.inJunction && this.conflicts(j, x.c, y.inJunction))) x.v.why = 'occupied';
+      else if (this.occupied(j, x.v, x.c)) x.v.why = 'occupied';
       else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'committed';
       else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'no room';   // don't block the box
       else if (this.crossingBusy && (this.crossingBusy(x.c.from!.lane!.edge, x.c.from!.lane!.to)
@@ -943,7 +991,10 @@ export class Traffic {
     }
 
     // IDM per vehicle (a copy: cars that finish their trip leave the list)
-    for (const v of this.vehicles.slice()) {
+    const list = this.stepList;   // (a copy: cars that finish their trip leave this.vehicles)
+    list.length = 0;
+    for (const v of this.vehicles) list.push(v);
+    for (const v of list) {
       const t = v.t;
       // desired speed: the speed limit, lowered ahead of curves so that braking is comfortable
       let v0 = Math.min(v.route[0].speed * v.f, t.maxV ?? Infinity), gap = Infinity, vLead = 0;
@@ -970,7 +1021,7 @@ export class Traffic {
           }
         }
         // stop lines: a junction curve we may not enter yet, crossing lights
-        if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = 'junction:' + (v.why || '?'); v.blockBy = null; }
+        if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = junctionBlock(v.why); v.blockBy = null; }
         if (v.kind === KIND.road)
           for (const x of p.crossings)
             if (x.s > from && x.sig.state !== GREEN && d + x.s < gap
@@ -990,7 +1041,7 @@ export class Traffic {
       let a = amax * (1 - Math.pow(vv / Math.max(v0, 0.1), 4));
       if (gap < Infinity) a -= amax * Math.pow(Math.max(sStar, 0) / Math.max(gap - 0.5, 0.1), 2);
       v.v = Math.max(0, vv + Math.max(a, -9) * dt);
-      v.wait = v.v < 0.5 && v.route.some((p, k) => k > 0 && p.junction && v.grant !== p) ? v.wait + dt : 0;
+      v.wait = v.v < 0.5 && waitingAtJunction(v) ? v.wait + dt : 0;
       v.stuck = v.v < 0.2 && !this.atLight(v) ? v.stuck + dt : 0;
       if (v.transit) {   // at a stop: dwell, then go at the timetabled departure (or 15 s, if late)
         const R = v.transit, st = R.stops[R.next];
@@ -1017,11 +1068,20 @@ export class Traffic {
       this.advance(v);
     }
 
-    // boxes: two axles on the path per box
+    // signal heads
+    let changed = false;
+    for (const l of this.lightAt)
+      if (l.state !== l.sig.state) { l.state = l.sig.state; this.lights.setColorAt(l.i, LIGHT_COLORS[l.state]); changed = true; }
+    if (changed && this.lights.instanceColor) this.lights.instanceColor.needsUpdate = true;
+  }
+
+  /** vehicle bodies: two axles on the path per body, `ahead` seconds after the last step */
+  private pose(ahead: number) {
     for (const v of this.vehicles) {
       const t = v.t;
-      let fb = v.s;                                         // front bumper of the section
-      t.secs.forEach((x, k) => {
+      let fb = v.s + v.v * ahead;                          // front bumper of the section
+      for (let k = 0; k < t.secs.length; k++) {
+        const x = t.secs[k];
         this.at(v, fb - x.over, this.front);
         this.at(v, fb - x.over - x.wb, this.rear);
         const dir = tmp.subVectors(this.front, this.rear);
@@ -1034,15 +1094,20 @@ export class Traffic {
         this.m4.compose(this.pos, this.q, this.scl.set(1, 1, 1));
         this.fleet.setPose(v.inst[k], this.m4);
         fb -= x.len + t.gap;
-      });
+      }
     }
-    // signal heads
-    let changed = false;
-    for (const l of this.lightAt)
-      if (l.state !== l.sig.state) { l.state = l.sig.state; this.lights.setColorAt(l.i, LIGHT_COLORS[l.state]); changed = true; }
-    if (changed && this.lights.instanceColor) this.lights.instanceColor.needsUpdate = true;
   }
   private lastUsed = new Set<Path>();
+  private usedB = new Set<Path>();
+  private cands: { v: Vehicle; c: Path; d: number; free: boolean }[] = [];
+  private committed: { v: Vehicle; c: Path; d: number; free: boolean }[] = [];
+  private recPool: { v: Vehicle; c: Path; d: number; free: boolean }[] = [];
+  private stepList: Vehicle[] = [];
+  /** something conflicting with curve c inside junction j (other than v) */
+  private occupied(j: Junction, v: Vehicle, c: Path) {
+    for (const y of j.occ) if (y !== v && y.inJunction && this.conflicts(j, c, y.inJunction)) return true;
+    return false;
+  }
 
   /** move on to the next path when the front passes the end of the current one */
   private advance(v: Vehicle) {
@@ -1079,6 +1144,10 @@ export class Traffic {
       const prev = v.hist[h++];
       s = prev.end - (p.start - s);
       p = prev;
+    }
+    for (let i = 1; s > p.end && i < v.route.length; i++) {   // ahead of the current path (drawn between steps)
+      s = v.route[i].start + (s - p.end);
+      p = v.route[i];
     }
     if (s < 0) {   // before the start of what we know (just entered the region): continue straight back
       sample(p, 0, out);

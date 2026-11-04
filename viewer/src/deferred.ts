@@ -94,7 +94,7 @@ export class Deferred {
       const mk = (size: number, half: number): ShadowMap => {
         const rt = new THREE.RenderTarget(size, size, { type: THREE.UnsignedByteType, depthBuffer: true });
         rt.texture.name = 'output';
-        rt.depthTexture = new THREE.DepthTexture(size, size);
+        rt.depthTexture = new THREE.DepthTexture(size, size, THREE.FloatType);   // (32-bit: copyable on WebGPU)
         const cam = new THREE.OrthographicCamera(-half, half, half, -half, 1, 5000);
         cam.coordinateSystem = renderer.coordinateSystem;
         cam.updateProjectionMatrix();
@@ -268,6 +268,70 @@ export class Deferred {
     r.setMRT(null);
     r.setRenderTarget(null);
   }
+
+  // --- city shadows in slices: after tiles load, the new map is drawn into a back buffer a group of
+  // tiles per frame (depth testing merges the groups exactly as one draw would) and copied to the front
+  // when complete, so there is no 20-30 ms frame. (The sun moving still redraws at once: see above.)
+  private statBack: ShadowMap | null = null;
+  private job: { groups: THREE.Object3D[][]; k: number } | null = null;
+  /** quads per slice frame */
+  sliceQuads = 600_000;
+  get shadowBusy() { return this.job !== null; }
+
+  beginStaticShadow(cityScene: THREE.Scene, center: THREE.Vector3) {
+    if (!this.stat) return;
+    if (!this.statBack) {
+      const rt = new THREE.RenderTarget(STATIC_SIZE, STATIC_SIZE, { type: THREE.UnsignedByteType, depthBuffer: true });
+      rt.texture.name = 'output';
+      rt.depthTexture = new THREE.DepthTexture(STATIC_SIZE, STATIC_SIZE, THREE.FloatType);   // (copyable on WebGPU)
+      (rt as any).label = 'shadowCity';
+      const cam = this.stat.cam.clone();
+      this.statBack = { rt, cam, mat: uniform(new THREE.Matrix4()) };
+    }
+    this.statBack.cam.copy(this.stat.cam);
+    this.aim(this.statBack, center);
+    // the tiles drawn now, in groups of about sliceQuads
+    const groups: THREE.Object3D[][] = [[]];
+    let n = 0;
+    cityScene.traverseVisible((o) => {
+      if (!(o as THREE.Mesh).isMesh) return;
+      const q = ((o as THREE.Mesh).geometry as THREE.InstancedBufferGeometry).instanceCount ?? 0;
+      if (n > 0 && n + q > this.sliceQuads) { groups.push([]); n = 0; }
+      groups[groups.length - 1].push(o); n += q;
+    });
+    this.job = { groups, k: 0 };
+  }
+
+  /** draw the next group; returns true when the new map is complete and in use */
+  stepStaticShadow(cityScene: THREE.Scene) {
+    const job = this.job, back = this.statBack;
+    if (!job || !back || !this.stat) return true;
+    const group = new Set(job.groups[job.k]);
+    const hidden: THREE.Object3D[] = [];
+    cityScene.traverseVisible((o) => { if ((o as THREE.Mesh).isMesh && !group.has(o)) hidden.push(o); });
+    for (const o of hidden) o.visible = false;
+    const off = job.groups[job.k].filter((o) => !o.visible && o.parent);   // (hidden by a LOD change since)
+    for (const o of off) o.visible = true;
+    const r = this.renderer, autoClear = r.autoClear;
+    r.setRenderTarget(back.rt);
+    r.setMRT(this.outputMRT);
+    if (job.k === 0) r.clear();
+    r.autoClear = false;
+    r.render(cityScene, back.cam);
+    r.autoClear = autoClear;
+    r.setMRT(null);
+    r.setRenderTarget(null);
+    for (const o of hidden) o.visible = true;
+    for (const o of off) o.visible = false;
+    if (++job.k < job.groups.length) return false;
+    // complete: the back map becomes the front one
+    r.copyTextureToTexture(back.rt.depthTexture!, this.stat.rt.depthTexture!);
+    this.stat.mat.value.copy(back.mat.value);
+    this.job = null;
+    return true;
+  }
+  /** a full redraw supersedes a sliced one in progress */
+  cancelStaticShadow() { this.job = null; }
 
   /** vehicle shadow map around `focus` (every frame while they move) */
   renderDynamicShadow(fwdScene: THREE.Scene, focus: THREE.Vector3) {

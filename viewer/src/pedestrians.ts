@@ -7,12 +7,13 @@ import { KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
 
 const DEFAULT_PAVEMENT = [6, 6, 6, 7, 8.5, 9.5, 10];   // m from the centreline, by road rank (no facade found)
+const XK = 100000;   // crossing key: edge * XK + node
 const CROSS_PATIENCE = 25;   // s waiting for a gap before crossing anyway (cars then stop)
 
-interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: string | null; park?: boolean }
+interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: number | null; park?: boolean }   // cross: crossing key edge * XK + node
 interface Walker {
   agent: unknown; segs: { seg: Seg; fwd: boolean }[]; k: number; s: number; v: number; dist: number;
-  wait: number; crossing: string | null; idx: number; end: number;   // end: m to walk on the last segment
+  wait: number; crossing: number | null; idx: number; end: number;   // end: m to walk on the last segment
 }
 export interface WalkSpot { seg: Seg; s: number }
 
@@ -79,7 +80,7 @@ export class Pedestrians {
   private adj = new Map<number, { seg: Seg; fwd: boolean }[]>();   // graph vertex -> segments leaving it
   private walkers: Walker[] = [];
   private free: number[] = [];
-  private busy = new Map<string, number>();     // crossing key `${edge}:${node}` -> people on it
+  private busy = new Map<number, number>();     // crossing key (edge * XK + node) -> people on it
   private grid = new Map<string, { seg: Seg; s: number; x: number; z: number }[]>();
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: unknown) => void) | null = null;
@@ -134,7 +135,7 @@ export class Pedestrians {
         inc.get(node)!.push({ ei, atStart, ang });
       }
     });
-    const link = (va: number, vb: number, pa: THREE.Vector3, pb: THREE.Vector3, cross: string | null) => {
+    const link = (va: number, vb: number, pa: THREE.Vector3, pb: THREE.Vector3, cross: number | null) => {
       const seg: Seg = { ...polyline([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z]), a: va, b: vb, cross };
       this.segs.push(seg);
     };
@@ -154,7 +155,7 @@ export class Pedestrians {
           if (pa && pb && pa.p.distanceTo(pb.p) < 40) link(pa.v, pb.v, pa.p, pb.p, null);
         }
         const l = endPoint(A.ei, 0, A.atStart), r = endPoint(A.ei, 1, A.atStart);   // across street A
-        if (l && r && l.p.distanceTo(r.p) < 40) link(l.v, r.v, l.p, r.p, `${A.ei}:${node}`);
+        if (l && r && l.p.distanceTo(r.p) < 40) link(l.v, r.v, l.p, r.p, A.ei * XK + node);
       }
     }
     // --- footpaths (parks, squares): their own network, linked to the pavements where they end near one ---
@@ -175,7 +176,7 @@ export class Pedestrians {
       const pave: { seg: Seg; s: number; x: number; y: number; z: number }[] = [];
       const tmp = new THREE.Vector3();
       const PC = 15, paveGrid = new Map<string, typeof pave>();   // (spatial index: a commune has ~300k points)
-      for (const seg of this.segs) if (!seg.cross && seg.pts.length > 6)
+      for (const seg of this.segs) if (seg.cross === null && seg.pts.length > 6)
         for (let s = 0.5; s < seg.len - 0.5; s += 2) {
           at(seg, s, tmp);
           const q = { seg, s, x: tmp.x, y: tmp.y, z: tmp.z }, key = `${Math.floor(q.x / PC)},${Math.floor(q.z / PC)}`;
@@ -221,7 +222,7 @@ export class Pedestrians {
         if (!this.adj.has(v)) this.adj.set(v, []);
         this.adj.get(v)!.push({ seg, fwd });
       }
-      if (seg.cross) continue;
+      if (seg.cross !== null) continue;
       const tmp = new THREE.Vector3();
       for (let s = 1; s < seg.len - 1; s += 4) {
         at(seg, s, tmp);
@@ -230,7 +231,7 @@ export class Pedestrians {
         this.grid.get(key)!.push({ seg, s, x: tmp.x, z: tmp.z });
       }
     }
-    traffic?.setCrossings((edge, node) => (this.busy.get(`${edge}:${node}`) ?? 0) > 0);
+    traffic?.setCrossings((edge, node) => (this.busy.get(edge * XK + node) ?? 0) > 0);
 
     // --- mesh: instanced people with per-instance colours and walk phase ---
     const g = personGeometry();
@@ -287,7 +288,7 @@ export class Pedestrians {
     const pos: number[] = [], col: number[] = [];
     const c = new THREE.Color();
     for (const seg of this.segs) {
-      c.set(seg.cross ? 0xffffff : seg.park ? 0x2fb9ff : seg.len < 40 && seg.pts.length === 6 ? 0x888888 : 0x3ddc84);
+      c.set(seg.cross !== null ? 0xffffff : seg.park ? 0x2fb9ff : seg.len < 40 && seg.pts.length === 6 ? 0x888888 : 0x3ddc84);
       for (let i = 0; i + 5 < seg.pts.length; i += 3) {
         pos.push(seg.pts[i], seg.pts[i + 1] + 0.6, seg.pts[i + 2], seg.pts[i + 3], seg.pts[i + 4] + 0.6, seg.pts[i + 5]);
         col.push(c.r, c.g, c.b, c.r, c.g, c.b);
@@ -384,7 +385,7 @@ export class Pedestrians {
           return out;
         }
         const nv = e.fwd ? e.seg.b : e.seg.a;
-        const c = n.cost + e.seg.len + (e.seg.cross ? 4 : 0);
+        const c = n.cost + e.seg.len + (e.seg.cross !== null ? 4 : 0);
         if (c < (best.get(nv) ?? Infinity)) {
           best.set(nv, c);
           const nn: Node = { v: nv, cost: c, prev: n, via: e };
@@ -428,7 +429,7 @@ export class Pedestrians {
   }
   clear() { for (const w of this.walkers.slice()) this.release(w); for (const a of [...this.standing.keys()]) this.unstand(a); }
   private release(w: Walker) {
-    if (w.crossing) this.busy.set(w.crossing, (this.busy.get(w.crossing) ?? 1) - 1);
+    if (w.crossing !== null) this.busy.set(w.crossing, (this.busy.get(w.crossing) ?? 1) - 1);
     this.mesh.setMatrixAt(w.idx, new THREE.Matrix4().makeScale(0, 0, 0));
     this.free.push(w.idx);
     this.walkers.splice(this.walkers.indexOf(w), 1);
@@ -476,8 +477,8 @@ export class Pedestrians {
         const { seg } = w.segs[w.k];
         const stop = w.k === w.segs.length - 1 ? w.end : seg.len;
         // about to cross a street: wait for a gap (or until patience runs out; then cars wait)
-        if (seg.cross && w.crossing !== seg.cross) {
-          const [edge, node] = seg.cross.split(':').map(Number);
+        if (seg.cross !== null && w.crossing !== seg.cross) {
+          const edge = Math.floor(seg.cross / XK), node = seg.cross % XK;
           const safe = !this.traffic || this.traffic.crossingClear(edge, node);
           if (!safe && w.wait < CROSS_PATIENCE) { w.wait += dt; step = 0; break; }
           w.wait = 0; w.crossing = seg.cross;
@@ -486,7 +487,7 @@ export class Pedestrians {
         const room = stop - w.s;
         if (step < room) { w.s += step; w.dist += step; step = 0; break; }
         w.s = stop; w.dist += room; step -= room;
-        if (w.crossing) { this.busy.set(w.crossing, (this.busy.get(w.crossing) ?? 1) - 1); w.crossing = null; }
+        if (w.crossing !== null) { this.busy.set(w.crossing, (this.busy.get(w.crossing) ?? 1) - 1); w.crossing = null; }
         w.k++; w.s = 0;
       }
       if (w.k >= w.segs.length) { const a = w.agent; this.release(w); this.onArrive?.(a); continue; }
@@ -500,7 +501,14 @@ export class Pedestrians {
       this.mesh.setMatrixAt(w.idx, this.m4);
       this.walk.setXY(w.idx, step === 0 && w.wait > 0 ? 0 : w.dist * 2.4, ang);
     }
+    // draw only up to the highest slot in use (slots are handed out from the low end)
+    let hi = -1;
+    for (const w of this.walkers) if (w.idx > hi) hi = w.idx;
+    for (const i of this.standing.values()) if (i > hi) hi = i;
+    this.mesh.count = hi + 1;
+    this.mesh.instanceMatrix.clearUpdateRanges(); this.mesh.instanceMatrix.addUpdateRange(0, (hi + 1) * 16);
     this.mesh.instanceMatrix.needsUpdate = true;
+    this.walk.clearUpdateRanges(); this.walk.addUpdateRange(0, (hi + 1) * 2);
     this.walk.needsUpdate = true;
   }
 }

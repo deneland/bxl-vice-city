@@ -505,7 +505,7 @@ export class Agents {
   // --- near the camera in detail, elsewhere as timelines -------------------------------------
   private focus: [number, number] | null = null;
   /** where you look (scene position in the traffic group's frame) */
-  setFocus(x: number, z: number) { this.focus = [x, z]; }
+  setFocus(x: number, z: number) { if (this.focus) { this.focus[0] = x; this.focus[1] = z; } else this.focus = [x, z]; }
   /** detail radius (m): vehicles, walkers, parked cars */
   radius = { drive: 900, walk: 550, park: 450 };
 
@@ -541,7 +541,20 @@ export class Agents {
   private tick = -1;
 
   private inZone(p: [number, number] | null, r: number) {
-    return !this.focus || (!!p && Math.hypot(p[0] - this.focus[0], p[1] - this.focus[1]) < r);
+    if (!this.focus) return true;
+    if (!p) return false;
+    const dx = p[0] - this.focus[0], dz = p[1] - this.focus[1];
+    return dx * dx + dz * dz < r * r;
+  }
+  /** is a timeline trip within r of the focus now (no allocation: checked for every trip every frame) */
+  private travelInZone(t: Travel, now: number, r: number) {
+    if (!this.focus) return true;
+    const k = Math.min(1, Math.max(0, (now - t.t0) / Math.max(1, t.t1 - t.t0)));
+    let x: number, z: number;
+    if (t.pa && t.pb) { x = t.pa[0] + (t.pb[0] - t.pa[0]) * k; z = t.pa[1] + (t.pb[1] - t.pa[1]) * k; }
+    else { const p = k < 0.5 ? t.pa : t.pb; if (!p) return false; x = p[0]; z = p[1]; }
+    const dx = x - this.focus[0], dz = z - this.focus[1];
+    return dx * dx + dz * dz < r * r;
   }
   /** scene position (x, z) of a place: home / poi / house / park; null for outside the area */
   private posOf(a: Agent, w: Where): [number, number] | null {
@@ -639,10 +652,10 @@ export class Agents {
       if (!this.spare()) return;
       const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
       const t = a.travel!;
-      if (!this.inZone(this.travelPos(t, now), r - 60)) continue;
+      if (now < a.retry) continue;
       const k = (now - t.t0) / Math.max(1, t.t1 - t.t0);
       if (k >= 1) continue;
-      if (now < a.retry) continue;
+      if (!this.travelInZone(t, now, r - 60)) continue;
       const t0 = performance.now();
       const ok = this.detail(a, Math.max(0, k));
       this.promoStats.ms += performance.now() - t0;
