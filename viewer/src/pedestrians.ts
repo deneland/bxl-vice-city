@@ -86,15 +86,51 @@ export class Pedestrians {
   onArrive: ((agent: unknown) => void) | null = null;
 
   constructor(net: RoadNetwork, vs: number, material: THREE.Material, private traffic: Traffic | null, capacity = 1500) {
+    this.net = net; this.vs = vs;
+    // --- mesh: instanced people with per-instance colours and walk phase ---
+    const g = personGeometry();
+    // per person: shirt, skin, trousers colours (one interleaved buffer, static) and walk phase + heading
+    // (one buffer, updated every frame); WebGPU allows only 8 vertex buffers per draw
+    const look = new Float32Array(capacity * 9);
+    const c = new THREE.Color();
+    for (let i = 0; i < capacity; i++) {
+      c.set(SHIRTS[i % SHIRTS.length]); look.set([c.r, c.g, c.b], i * 9);
+      c.set(SKIN[(i * 7) % SKIN.length]); look.set([c.r, c.g, c.b], i * 9 + 3);
+      c.set(TROUSERS[(i * 3) % TROUSERS.length]); look.set([c.r, c.g, c.b], i * 9 + 6);
+    }
+    const lb = new THREE.InstancedInterleavedBuffer(look, 9);
+    g.setAttribute('shirt', new THREE.InterleavedBufferAttribute(lb, 3, 0));
+    g.setAttribute('skin', new THREE.InterleavedBufferAttribute(lb, 3, 3));
+    g.setAttribute('pants', new THREE.InterleavedBufferAttribute(lb, 3, 6));
+    this.walk = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
+    this.walk.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('walk', this.walk);
+    this.mesh = new THREE.InstancedMesh(g, material, capacity);
+    this.mesh.frustumCulled = false;
+    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = capacity - 1; i >= 0; i--) { this.mesh.setMatrixAt(i, zero); this.free.push(i); }
+  }
+
+  private net: RoadNetwork; private vs: number;
+  /** build the walking network (pavements, corners, crossings, footpaths) in steps, a frame in between each
+   *  (on a slow CPU the whole commune takes ~0.5 s: one task that long is a visible freeze) */
+  async build(nextFrame: () => Promise<void>) {
+    for (const _ of this.graph()) await nextFrame();
+  }
+
+  private *graph(): Generator<void> {
+    const net = this.net, vs = this.vs;
     // --- pavements: both sides of every road edge, trimmed back from the intersections ---
     let vid = 0;
     const end = new Map<string, number>();        // `${edge}:${side}:${0 start|1 end}` -> graph vertex
     const vtx = (k: string) => { if (!end.has(k)) end.set(k, vid++); return end.get(k)!; };
     const sides = new Map<string, Seg>();
-    net.edges.forEach((e, ei) => {
-      if (e[2] !== KIND.road) return;
+    for (let ei = 0; ei < net.edges.length; ei++) {
+      const e = net.edges[ei];
+      if (ei % 300 === 299) yield;
+      if (e[2] !== KIND.road) continue;
       const raw = e[6], n = raw.length / 3;
-      if (n < 2) return;
+      if (n < 2) continue;
       const p = Array.from({ length: n }, (_, i) => [raw[i * 3] * vs, raw[i * 3 + 2] * vs, -raw[i * 3 + 1] * vs]);
       const pav = e[10] ?? [0, 0];
       for (const side of [0, 1]) {   // 0 left, 1 right of the edge direction
@@ -121,7 +157,8 @@ export class Pedestrians {
         this.segs.push(seg);
         sides.set(`${ei}:${side}`, seg);
       }
-    });
+    }
+    yield;
     // --- intersections: corner links between neighbouring streets, crossings over each street ---
     const inc = new Map<number, { ei: number; atStart: boolean; ang: number }[]>();
     net.edges.forEach((e, ei) => {
@@ -158,6 +195,7 @@ export class Pedestrians {
         if (l && r && l.p.distanceTo(r.p) < 40) link(l.v, r.v, l.p, r.p, A.ei * XK + node);
       }
     }
+    yield;
     // --- footpaths (parks, squares): their own network, linked to the pavements where they end near one ---
     if (net.paths?.length) {
       const fv = new Map<number, number>();
@@ -176,7 +214,9 @@ export class Pedestrians {
       const pave: { seg: Seg; s: number; x: number; y: number; z: number }[] = [];
       const tmp = new THREE.Vector3();
       const PC = 15, paveGrid = new Map<string, typeof pave>();   // (spatial index: a commune has ~300k points)
-      for (const seg of this.segs) if (seg.cross === null && seg.pts.length > 6)
+      let nY = 0;
+      for (const seg of this.segs) if (seg.cross === null && seg.pts.length > 6) {
+        if (++nY % 1500 === 0) yield;
         for (let s = 0.5; s < seg.len - 0.5; s += 2) {
           at(seg, s, tmp);
           const q = { seg, s, x: tmp.x, y: tmp.y, z: tmp.z }, key = `${Math.floor(q.x / PC)},${Math.floor(q.z / PC)}`;
@@ -184,8 +224,10 @@ export class Pedestrians {
           if (!paveGrid.has(key)) paveGrid.set(key, []);
           paveGrid.get(key)!.push(q);
         }
+      }
       const splits = new Map<Seg, { s: number; v: number }[]>();
       for (const seg of paths) {
+        if (++nY % 1500 === 0) yield;
         for (const [v, s] of [[seg.a, 0], [seg.b, seg.len]] as const) {
           if ((deg.get(v) ?? 0) > 1) continue;   // only dangling ends
           at(seg, s, tmp);
@@ -217,7 +259,10 @@ export class Pedestrians {
         }
       }
     }
+    yield;
+    let nA = 0;
     for (const seg of this.segs) {
+      if (++nA % 3000 === 0) yield;
       for (const [v, fwd] of [[seg.a, true], [seg.b, false]] as const) {
         if (!this.adj.has(v)) this.adj.set(v, []);
         this.adj.get(v)!.push({ seg, fwd });
@@ -231,30 +276,8 @@ export class Pedestrians {
         this.grid.get(key)!.push({ seg, s, x: tmp.x, z: tmp.z });
       }
     }
-    traffic?.setCrossings((edge, node) => (this.busy.get(edge * XK + node) ?? 0) > 0);
+    this.traffic?.setCrossings((edge, node) => (this.busy.get(edge * XK + node) ?? 0) > 0);
 
-    // --- mesh: instanced people with per-instance colours and walk phase ---
-    const g = personGeometry();
-    // per person: shirt, skin, trousers colours (one interleaved buffer, static) and walk phase + heading
-    // (one buffer, updated every frame); WebGPU allows only 8 vertex buffers per draw
-    const look = new Float32Array(capacity * 9);
-    const c = new THREE.Color();
-    for (let i = 0; i < capacity; i++) {
-      c.set(SHIRTS[i % SHIRTS.length]); look.set([c.r, c.g, c.b], i * 9);
-      c.set(SKIN[(i * 7) % SKIN.length]); look.set([c.r, c.g, c.b], i * 9 + 3);
-      c.set(TROUSERS[(i * 3) % TROUSERS.length]); look.set([c.r, c.g, c.b], i * 9 + 6);
-    }
-    const lb = new THREE.InstancedInterleavedBuffer(look, 9);
-    g.setAttribute('shirt', new THREE.InterleavedBufferAttribute(lb, 3, 0));
-    g.setAttribute('skin', new THREE.InterleavedBufferAttribute(lb, 3, 3));
-    g.setAttribute('pants', new THREE.InterleavedBufferAttribute(lb, 3, 6));
-    this.walk = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
-    this.walk.setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute('walk', this.walk);
-    this.mesh = new THREE.InstancedMesh(g, material, capacity);
-    this.mesh.frustumCulled = false;
-    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
-    for (let i = capacity - 1; i >= 0; i--) { this.mesh.setMatrixAt(i, zero); this.free.push(i); }
   }
 
   get walking() { return this.walkers.length; }

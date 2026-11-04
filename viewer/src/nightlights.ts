@@ -50,29 +50,38 @@ export async function loadLamps(url: string, world: THREE.Object3D, vs: number, 
   const r = await fetch(url);
   if (!r.ok) return null;
   const lamps: [number, number, number, number][] = (await r.json()).lamps;
-  const W = Math.round(size[0] * vs), H = Math.round(size[1] * vs);   // 1 m texels
+  // light map: 2 m texels (a pool is 14 m in radius and filtered: 1 m looked the same at 4x the texels and
+  // ~300 MB of temporary arrays for a whole commune); two channels (light, ground height)
+  const T = 2, W = Math.ceil((size[0] * vs) / T), H = Math.ceil((size[1] * vs) / T);
   const light = new Float32Array(W * H), gsum = new Float32Array(W * H);
+  const R = POOL / T;
   for (const [x, y, zg] of lamps) {
-    const cx = x * vs, cy = y * vs;
-    for (let j = Math.max(0, Math.floor(cy - POOL)); j <= Math.min(H - 1, Math.ceil(cy + POOL)); j++)
-      for (let i = Math.max(0, Math.floor(cx - POOL)); i <= Math.min(W - 1, Math.ceil(cx + POOL)); i++) {
-        const d2 = ((i + 0.5 - cx) ** 2 + (j + 0.5 - cy) ** 2) / (POOL * POOL);
+    const cx = (x * vs) / T, cy = (y * vs) / T;
+    const j0 = Math.max(0, Math.floor(cy - R)), j1 = Math.min(H - 1, Math.ceil(cy + R));
+    const i0 = Math.max(0, Math.floor(cx - R)), i1 = Math.min(W - 1, Math.ceil(cx + R));
+    for (let j = j0; j <= j1; j++) {
+      const dy = (j + 0.5 - cy) / R, row = j * W;
+      for (let i = i0; i <= i1; i++) {
+        const dx = (i + 0.5 - cx) / R, d2 = dx * dx + dy * dy;
         if (d2 >= 1) continue;
-        const w = (1 - d2) ** 2;
-        light[j * W + i] += w;
-        gsum[j * W + i] += w * zg;
+        const w = (1 - d2) * (1 - d2);
+        light[row + i] += w;
+        gsum[row + i] += w * zg;
       }
+    }
   }
-  const data = new Uint8Array(W * H * 4);
+  const data = new Uint8Array(W * H * 2);
   for (let k = 0; k < W * H; k++) {
-    data[k * 4] = Math.min(255, light[k] * 255);
-    data[k * 4 + 1] = light[k] > 0 ? Math.round(gsum[k] / light[k]) : 0;
+    const l = light[k];
+    data[k * 2] = l >= 1 ? 255 : l * 255;
+    data[k * 2 + 1] = l > 0 ? Math.round(gsum[k] / l) : 0;
   }
-  const tex = new THREE.DataTexture(data, W, H);
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGFormat, THREE.UnsignedByteType);
   tex.magFilter = tex.minFilter = THREE.LinearFilter;
+  tex.unpackAlignment = 2;
   tex.needsUpdate = true;
   lampMap.value = tex;
-  gridSize.value.set(W, H);
+  gridSize.value.set(W * T, H * T);   // metres covered
 
   // lamp heads: one camera-facing quad per lamp, additive glow
   const g = new THREE.InstancedBufferGeometry();

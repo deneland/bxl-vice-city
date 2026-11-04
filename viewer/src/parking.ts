@@ -35,17 +35,27 @@ export class Parking {
     }
   }
 
-  /** nearest free place within max metres of (x, z), or -1 */
+  /** nearest free place within max metres of (x, z), or -1. Rings of cells outward from the nearest: stops
+   *  as soon as no cell further out can hold a nearer place (kerbs are full: most places are taken) */
   nearestFree(x: number, z: number, max = 150) {
-    const C = Parking.CELL, r = Math.ceil(max / C), cx = Math.floor(x / C), cz = Math.floor(z / C);
+    const C = Parking.CELL, R = Math.ceil(max / C), cx = Math.floor(x / C), cz = Math.floor(z / C);
     let best = -1, bd = max * max;
-    for (let i = cx - r; i <= cx + r; i++)
-      for (let j = cz - r; j <= cz + r; j++)
-        for (const k of this.grid.get(Parking.key(i, j)) ?? []) {
-          if (this.owner[k] !== null) continue;
-          const d = (this.x[k] - x) ** 2 + (this.z[k] - z) ** 2;
-          if (d < bd) { bd = d; best = k; }
+    for (let r = 0; r <= R; r++) {
+      // every place in ring r is at least (r - 1) cells away
+      const near = Math.max(0, r - 1) * C;
+      if (near * near >= bd) break;
+      for (let i = cx - r; i <= cx + r; i++)
+        for (let j = cz - r; j <= cz + r; j++) {
+          if (Math.max(Math.abs(i - cx), Math.abs(j - cz)) !== r) continue;   // (ring only)
+          const cell = this.grid.get(Parking.key(i, j));
+          if (!cell) continue;
+          for (const k of cell) {
+            if (this.owner[k] !== null) continue;
+            const d = (this.x[k] - x) ** 2 + (this.z[k] - z) ** 2;
+            if (d < bd) { bd = d; best = k; }
+          }
         }
+    }
     return best;
   }
   /** every place within r metres of (x, z), with who stands there (null: free) */

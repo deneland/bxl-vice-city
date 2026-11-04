@@ -201,15 +201,22 @@ async function main() {
   let clockBase = 0, clockAt = performance.now();
   const agentTime = () => Math.min(24 * 3600 - 1, clockBase + (performance.now() - clockAt) / 1000);
   let trafficOn = false;
+  const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+  let buildingTraffic = false;   // (set-up awaits frames: a second T press must not start another)
   const setTraffic = async (on: boolean) => {
     trafficOn = on;
-    if (on && !traffic) {
-      const n = await network;
+    if (on && !traffic && !buildingTraffic) {
+      buildingTraffic = true;
+      // all data files at once (they used to be fetched one after another)
+      const json = (u: string) => fetch(u).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const [n, palette, tt, places, pk] = await Promise.all([network,
+        json(`vehicles/${ROI}.json`),    // car paint colours measured on the parked cars in the LiDAR (vehicles.py)
+        json(`transit/${ROI}.json`),     // STIB lines from the timetable (transit.py); without it trams wander
+        json(`places/${ROI}.json`),      // homes and destinations of the people (places.py)
+        json(`parking/${ROI}.json`)]);   // kerbside parking places (parking.py)
       if (!n) { trafficOn = false; return; }
-      // car paint colours measured on the parked cars in the LiDAR (pipeline vehicles.py)
-      const palette = await fetch(`vehicles/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      // STIB lines from the timetable (pipeline transit.py); without it, trams wander the tracks
-      const tt = await fetch(`transit/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      // (a frame between the big set-up steps: none of them blocks for long on a slow CPU)
+      await nextFrame();
       traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: tt ? 0 : 12, train: 3 },
         deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
         (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
@@ -217,17 +224,16 @@ async function main() {
       if (tt) transit = new Transit(tt, traffic, VS);
       traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
       fx.add(traffic.group, traffic.lights);
-      // the people driving them (places from OSM, pipeline places.py)
-      const places = await fetch(`places/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      await nextFrame();
       // pedestrians on the pavements (both sides of every street), crossing at intersections
       peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial((w) => lampLightAt(w, 0.8).mul(night)), traffic);
       peds.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
+      await peds.build(nextFrame);
       fx.add(peds.mesh);
       if (roads) roads.add(peds.overlay());
       // population in proportion to the homes (the first 1.5 km region: 5224 homes, 8000 drivers)
       const k = places ? places.homes.length / 5224 : 1;
-      // parking places: where the LiDAR saw parked cars in 2021 (pipeline parking.py)
-      const pk = await fetch(`parking/${ROI}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      await nextFrame();
       const parking = pk ? new Parking(pk, VS) : null;
       if (places) agents = new Agents(places, traffic, VS, Number(params.get('agents') ?? Math.round(8000 * k)), peds,
         Number(params.get('walkers') ?? Math.round(10000 * k)), Number(params.get('cyclists') ?? Math.round(1500 * k)), parking);
@@ -242,7 +248,6 @@ async function main() {
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
     dirty = true;
   };
-  if (params.get('traffic') !== '0') setTraffic(true);
 
   // --- time of day + weather: live over Schaerbeek, or chosen with the slider ---------
   const timeInput = document.getElementById('time') as HTMLInputElement;
@@ -331,6 +336,9 @@ async function main() {
     });
     setTimeout(check, 50);
   });
+  // traffic, people and their day plans after the first full view of the city: the city comes first
+  // (they competed for the main thread), people and cars appear a moment later
+  if (params.get('traffic') !== '0') ready.then(() => setTraffic(true));
 
   // --- CPU voxel access, walking, picking ---------------------------------
   const vox = new Voxels(`tiles/${ROI}`, CH, L0, world, lod.query);

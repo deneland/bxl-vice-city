@@ -17,7 +17,7 @@ export class Transit {
   private last = -1;
 
   constructor(private data: TransitData, private traffic: Traffic, private vs: number) {
-    this.warm();
+    setTimeout(() => this.warm(), 8000);   // (after the start-up work: it is only needed for later runs)
   }
 
   /** compute the routes between consecutive stops of every run ahead of time, in idle time, so starting a

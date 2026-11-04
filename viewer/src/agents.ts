@@ -216,14 +216,23 @@ export class Agents {
     if (!pool) {
       const h = [hc[0] * 50 + 25, hc[1] * 50 + 25];
       // candidates from the cells around (a grid per category set) instead of every place
-      const grid = this.gridOf(cats), C = Agents.POI_CELL, r = Math.ceil(max / this.vs / C);
+      // rings of cells outward; stop once the 6 nearest are closer than anything further out can be
+      const grid = this.gridOf(cats), C = Agents.POI_CELL, Cm = C * this.vs, R = Math.ceil(max / Cm);
       const cx = Math.floor(h[0] / C), cy = Math.floor(h[1] / C), found: { i: number; d: number }[] = [];
-      for (let gx = cx - r; gx <= cx + r; gx++)
-        for (let gy = cy - r; gy <= cy + r; gy++)
-          for (const i of grid.get(gx * 65536 + gy) ?? []) {
-            const d = Math.hypot(this.places.pois[i][0] - h[0], this.places.pois[i][1] - h[1]) * this.vs;
-            if (d < max) found.push({ i, d });
+      for (let r = 0; r <= R; r++) {
+        for (let gx = cx - r; gx <= cx + r; gx++)
+          for (let gy = cy - r; gy <= cy + r; gy++) {
+            if (Math.max(Math.abs(gx - cx), Math.abs(gy - cy)) !== r) continue;
+            for (const i of grid.get(gx * 65536 + gy) ?? []) {
+              const d = Math.hypot(this.places.pois[i][0] - h[0], this.places.pois[i][1] - h[1]) * this.vs;
+              if (d < max) found.push({ i, d });
+            }
           }
+        if (found.length >= 6) {
+          found.sort((x, y) => x.d - y.d);
+          if (found[5].d <= r * Cm) break;   // ring r + 1 is at least r cells away
+        }
+      }
       pool = found.sort((x, y) => x.d - y.d).slice(0, 6).map((x) => x.i);
       this.nearCache.set(key, pool);
     }
@@ -676,17 +685,23 @@ export class Agents {
   private parkedAt: [number, number] | null = null;   // focus at the last parked-car refresh
   private parkedT = 0; private parkedMore = false;
   promoStats = { ok: 0, fail: 0, ms: 0 };   // (diagnostics)
+  private promoteAt = 0; private promoteBacklog = true;
 
   /** timeline trips near the focus get a vehicle / walker (as far as the frame budget allows) */
   private promote(now: number) {
+    // every frame while trips wait for the budget, else 4x a second (the scan covers every timeline trip)
+    const t = performance.now();
+    if (!this.promoteBacklog && t - this.promoteAt < 250) return;
+    this.promoteAt = t;
+    this.promoteBacklog = false;
     for (const a of this.travelling) {
-      if (!this.spare()) return;
       const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
       const t = a.travel!;
       if (now < a.retry) continue;
       const k = (now - t.t0) / Math.max(1, t.t1 - t.t0);
       if (k >= 1) continue;
       if (!this.travelInZone(t, now, r - 60)) continue;
+      if (!this.spare()) { this.promoteBacklog = true; return; }   // (the clock only checked for real candidates)
       const t0 = performance.now();
       const ok = this.detail(a, Math.max(0, k));
       this.promoStats.ms += performance.now() - t0;
