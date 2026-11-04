@@ -85,14 +85,14 @@ class Telemetry {
     post({ type: 'error', session: this.session, t: this.now(), kind, message: message.slice(0, 4000) });
   }
 
-  // per tag: frames that had it, and slow frames (> 20 ms) that had it
+  // per tag: frames that had it, and missed frames (> 28 ms) that had it
   private tagAll: Record<string, number> = {};
   private tagSlow: Record<string, number> = {};
   private slowN = 0; private allN = 0;
   /** the interval measured now belongs to the previous frame's work: pass that frame's tags */
   tags(interval: number, tags: FrameTags) {
     if (!TELEMETRY) return;
-    const slow = interval > 20;
+    const slow = interval > 28;   // a missed refresh at 60 Hz (shorter ones are callback jitter)
     this.allN++; if (slow) this.slowN++;
     for (const [k, on] of Object.entries(tags)) if (on) {
       this.tagAll[k] = (this.tagAll[k] ?? 0) + 1;
@@ -129,7 +129,7 @@ class Telemetry {
       gpu: stats(this.gpu),
       longFrames: { over20: intervals.filter((x) => x > 20).length, over33: intervals.filter((x) => x > 33).length,
         over50: intervals.filter((x) => x > 50).length },
-      // share of frames with each tag, among all frames and among slow ones (> 20 ms)
+      // share of frames with each tag, among all frames and among missed ones (> 28 ms)
       slowTags: this.allN ? { frames: this.allN, slow: this.slowN, all: Object.fromEntries(Object.entries(this.tagAll).map(([k, v]) => [k, +(v / this.allN).toFixed(2)])),
         inSlow: this.slowN ? Object.fromEntries(Object.entries(this.tagSlow).map(([k, v]) => [k, +(v / this.slowN).toFixed(2)])) : {} } : undefined,
       drawCalls: stats(f.map((x) => x.drawCalls))?.avg,

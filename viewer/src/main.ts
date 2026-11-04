@@ -37,6 +37,7 @@ const SHADOWS = params.get('shadows') !== '0';   // ?shadows=0 to turn off
 const CONTINUOUS = params.get('continuous') === '1' || params.get('continuous') === 'city';
 const CITY_ALWAYS = params.get('continuous') === 'city';
 const PROF = params.get('prof') === '1';   // per-section CPU times in the HUD
+const MISSED = 28;   // ms: a frame interval this long is a missed refresh at 60 Hz (not just callback jitter)
 const GPU_TIMING = params.get('gpu') !== '0' && (TELEMETRY || params.get('gpu') === '1');
 const SKY = new THREE.Color(0xbcd3e6);
 const LAT = 50.866, LON = 4.375; // Schaerbeek
@@ -452,7 +453,7 @@ async function main() {
   let lowered: { from: number; slow: number } | null = null, noHelpUntil = 0;
   const adaptResolution = (interval: number, moving: boolean, now: number, cpu: number) => {
     if (!DYNRES) return;
-    if (moving) { resAcc += interval; resCpu += cpu; resN++; if (interval > 20) resSlow++; }
+    if (moving) { resAcc += interval; resCpu += cpu; resN++; if (interval > MISSED) resSlow++; }
     if (now - resAt < 1000) return;
     resAt = now;
     if (resN < 20) { resAcc = resCpu = resN = resSlow = 0; return; }      // not enough moving frames to judge
@@ -472,16 +473,17 @@ async function main() {
       lowered = null;
       if (!helped) return;
     }
-    // What you notice is missed frames (a 60 Hz display shows a slow frame as a 33 ms stutter), not the
-    // average: a GPU right at the edge averages 17 ms while one frame in five skips. So: more than 12 % of
-    // moving frames over 20 ms, while the CPU is not what is slow -> 10 % fewer pixels per side.
-    if ((slow > 0.12 || avg > 22) && pixelRatio > min && !busy && cpuAvg < avg * 0.6 && now > noHelpUntil) {
+    // What you notice is missed frames (a 60 Hz display shows one as a 33 ms stutter), not the average.
+    // (Frames of 20-25 ms followed by shorter ones are callback jitter, not misses: Firefox on the Intel test
+    // laptop shows ~25 % of those while missing only ~2 %.) More than 8 % missed while moving, CPU not the
+    // bottleneck -> 10 % fewer pixels per side.
+    if ((slow > 0.08 || avg > 22) && pixelRatio > min && !busy && cpuAvg < avg * 0.6 && now > noHelpUntil) {
       lowered = { from: pixelRatio, slow };
       pixelRatio = Math.max(min, pixelRatio * 0.9);
       resGood = 0;
       resize();
       telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
-    } else if (slow < 0.03 && avg < 17.5 && pixelRatio < max) {   // smooth for a while: try more pixels
+    } else if (slow < 0.02 && avg < 17.5 && pixelRatio < max) {   // smooth for a while: try more pixels
       if (++resGood >= 3) {
         pixelRatio = Math.min(max, pixelRatio * 1.1); resGood = 0; resize();
         telemetry.event('resolution', { ratio: +pixelRatio.toFixed(2), avg: +avg.toFixed(1), slow: +slow.toFixed(2) });
