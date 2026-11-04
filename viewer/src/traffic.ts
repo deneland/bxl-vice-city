@@ -1,94 +1,237 @@
-// Basic traffic: vehicles drive along the lanes at the speed limit and pick a random next lane at
-// every intersection (no U-turns unless it is a dead end). No interaction: they pass through each other.
-// Cars on roads, trams on tram tracks, trains on rail. All drawn as boxes in one instanced mesh.
+// Traffic: vehicles as simple agents on the lane graph (roads.ts), one lane per direction.
+//
+//  bodies      two axles on the path (rear axle trails the front by the wheelbase), so a car turns
+//              like a car; junction curves are kept wider than the turning circle
+//  speed       Intelligent Driver Model (IDM): accelerate towards the desired speed, keep distance to
+//              whatever is ahead (vehicle, red light, a junction you may not enter yet); the desired
+//              speed drops before curves (comfortable lateral acceleration)
+//  junctions   a vehicle needs a grant to enter a junction curve: no conflicting curve may be in use,
+//              and conflicting vehicles with precedence go first (signals; give way / stop signs; road
+//              rank; straight before turning; otherwise from the right, Belgian priorité de droite);
+//              after waiting long enough a vehicle goes anyway (no gridlock)
+//  lights      OSM traffic signals: intersections cycle two approach groups; pedestrian-crossing
+//              signals turn red now and then; drawn as small coloured boxes at the stop line
+//
+// Trams and trains use the same model on their own tracks (they ignore road signals and do not
+// interact with cars yet). Vehicles choose their next lane at random, ahead of time.
 import * as THREE from 'three/webgpu';
-import { KIND, type Lane } from './roads';
+import { CONTROL, KIND, type Lane } from './roads';
 
-interface Path { pts: Float32Array; cum: Float32Array; length: number }
+const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
+const MIN_RADIUS = 5.5;      // m, car turning circle (path of the car's centre)
+const PLAN = 120;            // m of route planned ahead
+const LOOK = 90;             // m looked ahead for obstacles and curves
+const APPROACH = 30;         // m: signals / signs this close to a lane's end belong to the junction
+const PATIENCE = 6;          // s waiting at a junction before ignoring priority (if nothing is in the way)
+const NO_ROOM_PATIENCE = 8;  // s before entering even without room after the junction
+const STUCK = 45;            // s without moving: the vehicle is taken off and starts again elsewhere
 
-interface Vehicle {
-  lane: Lane;          // current lane, or the lane being entered while on a junction curve
-  path: Path;          // what it is driving on now: a lane or a junction curve
-  prev: Path | null;   // previous path, for the carriages still on it
-  s: number;           // distance of the front along path
-  f: number;           // fraction of the speed limit this driver keeps
-  seg: number;         // number of boxes (carriages)
-  segLen: number; gap: number;
-  size: [number, number]; // height, width
-  first: number;       // first instance index
-}
-
-// length, height, width (m), boxes, gap between boxes
-const TYPES = {
-  car: { len: 4.3, h: 1.5, w: 1.8, seg: 1, gap: 0 },
-  van: { len: 5.6, h: 2.3, w: 2.0, seg: 1, gap: 0 },
-  tram: { len: 10.5, h: 3.3, w: 2.3, seg: 3, gap: 0.4 },
-  train: { len: 24, h: 4.0, w: 2.9, seg: 4, gap: 0.8 },
+interface Kind { len: number; wb: number; over: number; h: number; w: number; seg: number; gap: number;
+  amax: number; b: number; T: number; s0: number }
+// len: body length; wb: wheelbase; over: front overhang (bumper to front axle); seg/gap: carriages
+const TYPES: Record<string, Kind> = {
+  car: { len: 4.3, wb: 2.7, over: 0.85, h: 1.5, w: 1.8, seg: 1, gap: 0, amax: 2.4, b: 3.2, T: 1.2, s0: 2.0 },
+  van: { len: 5.6, wb: 3.5, over: 1.0, h: 2.3, w: 2.0, seg: 1, gap: 0, amax: 1.7, b: 2.6, T: 1.4, s0: 2.0 },
+  tram: { len: 10.5, wb: 7.5, over: 1.5, h: 3.3, w: 2.3, seg: 3, gap: 0.4, amax: 1.0, b: 1.3, T: 2.0, s0: 3.0 },
+  train: { len: 24, wb: 17, over: 3.5, h: 4.0, w: 2.9, seg: 4, gap: 0.8, amax: 0.6, b: 0.8, T: 3.0, s0: 5.0 },
 };
 const CAR_COLORS = [0xf2f2f2, 0x1b1b1d, 0x7d8288, 0xb9bdc2, 0x22324f, 0x8c1c1c, 0x3a3f45, 0xe8e2d4];
+const LIGHT_COLORS = [new THREE.Color(0x30ff60), new THREE.Color(0xffb000), new THREE.Color(0xff2a1a)];
+const GREEN = 0, AMBER = 1, RED = 2;
 
-/** point (and tangent) at distance s along a path */
-function sample(p: Path, s: number, out: THREE.Vector3, dir?: THREE.Vector3) {
+/** a stretch vehicles drive along: a lane (between its junction trims) or a junction curve */
+interface Path {
+  pts: Float32Array; cum: Float32Array; length: number;
+  vmax: Float32Array;          // curve speed limit at each point
+  speed: number; kind: number;
+  start: number; end: number;  // driven part: lanes from after the junction behind to the stop line
+  occ: Vehicle[];              // vehicles whose front is on this path, sorted by position
+  // lanes
+  lane: Lane | null;
+  next: Map<Path, Path>;       // next lane -> junction curve
+  approach: Approach | null;   // how this lane enters the junction at its end
+  crossings: { s: number; sig: Signal }[];   // pedestrian-crossing lights along the lane
+  // junction curves
+  junction: Junction | null; from: Path | null; to: Path | null; turn: number;   // turn: heading change, rad
+}
+
+interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null }
+interface Junction { occ: Set<Vehicle>; conflicts: Map<Path, Map<Path, boolean>>; signalled: boolean }
+interface Signal { cycle: number; offset: number; phases: [number, number][]; state: number }   // phases: [from, to) green
+
+interface Vehicle {
+  t: Kind; kind: number;
+  route: Path[];               // route[0]: the path the front bumper is on; then planned paths
+  hist: Path[];                // paths behind (for the axles and carriages still on them)
+  s: number; v: number; f: number;   // front bumper position on route[0], speed, share of the speed limit
+  ag: number;                  // aggressiveness: scales acceleration, braking, cornering; shortens headway
+  grant: Path | null;          // junction curve it may enter
+  inJunction: Path | null;     // junction curve it occupies (until its rear has left it)
+  wait: number;                // s spent waiting for a junction
+  arrive: number;              // when it started approaching its next junction (first come, first served)
+  first: number;               // first instance (box) index
+  stuck: number;               // s without moving
+  block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
+  why?: string;                // debugging: why it may not enter its next junction
+}
+
+const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+
+function sample(p: Path, s: number, out: THREE.Vector3) {
   const { pts, cum } = p;
   s = Math.min(Math.max(s, 0), p.length);
   let lo = 0, hi = cum.length - 1;
   while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; }
-  const seg = cum[hi] - cum[lo], t = seg > 0 ? (s - cum[lo]) / seg : 0;
-  out.set(pts[lo * 3] + (pts[hi * 3] - pts[lo * 3]) * t, pts[lo * 3 + 1] + (pts[hi * 3 + 1] - pts[lo * 3 + 1]) * t,
-    pts[lo * 3 + 2] + (pts[hi * 3 + 2] - pts[lo * 3 + 2]) * t);
-  if (dir) dir.set(pts[hi * 3] - pts[lo * 3], pts[hi * 3 + 1] - pts[lo * 3 + 1], pts[hi * 3 + 2] - pts[lo * 3 + 2]).normalize();
+  const seg = cum[hi] - cum[lo], k = seg > 0 ? (s - cum[lo]) / seg : 0;
+  return out.set(pts[lo * 3] + (pts[hi * 3] - pts[lo * 3]) * k, pts[lo * 3 + 1] + (pts[hi * 3 + 1] - pts[lo * 3 + 1]) * k,
+    pts[lo * 3 + 2] + (pts[hi * 3 + 2] - pts[lo * 3 + 2]) * k);
+}
+
+/** speed limit from curvature alone (100 m/s on straights): heading change over a ±4 m window */
+function curveLimits(pts: Float32Array, cum: Float32Array) {
+  const n = cum.length, out = new Float32Array(n).fill(100);
+  const dir = (i: number, j: number) => Math.atan2(pts[j * 3 + 2] - pts[i * 3 + 2], pts[j * 3] - pts[i * 3]);
+  for (let i = 0; i < n; i++) {
+    let a = i, b = i;
+    while (a > 0 && cum[i] - cum[a] < 4) a--;
+    while (b < n - 1 && cum[b] - cum[i] < 4) b++;
+    if (a === i || b === i) continue;
+    let d = Math.abs(dir(i, b) - dir(a, i));
+    if (d > Math.PI) d = 2 * Math.PI - d;
+    const k = d / Math.max(1, cum[b] - cum[a]);              // 1/m
+    if (k > 1e-4) out[i] = Math.min(100, Math.sqrt(A_LAT / k));
+  }
   return out;
 }
 
-/** smooth curve from the end of one lane to the start of the next (quadratic Bézier) */
-function junction(a: Lane, b: Lane): Path | null {
-  const n = a.pts.length / 3;
-  const p0 = new THREE.Vector3(a.pts[n * 3 - 3], a.pts[n * 3 - 2], a.pts[n * 3 - 1]);
-  const p2 = new THREE.Vector3(b.pts[0], b.pts[1], b.pts[2]);
-  const d = p0.distanceTo(p2);
-  if (d < 0.3) return null;
-  const da = new THREE.Vector3(), db = new THREE.Vector3(), tmp = new THREE.Vector3();
-  sample(a, a.length - 0.1, tmp, da);
-  sample(b, 0.1, tmp, db);
-  const c = p0.clone().addScaledVector(da, d / 2).add(p2.clone().addScaledVector(db, -d / 2)).multiplyScalar(0.5);
-  const N = 8, pts = new Float32Array((N + 1) * 3), cum = new Float32Array(N + 1);
-  const q = new THREE.Vector3(), last = p0.clone();
+function makePath(pts: Float32Array, speed: number, kind: number): Path {
+  const cum = new Float32Array(pts.length / 3);
+  for (let i = 1; i < cum.length; i++)
+    cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
+  const length = cum[cum.length - 1];
+  return { pts, cum, length, vmax: curveLimits(pts, cum), speed, kind, start: 0, end: length, occ: [],
+    lane: null, next: new Map(), approach: null, crossings: [], junction: null, from: null, to: null, turn: 0 };
+}
+
+/** travel direction (x, z) at s */
+function heading(p: Path, s: number) {
+  sample(p, Math.max(0, s - 1), tmp); sample(p, Math.min(p.length, s + 1), tmp2);
+  return new THREE.Vector2(tmp2.x - tmp.x, tmp2.z - tmp.z).normalize();
+}
+
+/** junction curve: cubic Bézier from a's stop line to b's start, tangent to both */
+function makeCurve(a: Path, b: Path): Path {
+  const p0 = sample(a, a.end, new THREE.Vector3()), p3 = sample(b, b.start, new THREE.Vector3());
+  const da = heading(a, a.end), db = heading(b, b.start);
+  const chord = p0.distanceTo(p3);
+  // handles at least ~ the turning radius: a car never has to turn tighter than it can
+  const k = Math.max(chord * 0.45, a.kind === KIND.road ? MIN_RADIUS * 0.6 : 1);
+  const p1 = p0.clone().add(new THREE.Vector3(da.x, 0, da.y).multiplyScalar(k));
+  const p2 = p3.clone().sub(new THREE.Vector3(db.x, 0, db.y).multiplyScalar(k));
+  const N = 12, pts = new Float32Array((N + 1) * 3), q = new THREE.Vector3();
   for (let i = 0; i <= N; i++) {
-    const t = i / N;
-    q.set(0, 0, 0).addScaledVector(p0, (1 - t) ** 2).addScaledVector(c, 2 * t * (1 - t)).addScaledVector(p2, t * t);
+    const t = i / N, u = 1 - t;
+    q.set(0, 0, 0).addScaledVector(p0, u * u * u).addScaledVector(p1, 3 * u * u * t).addScaledVector(p2, 3 * u * t * t)
+      .addScaledVector(p3, t * t * t);
     pts.set([q.x, q.y, q.z], i * 3);
-    if (i) cum[i] = cum[i - 1] + q.distanceTo(last);
-    last.copy(q);
   }
-  return { pts, cum, length: cum[N] };
+  const c = makePath(pts, Math.min(a.speed, b.speed), a.kind);
+  c.from = a; c.to = b;
+  c.turn = Math.atan2(da.x * db.y - da.y * db.x, da.dot(db));   // signed heading change
+  return c;
+}
+
+/** do two junction curves cross or come closer than a car width? */
+function conflict(a: Path, b: Path) {
+  if (a.from === b.from) return false;          // same approach: they follow each other
+  if (a.to === b.to) return true;               // merging into the same lane
+  for (let i = 0; i < a.cum.length; i++)
+    for (let j = 0; j < b.cum.length; j++)
+      if (Math.hypot(a.pts[i * 3] - b.pts[j * 3], a.pts[i * 3 + 2] - b.pts[j * 3 + 2]) < 2.2) return true;
+  return false;
+}
+
+function signalState(sig: Signal, t: number) {
+  const tt = (t + sig.offset) % sig.cycle;
+  for (const [g0, g1] of sig.phases) {
+    if (tt >= g0 && tt < g1) return GREEN;
+    if (tt >= g1 && tt < g1 + 3) return AMBER;
+  }
+  return RED;
 }
 
 export class Traffic {
   readonly mesh: THREE.InstancedMesh;
-  private vehicles: Vehicle[] = [];
-  private out = new Map<number, Lane[]>();    // node -> lanes leaving it
+  readonly lights: THREE.InstancedMesh;
+  readonly vehicles: Vehicle[] = [];
+  private paths: Path[] = [];
+  private byNode = new Map<number, Path[]>();     // node -> lanes leaving it
+  private signals: Signal[] = [];
+  private lightAt: { sig: Signal; i: number; state: number }[] = [];
+  private time = Math.random() * 1000;
 
   /** material: lit like the city (deferred.ts litMaterial); instance colours are the paint */
-  constructor(private lanes: Lane[], counts = { car: 400, tram: 12, train: 3 },
+  constructor(lanes: Lane[], counts = { car: 400, tram: 12, train: 3 },
     material: THREE.Material = new THREE.MeshStandardNodeMaterial({ roughness: 0.55, metalness: 0.1 })) {
+    // --- paths: lanes trimmed back from the junctions, so the curves have room to turn ---
+    const incoming = new Map<number, Path[]>();
     for (const l of lanes) {
-      if (!this.out.has(l.from)) this.out.set(l.from, []);
-      this.out.get(l.from)!.push(l);
+      const p = makePath(l.pts, l.speed, l.kind);
+      p.lane = l;
+      const trim = Math.min(l.kind === KIND.road ? 6 : 3, p.length * 0.3);
+      p.start = trim; p.end = p.length - trim;
+      this.paths.push(p);
+      if (!this.byNode.has(l.from)) this.byNode.set(l.from, []);
+      this.byNode.get(l.from)!.push(p);
+      if (!incoming.has(l.to)) incoming.set(l.to, []);
+      incoming.get(l.to)!.push(p);
     }
-    const byKind = (k: number) => lanes.filter((l) => l.kind === k && l.length > 5);
-    const plan: [keyof typeof TYPES, Lane[], number][] = [
+    // --- junctions, approaches, signals ---
+    for (const ins of incoming.values()) {
+      const j: Junction = { occ: new Set(), conflicts: new Map(), signalled: false };
+      for (const p of ins) {
+        const near = p.lane!.controls.filter((c) => c.s > p.length - APPROACH);
+        if (p.kind === KIND.road && near.some((c) => c.code === CONTROL.signals)) j.signalled = true;
+        p.approach = { junction: j, rank: p.lane!.rank, dir: heading(p, p.end), signal: null,
+          yields: near.some((c) => c.code === CONTROL.giveWay || c.code === CONTROL.stop) };
+        // signals further from the junction: pedestrian crossings
+        if (p.kind === KIND.road)
+          for (const c of p.lane!.controls)
+            if (c.code === CONTROL.signals && c.s <= p.length - APPROACH && c.s > p.start + 5) {
+              const g = 35 + Math.random() * 35;
+              const sig: Signal = { cycle: g + 15, offset: Math.random() * 100, phases: [[0, g]], state: GREEN };
+              this.signals.push(sig);
+              p.crossings.push({ s: c.s, sig });
+            }
+      }
+      if (!j.signalled) continue;
+      // two groups of approaches by axis: green for one, then the other (3 s amber, 2 s all red)
+      const roads = ins.filter((p) => p.kind === KIND.road);
+      const ref = roads[0].approach!.dir;
+      const g0 = 18 + Math.random() * 8, g1 = 15 + Math.random() * 8, cycle = g0 + g1 + 10, offset = Math.random() * 60;
+      const groups: Signal[] = [
+        { cycle, offset, phases: [[0, g0]], state: GREEN },
+        { cycle, offset, phases: [[g0 + 5, g0 + 5 + g1]], state: RED },
+      ];
+      this.signals.push(...groups);
+      for (const p of roads) p.approach!.signal = groups[Math.abs(p.approach!.dir.dot(ref)) > 0.6 ? 0 : 1];
+    }
+    // --- vehicles ---
+    const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
+    const plan: [string, Path[], number][] = [
       ['car', byKind(KIND.road), counts.car], ['tram', byKind(KIND.tram), counts.tram], ['train', byKind(KIND.rail), counts.train]];
     let instances = 0;
     for (const [type, pool, n] of plan) {
       if (!pool.length) continue;
-      const total = pool.reduce((s, l) => s + l.length, 0);
       for (let i = 0; i < n; i++) {
-        // random lane, weighted by length, random spot on it
-        let r = Math.random() * total, lane = pool[0];
-        for (const l of pool) { r -= l.length; if (r <= 0) { lane = l; break; } }
         const t = type === 'car' && Math.random() < 0.12 ? TYPES.van : TYPES[type];
-        this.vehicles.push({ lane, path: lane, prev: null, s: Math.random() * lane.length, f: 0.75 + 0.25 * Math.random(),
-          seg: t.seg, segLen: t.len, gap: t.gap, size: [t.h, t.w], first: instances });
+                // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
+        const ag = type === 'car' ? 0.75 + 0.65 * Math.random() ** 1.5 : 1;
+        const v: Vehicle = { t, kind: pool[0].kind, route: [], hist: [], s: 0, v: 0, ag,
+          f: type === 'car' ? 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() : 0.95,
+          grant: null, inJunction: null, wait: 0, arrive: 0, first: instances, stuck: 0 };
+        this.place(v, pool);
+        this.vehicles.push(v);
         instances += t.seg;
       }
     }
@@ -96,56 +239,270 @@ export class Traffic {
     this.mesh.frustumCulled = false;
     const c = new THREE.Color();
     for (const v of this.vehicles) {
-      const kind = v.lane.kind;
-      c.set(kind === KIND.road ? CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)] : kind === KIND.tram ? 0xd9dad4 : 0x4a5a8c);
-      for (let k = 0; k < v.seg; k++) this.mesh.setColorAt(v.first + k, c);
+      c.set(v.kind === KIND.road ? CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)] : v.kind === KIND.tram ? 0xd9dad4 : 0x4a5a8c);
+      for (let k = 0; k < v.t.seg; k++) this.mesh.setColorAt(v.first + k, c);
     }
+    // --- signal heads: a small box at the right of each stop line ---
+    const heads: { pos: THREE.Vector3; sig: Signal }[] = [];
+    const right = (p: Path, s: number, d: number) => {
+      const h = heading(p, s);
+      return sample(p, s, new THREE.Vector3()).add(new THREE.Vector3(-h.y * d, 2.6, h.x * d));
+    };
+    for (const p of this.paths) {
+      if (p.approach?.signal) heads.push({ pos: right(p, p.end, 2.2), sig: p.approach.signal });
+      for (const x of p.crossings) heads.push({ pos: right(p, x.s, 2.2), sig: x.sig });
+    }
+    this.lights = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.9, 0.35), new THREE.MeshBasicNodeMaterial(),
+      Math.max(1, heads.length));
+    this.lights.frustumCulled = false;
+    heads.forEach((h, i) => {
+      this.lights.setMatrixAt(i, new THREE.Matrix4().makeTranslation(h.pos.x, h.pos.y, h.pos.z));
+      this.lights.setColorAt(i, LIGHT_COLORS[GREEN]);
+      this.lightAt.push({ sig: h.sig, i, state: GREEN });
+    });
+    this.lights.count = heads.length;
     this.update(0);
   }
 
   get count() { return this.vehicles.length; }
+  get signalCount() { return this.lightAt.length; }
 
-  private nextLane(l: Lane): Lane | null {
-    const opts = this.out.get(l.to)?.filter((n) => n.kind === l.kind) ?? [];
-    const fwd = opts.filter((n) => n.edge !== l.edge);
-    const pick = fwd.length ? fwd : opts;    // dead end: turn around
-    return pick.length ? pick[Math.floor(Math.random() * pick.length)] : null;
+  /** put a vehicle somewhere on a random lane of its kind */
+  private place(v: Vehicle, pool = this.paths.filter((p) => p.kind === v.kind && p.end - p.start > 10)) {
+    const p = pool[Math.floor(Math.random() * pool.length)];
+    v.route = [p]; v.hist = []; v.s = p.start + Math.random() * (p.end - p.start); v.v = p.speed * 0.5;
+    v.grant = null; v.wait = 0;
+    if (v.inJunction) v.inJunction.junction?.occ.delete(v);
+    v.inJunction = null;
+    this.plan(v);
   }
 
-  private pos = new THREE.Vector3(); private dir = new THREE.Vector3();
+  /** extend the route with random next lanes (and the curves joining them) */
+  private plan(v: Vehicle) {
+    let ahead = v.route[0].end - v.s;
+    for (let i = 1; i < v.route.length; i++) ahead += v.route[i].end - v.route[i].start;
+    while (ahead < PLAN) {
+      const last = v.route[v.route.length - 1];
+      if (!last.lane) return;   // (always ends on a lane)
+      const opts = (this.byNode.get(last.lane.to) ?? []).filter((n) => n.kind === last.kind && n.end - n.start > 1);
+      const fwd = opts.filter((n) => n.lane!.edge !== last.lane!.edge);
+      const pick = fwd.length ? fwd : opts;         // dead end: turn around
+      if (!pick.length) return;                     // leaves the network: handled when it gets there
+      const next = pick[Math.floor(Math.random() * pick.length)];
+      let curve = last.next.get(next);
+      if (!curve) {
+        curve = makeCurve(last, next);
+        curve.junction = last.approach?.junction ?? null;
+        last.next.set(next, curve);
+      }
+      v.route.push(curve, next);
+      ahead += curve.length + next.end - next.start;
+    }
+  }
+
+  private conflicts(j: Junction, a: Path, b: Path) {
+    let m = j.conflicts.get(a);
+    if (!m) j.conflicts.set(a, m = new Map());
+    let c = m.get(b);
+    if (c === undefined) { c = conflict(a, b); m.set(b, c); }
+    return c;
+  }
+
+  /** does vehicle y (approaching curve cy) go before x (curve cx)? */
+  private before(y: Vehicle, cy: Path, x: Vehicle, cx: Path) {
+    const ay = cy.from!.approach!, ax = cx.from!.approach!;
+    if (!ax.junction.signalled) {
+      if (ay.yields !== ax.yields) return ax.yields;           // give way / stop signs
+      if (ay.rank !== ax.rank) return ay.rank > ax.rank;       // main road first
+    }
+    const dot = ax.dir.dot(ay.dir);
+    if (dot < -0.7) {                                          // oncoming: straight before turning
+      const ty = Math.abs(cy.turn), tx = Math.abs(cx.turn);
+      if (Math.abs(ty - tx) > 0.3) return ty < tx;
+    } else if (!ax.junction.signalled && dot < 0.7) {
+      // crossing paths: y comes from x's right if y travels towards x's left
+      return ay.dir.x * -ax.dir.y + ay.dir.y * ax.dir.x < 0;
+    }
+    return y.arrive < x.arrive;
+  }
+
+  /** is there room on the lane after junction curve c for vehicle v (counting vehicles still in curves into it)? */
+  private room(v: Vehicle, c: Path) {
+    const out = c.to!, need = v.t.len * v.t.seg + v.t.s0;
+    let free = out.end - out.start;
+    const last = out.occ[0];                       // rearmost vehicle on the exit lane
+    if (last) free = last.s - last.t.len * last.t.seg - out.start;
+    for (const y of c.junction!.occ) if (y !== v && y.inJunction?.to === out) free -= y.t.len * y.t.seg + y.t.s0;
+    return free > need || (last !== undefined && last.v > 2) || (out.end - out.start < need && !last);   // a moving queue makes room
+  }
+
+  private pos = new THREE.Vector3(); private front = new THREE.Vector3(); private rear = new THREE.Vector3();
   private m4 = new THREE.Matrix4(); private q = new THREE.Quaternion(); private e = new THREE.Euler(0, 0, 0, 'YZX');
   private scl = new THREE.Vector3();
 
+  /** distance from the front bumper to the start of route[i] */
+  private distTo(v: Vehicle, i: number) {
+    let d = v.route[0].end - v.s;
+    for (let k = 1; k < i; k++) d += v.route[k].end - v.route[k].start;
+    return d;
+  }
+
   update(dt: number) {
+    this.time += dt;
+    for (const sig of this.signals) sig.state = signalState(sig, this.time);
+    // occupancy per path, sorted by position
+    const used = new Set<Path>();
+    for (const v of this.vehicles) { const p = v.route[0]; if (!used.has(p)) { used.add(p); p.occ.length = 0; } p.occ.push(v); }
+    for (const p of used) if (p.occ.length > 1) p.occ.sort((a, b) => a.s - b.s);
+    this.lastUsed.forEach((p) => { if (!used.has(p)) p.occ.length = 0; });
+    this.lastUsed = used;
+
+    // junction grants: in order of arrival, a vehicle near its next junction curve may enter if nothing
+    // conflicting is in there and no conflicting vehicle with precedence is about to enter
+    const cands: { v: Vehicle; c: Path; d: number; free: boolean }[] = [];
+    const committed: { v: Vehicle; c: Path }[] = [];
     for (const v of this.vehicles) {
-      v.s += v.lane.speed * v.f * dt;
-      while (v.s > v.path.length) {
-        v.s -= v.path.length;
-        if (v.path !== v.lane) { v.prev = v.path; v.path = v.lane; continue; }   // junction curve done
-        const next = this.nextLane(v.lane);
-        if (!next) {   // one-way out of the region: start again somewhere else on the same kind of track
-          const pool = this.lanes.filter((l) => l.kind === v.lane.kind && l.length > 5);
-          v.lane = v.path = pool[Math.floor(Math.random() * pool.length)];
-          v.prev = null; v.s = 0;
-          break;
-        }
-        const j = junction(v.lane, next);
-        v.prev = v.lane;
-        v.lane = next;
-        v.path = j ?? next;
+      const i = v.route.findIndex((p, k) => k > 0 && p.junction);
+      if (i < 0) continue;
+      const d = this.distTo(v, i);
+      // a grant is final once the vehicle can no longer stop before the junction
+      if (v.grant === v.route[i] && d < (v.v * v.v) / (2 * v.t.b * 1.5) + 0.5) { committed.push({ v, c: v.route[i] }); continue; }
+      v.grant = null;
+      if (d < (v.v * v.v) / (2 * v.t.b) + 15) cands.push({ v, c: v.route[i], d, free: true });
+      else { v.arrive = this.time; v.wait = 0; }
+    }
+    // pass 1: hard constraints (light, something conflicting inside, no room after the junction)
+    for (const x of cands) {
+      if (x.v.kind !== KIND.road) continue;
+      const j = x.c.junction!, sig = x.c.from!.approach!.signal;
+      const canStop = x.d > (x.v.v * x.v.v) / (2 * x.v.t.b * 1.5);
+      x.v.why = '';
+      if (sig && !(sig.state === GREEN || (sig.state === AMBER && !canStop))) x.v.why = 'light';
+      else if ([...j.occ].some((y) => y !== x.v && y.inJunction && this.conflicts(j, x.c, y.inJunction))) x.v.why = 'occupied';
+      else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'committed';
+      else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'no room';   // don't block the box
+      x.free = !x.v.why;
+    }
+    // pass 2: among the vehicles that could go, precedence (in order of arrival)
+    cands.sort((a, b) => a.v.arrive - b.v.arrive);
+    for (const x of cands) {
+      if (!x.free) continue;
+      if (x.v.kind !== KIND.road) { x.v.grant = x.c; continue; }   // trams / trains: their own signals, not modelled
+      const j = x.c.junction!, signalled = !!x.c.from!.approach!.signal;
+      let ok = true;
+      for (const y of cands) {
+        if (y === x || !y.free || y.c.junction !== j || !this.conflicts(j, x.c, y.c)) continue;
+        if (y.v.grant === y.c) { ok = false; x.v.why = 'granted other'; break; }   // allowed in before x
+        const patient = !signalled && x.v.wait > PATIENCE && x.v.wait >= y.v.wait;   // breaks priority cycles
+        if (!patient && this.before(y.v, y.c, x.v, x.c)) { ok = false; x.v.why = 'yield'; break; }
       }
-      // boxes: carriage k's centre trails the front by (k + 0.5) lengths (+ gaps)
-      for (let k = 0; k < v.seg; k++) {
-        let s = v.s - (k + 0.5) * v.segLen - k * v.gap, p: Path = v.path;
-        if (s < 0 && v.prev) { s += v.prev.length; p = v.prev; }
-        sample(p, s, this.pos, this.dir);
-        this.e.set(0, Math.atan2(-this.dir.z, this.dir.x), Math.asin(Math.max(-1, Math.min(1, this.dir.y))));
+      if (ok) x.v.grant = x.c;
+    }
+
+    // IDM per vehicle
+    for (const v of this.vehicles) {
+      const t = v.t;
+      // desired speed: the speed limit, lowered ahead of curves so that braking is comfortable
+      let v0 = v.route[0].speed * v.f, gap = Infinity, vLead = 0;
+      v.block = null; v.blockBy = null;
+      let d = -v.s;   // distance from the front bumper to s = 0 of route[i]
+      for (let i = 0; i < v.route.length && d < LOOK; i++) {
+        const p = v.route[i];
+        const from = i === 0 ? v.s : p.start;
+        for (let k = 0; k < p.cum.length; k++) {             // curves ahead
+          const s = p.cum[k];
+          if (s < from || s > p.end) continue;
+          const dd = d + s;
+          if (dd > LOOK) break;
+          // curve limits scale with sqrt(lateral acceleration); brake for them late and firmly
+          const vm = Math.min(p.vmax[k] * Math.sqrt(v.ag), p.speed * v.f);
+          v0 = Math.min(v0, Math.sqrt(vm * vm + 2 * t.b * v.ag * 0.8 * Math.max(0, dd - t.len / 2)));
+        }
+        if (gap === Infinity) {                              // vehicle ahead on this path
+          for (const o of p.occ) {
+            if (o === v || o.s <= from) continue;
+            gap = d + o.s - o.t.len * o.t.seg - (o.t.seg - 1) * o.t.gap; vLead = o.v; v.block = 'leader'; v.blockBy = o;
+            break;
+          }
+        }
+        // stop lines: a junction curve we may not enter yet, crossing lights
+        if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = 'junction:' + (v.why || '?'); v.blockBy = null; }
+        if (v.kind === KIND.road)
+          for (const x of p.crossings)
+            if (x.s > from && x.sig.state !== GREEN && d + x.s < gap
+              && (x.sig.state === RED || d + x.s > (v.v * v.v) / (2 * t.b * 1.5))) { gap = d + x.s; vLead = 0; v.block = 'crossing'; v.blockBy = null; }
+        d += p.end - (v.route[i + 1]?.start ?? 0);
+      }
+      // IDM acceleration
+      const vv = v.v, dv = vv - vLead, amax = t.amax * v.ag, b = t.b * v.ag;
+      const sStar = t.s0 + vv * t.T / v.ag + (vv * dv) / (2 * Math.sqrt(amax * b));
+      let a = amax * (1 - Math.pow(vv / Math.max(v0, 0.1), 4));
+      if (gap < Infinity) a -= amax * Math.pow(Math.max(sStar, 0) / Math.max(gap - 0.5, 0.1), 2);
+      v.v = Math.max(0, vv + Math.max(a, -9) * dt);
+      v.wait = v.v < 0.5 && v.route.some((p, k) => k > 0 && p.junction && v.grant !== p) ? v.wait + dt : 0;
+      v.stuck = v.v < 0.2 ? v.stuck + dt : 0;
+      if (v.stuck > STUCK) { this.place(v); v.stuck = 0; continue; }       // gridlock safety valve
+      v.s += v.v * dt;
+      this.advance(v);
+    }
+
+    // boxes: two axles on the path per box
+    for (const v of this.vehicles) {
+      const t = v.t;
+      for (let k = 0; k < t.seg; k++) {
+        const fb = v.s - k * (t.len + t.gap);              // this box's front bumper
+        this.at(v, fb - t.over, this.front);
+        this.at(v, fb - t.over - t.wb, this.rear);
+        const dir = tmp.subVectors(this.front, this.rear);
+        dir.divideScalar(dir.length() || 1);
+        this.pos.copy(this.front).addScaledVector(dir, t.over - t.len / 2);   // body centre, along the axle line
+        this.e.set(0, Math.atan2(-dir.z, dir.x), Math.asin(Math.max(-1, Math.min(1, dir.y))));
         this.q.setFromEuler(this.e);
-        this.pos.y += v.size[0] / 2;
-        this.m4.compose(this.pos, this.q, this.scl.set(v.segLen, v.size[0], v.size[1]));
+        this.pos.y += t.h / 2;
+        this.m4.compose(this.pos, this.q, this.scl.set(t.len, t.h, t.w));
         this.mesh.setMatrixAt(v.first + k, this.m4);
       }
     }
     this.mesh.instanceMatrix.needsUpdate = true;
+    // signal heads
+    let changed = false;
+    for (const l of this.lightAt)
+      if (l.state !== l.sig.state) { l.state = l.sig.state; this.lights.setColorAt(l.i, LIGHT_COLORS[l.state]); changed = true; }
+    if (changed && this.lights.instanceColor) this.lights.instanceColor.needsUpdate = true;
+  }
+  private lastUsed = new Set<Path>();
+
+  /** move on to the next path when the front passes the end of the current one */
+  private advance(v: Vehicle) {
+    while (v.s > v.route[0].end) {
+      const over = v.s - v.route[0].end;
+      v.hist.unshift(v.route.shift()!);
+      if (v.hist.length > 6) v.hist.pop();
+      if (!v.route.length) { this.place(v); return; }      // left the network: start again elsewhere
+      const p = v.route[0];
+      v.s = p.start + over;
+      if (p.junction) {                                     // entering a junction curve
+        if (v.inJunction) v.inJunction.junction?.occ.delete(v);
+        v.inJunction = p; p.junction.occ.add(v); v.grant = null;
+      }
+      this.plan(v);
+    }
+    // leave the junction once the rear is out of the curve
+    if (v.inJunction && v.route[0] !== v.inJunction) {
+      const behind = v.route[0] === v.inJunction.to ? v.s - v.route[0].start : Infinity;
+      if (behind > v.t.len * v.t.seg) { v.inJunction.junction?.occ.delete(v); v.inJunction = null; }
+    }
+  }
+
+  /** point at distance s along the vehicle's route (s may be behind the current path: history) */
+  private at(v: Vehicle, s: number, out: THREE.Vector3) {
+    let p = v.route[0];
+    let h = 0;
+    while (s < p.start && h < v.hist.length) {
+      const prev = v.hist[h++];
+      s = prev.end - (p.start - s);
+      p = prev;
+    }
+    return sample(p, s, out);
   }
 }

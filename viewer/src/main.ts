@@ -167,9 +167,9 @@ async function main() {
       traffic = new Traffic(n.lanes, { car: Number(params.get('cars') ?? 400), tram: 12, train: 3 },
         deferred.litMaterial((w) => lampLightAt(w, 0.8).mul(night)));   // lit like the city, lamps at night
       traffic.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
-      fx.add(traffic.mesh);
+      fx.add(traffic.mesh, traffic.lights);
     }
-    if (traffic) traffic.mesh.visible = trafficOn;
+    if (traffic) traffic.mesh.visible = traffic.lights.visible = trafficOn;
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
     dirty = true;
   };

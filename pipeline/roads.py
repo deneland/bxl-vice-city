@@ -2,8 +2,9 @@
 (intersections + edges), with heights from the voxel ground -> viewer/public/roads/<roi>.json.
 
 Edges are split at every node shared by two or more ways. Per edge: start/end node, kind, one-way,
-speed (km/h), lanes, and the centreline as voxel coordinates (x east, y north, z = ground surface),
-resampled every SAMPLE m. One-way edges point in the driving direction.
+speed (km/h), lanes, the centreline as voxel coordinates (x east, y north, z = ground surface),
+resampled every SAMPLE m, the road rank (priority) and traffic controls along it. One-way edges point
+in the driving direction. Nodes: x, y, z and 1 if the intersection itself carries traffic signals.
 
 Usage: uv run python roads.py [roi-name] [--refetch]
 Map data © OpenStreetMap contributors, ODbL.
@@ -32,8 +33,14 @@ OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
          "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
 KIND = {"road": 0, "tram": 1, "rail": 2}
+# road class -> rank: who has priority at an unsigned intersection (Belgium: otherwise from the right)
+RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, "unclassified": 2,
+        "residential": 2, "living_street": 1}
+# traffic controls on nodes: code
+SIGNALS, GIVE_WAY, STOP = 1, 2, 3
 DEFAULT_SPEED = {"living_street": 20, "primary": 50, "trunk": 50, "motorway": 90}   # else 30 (Brussels zone 30)
 SAMPLE = 2.0      # m between height samples
+MERGE = 15.0      # m; road intersections joined by a shorter edge are one intersection
 MARGIN = 20.0     # m around the region
 
 to_wgs = Transformer.from_crs(31370, 4326, always_xy=True)
@@ -47,7 +54,7 @@ def fetch():
     hi = (max(c[1] for c in corners), max(c[0] for c in corners))
     bb = f"{lo[0]:.6f},{lo[1]:.6f},{hi[0]:.6f},{hi[1]:.6f}"
     q = (f'[out:json][timeout:120];(way["highway"~"^({"|".join(ROADS)})$"]({bb});'
-         f'way["railway"~"^(tram|rail|light_rail)$"]({bb}););out body;>;out skel qt;')
+         f'way["railway"~"^(tram|rail|light_rail)$"]({bb}););out body;>;out body qt;')
     req = urllib.request.Request("https://overpass-api.de/api/interpreter",
                                  data=urllib.parse.urlencode({"data": q}).encode(),
                                  headers={"User-Agent": "bxl-vice-voxel/0.1"})
@@ -73,9 +80,57 @@ def speed(t):
     return DEFAULT_SPEED.get(t.get("highway", "").replace("_link", ""), 30)
 
 
+def consolidate(edges, node_xy, node_sig, vs):
+    """Merge intersections joined by short road edges (several OSM nodes in one real crossing) into one
+    node at their centroid; drop the short edges; snap the other edges' ends to the merged node."""
+    parent = list(range(len(node_xy)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def length(e):
+        p = np.array(e[6]).reshape(-1, 3)[:, :2] * vs
+        return float(np.hypot(*np.diff(p, axis=0).T).sum())
+
+    for e in edges:
+        if e[2] == KIND["road"] and e[0] != e[1] and length(e) < MERGE:
+            parent[find(e[0])] = find(e[1])
+    groups = {}
+    for i in range(len(node_xy)):
+        groups.setdefault(find(i), []).append(i)
+    new_ix, xy, sig = {}, [], []
+    for members in groups.values():
+        k = len(xy)
+        xy.append(list(np.mean([node_xy[i] for i in members], axis=0)))
+        sig.append(max(node_sig[i] for i in members))
+        for i in members:
+            new_ix[i] = k
+    out = []
+    for e in edges:
+        a, b = new_ix[e[0]], new_ix[e[1]]
+        if a == b and e[2] == KIND["road"] and length(e) < MERGE:
+            continue                                         # inside a merged intersection
+        pts = list(e[6])
+        pts[0:3] = [round(float(c), 1) for c in xy[a]]
+        pts[-3:] = [round(float(c), 1) for c in xy[b]]
+        out.append([a, b, *e[2:6], pts, *e[7:]])
+    print(f"consolidated {len(node_xy)} -> {len(xy)} nodes, {len(edges)} -> {len(out)} edges")
+    return out, xy, sig
+
+
 def build():
     els = json.loads(RAW.read_text())["elements"]
     nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    ntags = {e["id"]: e.get("tags", {}) for e in els if e["type"] == "node"}
+
+    def control(nid):
+        t = ntags.get(nid, {})
+        if t.get("highway") == "traffic_signals" or t.get("crossing") == "traffic_signals":
+            return SIGNALS
+        return {"give_way": GIVE_WAY, "stop": STOP}.get(t.get("highway"), 0)
     ways = [e for e in els if e["type"] == "way" and e["tags"].get("tunnel") not in ("yes", "building_passage")
             and e["tags"].get("access") not in ("no", "private") and e["tags"].get("service") is None]
     use = {}
@@ -102,7 +157,7 @@ def build():
                     zs.append(k.max() + 1)
         return float(np.median(zs)) if zs else np.nan
 
-    node_ix, node_xy = {}, []
+    node_ix, node_xy, node_sig = {}, [], []
     edges, stats = [], {"road": 0, "tram": 0, "rail": 0}
     for w in ways:
         t = w["tags"]
@@ -136,16 +191,31 @@ def build():
                 if nid not in node_ix:
                     node_ix[nid] = len(node_xy)
                     node_xy.append(None)
+                    node_sig.append(1 if control(nid) == SIGNALS else 0)
+            # controls on the nodes between the ends: [m from the edge start, code, direction]
+            # (direction: 1 along the edge, -1 against it, 0 both; OSM's direction tag is relative to the way)
+            ctl = []
+            for i in range(1, len(seg) - 1):
+                c = control(seg[i])
+                if c:
+                    dtag = ntags[seg[i]].get("direction", "")
+                    dr = {"forward": 1, "backward": -1}.get(dtag, 0) * (-1 if ow == "-1" else 1)
+                    ctl.append([round(float(d[i]), 1), c, dr])
             node_xy[node_ix[seg[0]]] = [*p[0], z[0]]
             node_xy[node_ix[seg[-1]]] = [*p[-1], z[-1]]
+            rank = RANK.get(t.get("highway", "").replace("_link", ""), 0)
             edges.append([node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
-                          [round(float(c), 1) for c in np.c_[p, z].ravel()]])
+                          [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl])
             stats[kind] += d[-1]
-    out = {"build": m.man["build"], "nodes": [[round(float(c), 1) for c in xyz] for xyz in node_xy],
-           "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz..."]}
+    edges, node_xy, node_sig = consolidate(edges, node_xy, node_sig, vs)
+    out = {"build": m.man["build"],
+           "nodes": [[*(round(float(c), 1) for c in xyz), sig] for xyz, sig in zip(node_xy, node_sig)],
+           "edges": edges, "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
+                                      "rank", "controls [m, 1 signals|2 give way|3 stop, dir]"]}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":")))
-    print(f"{len(node_xy)} nodes, {len(edges)} edges; road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "
+    nctl = sum(len(e[8]) for e in edges)
+    print(f"{len(node_xy)} nodes ({sum(node_sig)} signalled), {len(edges)} edges ({nctl} controls); road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "
           f"rail {stats['rail'] / 1000:.1f} km -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 
 

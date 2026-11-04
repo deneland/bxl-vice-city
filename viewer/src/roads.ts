@@ -4,9 +4,13 @@
 import * as THREE from 'three/webgpu';
 
 export interface RoadNetwork {
-  nodes: [number, number, number][];                    // voxel coords: x east, y north, z ground surface
-  edges: [number, number, number, number, number, number, number[]][];  // from, to, kind, oneway, km/h, lanes, xyz...
+  nodes: [number, number, number, number][];            // voxel coords: x east, y north, z ground surface; signals
+  // from, to, kind, oneway, km/h, lanes, xyz..., rank, controls [m from start, code, direction]
+  edges: [number, number, number, number, number, number, number[], number, [number, number, number][]][];
 }
+
+/** traffic control codes on edges (pipeline roads.py) */
+export const CONTROL = { signals: 1, giveWay: 2, stop: 3 };
 
 export const KIND = { road: 0, tram: 1, rail: 2 };
 const COLORS = [0xffd400, 0xff3dd0, 0x33d6ff];   // road, tram, rail
@@ -24,6 +28,8 @@ export interface Lane {
   pts: Float32Array;           // x, y, z per point
   cum: Float32Array;           // distance along the lane at each point
   length: number;
+  rank: number;                // road class: priority at unsigned intersections
+  controls: { s: number; code: number }[];   // signals / give way / stop along the lane, in driving direction
 }
 
 export async function loadRoads(url: string): Promise<RoadNetwork | null> {
@@ -59,18 +65,23 @@ function reversed(p: number[]) {
 /** all lanes: forward along each edge, plus backward on two-way edges; roads keep right */
 export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
   const lanes: Lane[] = [];
-  net.edges.forEach(([from, to, kind, oneway, kmh, , raw], edge) => {
+  net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl], edge) => {
     const p: number[] = [];
     for (let i = 0; i < raw.length; i += 3) p.push(...toScene(vs, raw[i], raw[i + 1], raw[i + 2]));
+    let len = 0;
+    for (let i = 3; i < p.length; i += 3) len += Math.hypot(p[i] - p[i - 3], p[i + 2] - p[i - 1]);
     const off = kind === KIND.road && !oneway ? HALF_LANE : 0;   // tracks are mapped one per line: no shift
-    const dirs: [number, number, number[]][] = [[from, to, p]];
-    if (!oneway) dirs.push([to, from, reversed(p)]);
-    for (const [a, b, line] of dirs) {
+    const dirs: [number, number, number[], number][] = [[from, to, p, 1]];
+    if (!oneway) dirs.push([to, from, reversed(p), -1]);
+    for (const [a, b, line, sign] of dirs) {
       const pts = offsetLine(line, off);
       const cum = new Float32Array(pts.length / 3);
       for (let i = 1; i < cum.length; i++)
         cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
-      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length: cum[cum.length - 1] });
+      const length = cum[cum.length - 1];
+      const controls = ctl.filter(([, , dr]) => dr === 0 || dr === sign)
+        .map(([m, code]) => ({ s: (sign > 0 ? m : len - m) * (length / (len || 1)), code })).sort((x, y) => x.s - y.s);
+      lanes.push({ edge, from: a, to: b, kind, speed: kmh / 3.6, pts, cum, length, rank, controls });
     }
   });
   return lanes;

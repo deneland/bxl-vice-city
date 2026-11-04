@@ -106,7 +106,9 @@ export class Deferred {
     const win = warm.mul(select(code.lessThan(windowsLit), 1, 0)).mul(nrm.w).mul(1.4);
     const glow = emi.rgb.add(win).mul(night);
     const fogged = mix(lit.add(glow), this.fogCol, smoothstep(this.fogNear, this.fogFar, dist));
-    const cityCol = select(depth.greaterThanEqual(1), vec3(this.background as any), fogged);
+    // (?dbg=holes: magenta where no geometry was drawn)
+    const bg: any = location.search.includes('dbg=holes') ? vec3(1, 0, 1) : vec3(this.background as any);
+    const cityCol = select(depth.greaterThanEqual(1), bg, fogged);
     // forward layer is premultiplied (cleared to transparent black)
     const f = texture(this.fwd.texture, uv());
     const g = texture(this.glow.texture, uv());

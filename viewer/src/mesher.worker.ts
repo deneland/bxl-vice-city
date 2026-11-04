@@ -13,6 +13,7 @@ export interface MeshResult { id: number; a: Float32Array; c: Uint8Array; faces:
 
 const FLAG_FILL = 1;
 const FLAG_APRON = 2;
+const SKIRT = 8;   // voxels below a column's top that get side faces along the tile edge
 
 // unit vectors per axis
 const E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
@@ -31,6 +32,13 @@ self.onmessage = (ev: MessageEvent<MeshRequest>) => {
     occ[(v[o + 2] * W + v[o + 1]) * W + v[o]] = v[o + 7] & FLAG_FILL ? 2 : 1;
   }
 
+  // top of each column, for the skirts below
+  const top = new Int16Array(W * W).fill(-1);
+  for (let i = 0; i < n; i++) {
+    const o = i * 8, k = v[o + 1] * W + v[o];
+    if (v[o + 2] > top[k]) top[k] = v[o + 2];
+  }
+
   const a = new Float32Array(n * 6 * 2);
   const c = new Uint8Array(n * 6 * 4);
   let f = 0;
@@ -45,7 +53,10 @@ self.onmessage = (ev: MessageEvent<MeshRequest>) => {
       const s = dir & 1 ? -1 : 1;
       const e = E[axis];
       const nx = x + e[0] * s, ny = y + e[1] * s, nzz = z + e[2] * s;
-      if (at(nx, ny, nzz)) continue;
+      // Neighbouring tiles may be drawn at another level of detail, so a face hidden by the
+      // neighbour's voxels (apron) can open a crack: near the top of the column, keep it (skirt).
+      const apron = nx === 0 || ny === 0 || nx === W - 1 || ny === W - 1;
+      if (at(nx, ny, nzz) && !(apron && axis < 2 && z >= top[y * W + x] - SKIRT)) continue;
       if (dir === 5 && (flags & FLAG_FILL || z === 0)) continue; // undersides of solids are never seen
       // ambient occlusion per corner, sampled in the layer in front of the face
       const eu = E[(axis + 1) % 3], ev2 = E[(axis + 2) % 3];
