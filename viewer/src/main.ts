@@ -21,7 +21,9 @@ import { Inspector } from './inspect';
 import { lighting, sunDirection, sunPosition } from './sun';
 import { applyWeather, describe, fetchWeather, Precipitation, presetWeather, type Weather } from './weather';
 import { blurPx, DEPTH_RATIO, focalLength, focusDistance } from './tiltshift';
-import { Deferred, DYNAMIC_SHADOW_LAYER } from './deferred';
+import { Deferred, DYNAMIC_SHADOW_LAYER, beaconTime } from './deferred';
+import { NoiseMap } from './noisemap';
+import { CitySound } from './citySound';
 import { prof } from './prof';
 
 telemetry.start();
@@ -203,6 +205,11 @@ async function main() {
   let agents: Agents | null = null;
   let peds: Pedestrians | null = null;
   let transit: Transit | null = null;
+  // sound and the noise map (both need traffic: built with it)
+  let city: CitySound | null = null;
+  let noise: NoiseMap | null = null;
+  let soundWanted = false, noiseWanted = false;
+  let nextCall = performance.now() + config.sirens * (0.2 + 0.5 * Math.random()) * 1000;   // the first emergency call
   // agent clock: seconds of the day; runs on from the chosen time (live: the Brussels clock)
   let clockBase = 0, clockAt = performance.now();
   const agentTime = () => Math.min(24 * H - 1, clockBase + (performance.now() - clockAt) / 1000);
@@ -250,6 +257,10 @@ async function main() {
           const ag = agents;
           traffic.onDwell = (id) => ag.onDwell(id);
         }
+        noise = new NoiseMap([L0.size[0] * VS, L0.size[1] * VS], () => { dirty = true; });
+        noise.visible = noiseWanted;
+        city = new CitySound(traffic, noise);
+        if (soundWanted) city.setSound(true);
       } catch (e) {   // (whatever failed: traffic stays off, and T can try again)
         console.error('traffic set-up failed', e);
         trafficOn = false;
@@ -259,6 +270,7 @@ async function main() {
     }
     if (traffic) traffic.group.visible = traffic.lights.visible = trafficOn;
     if (peds) peds.mesh.visible = trafficOn;
+    city?.setActive(trafficOn);
     dynShadowDirty = true;   // redraw (or clear) the vehicle shadows once
     dirty = true;
   };
@@ -419,6 +431,26 @@ async function main() {
   };
   setMode(config.labels);
 
+  // --- sound and noise map -------------------------------------------------
+  const soundBtn = document.getElementById('sound') as HTMLButtonElement;
+  const noiseLegend = document.getElementById('noise-legend')!;
+  noiseLegend.innerHTML = NoiseMap.legend();
+  const setSound = (on: boolean) => {
+    soundWanted = on;
+    city?.setSound(on);   // (the audio engine is created here: in a click, as browsers require)
+    soundBtn.textContent = on ? '🔊 sound on' : '🔇 sound off';
+    telemetry.event('sound', { on });
+  };
+  soundBtn.addEventListener('click', () => setSound(!soundWanted));
+  const setNoise = (on: boolean) => {
+    noiseWanted = on;
+    if (noise) noise.visible = on;
+    noiseLegend.style.display = on ? 'block' : 'none';
+    if (on && !trafficOn) setTraffic(true);   // (the map comes from the traffic)
+    dirty = true;
+    telemetry.event('noise-map', { on });
+  };
+
   // --- input ---------------------------------------------------------------
   let snapshotRequested = false;
   window.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -429,6 +461,7 @@ async function main() {
     if (e.key === 'm' || e.key === 'M') setTilt(!tiltOn);
     if (e.key === 'r' || e.key === 'R') setRoads(!roads?.visible);
     if (e.key === 't' || e.key === 'T') setTraffic(!trafficOn);
+    if ((e.key === 'n' || e.key === 'N') && !walk.active) setNoise(!noiseWanted);
     if (e.key === 'Escape') { inspector.clear(); agentView.clear(); }
     if (e.key === 'f' || e.key === 'F') agentView.setFollow(!agentView.isFollowing);
     dirty = true;
@@ -488,7 +521,26 @@ async function main() {
       prof.begin('transit'); transit?.update(now, weekday(day)); prof.end('transit');
       prof.begin('traffic'); traffic.update(Math.min(interval, 100) / 1000, now); prof.end('traffic');
       prof.begin('peds'); peds?.update(Math.min(interval, 100) / 1000); prof.end('peds');
+      // emergency calls: now and then a police car or ambulance passes near where you look
+      if (config.sirens > 0 && performance.now() > nextCall) {
+        if (!traffic.vehicles.some((v) => v.siren)) traffic.spawnEmergency(f.x - fx.position.x, f.z - fx.position.z);
+        nextCall = performance.now() + config.sirens * (0.5 + Math.random()) * 1000;
+      }
+      if (city && noise) {
+        prof.begin('sound');
+        // the ear: walking, where you stand; on the map, a quarter of the way from the orbit point to the
+        // camera (zoomed out, the city goes quiet)
+        const ear = walk.active ? camera.position.clone() : controls.target.clone().lerp(camera.position, 0.25);
+        city.ear.copy(ear).sub(fx.position);
+        camera.getWorldDirection(city.fwd);
+        city.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+        city.update(Math.min(interval, 100) / 1000);
+        noise.setFocus(f.x - fx.position.x, f.z - fx.position.z);
+        noise.update(Math.min(interval, 100) / 1000);
+        prof.end('sound');
+      }
     }
+    beaconTime.value = now / 1000;
     camera.updateMatrixWorld();
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
@@ -642,7 +694,7 @@ async function main() {
   // test hook for the benchmark harness and debugging
   (window as any).__viewer = {
     renderer, scene, cityScene, deferred, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
-    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, get peds() { return peds; }, get transit() { return transit; }, agentTime,
+    setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, get peds() { return peds; }, get transit() { return transit; }, get city() { return city; }, get noise() { return noise; }, setNoise, setSound, agentTime,
     whenIdle: () => lod.whenIdle(), prof,
     info: () => ({ backend, ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),

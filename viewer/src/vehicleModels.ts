@@ -7,10 +7,12 @@ import * as THREE from 'three/webgpu';
 export const VOX = 0.25;
 
 /** voxel materials: 1 paint (per instance); fixed colours; lights (emissive at night) */
-export const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9, skin: 10, jacket: 11, jeans: 12 };
+export const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9, skin: 10, jacket: 11, jeans: 12,
+  blue: 13, hiviz: 14, green: 15, beaconL: 16, beaconR: 17 };
 const FIXED: Record<number, number> = {
   [M.glass]: 0x1c2630, [M.tyre]: 0x141414, [M.trim]: 0x2b2c2e, [M.head]: 0xe8e4d8, [M.tail]: 0x7a1410,
   [M.roof]: 0xd9dad6, [M.stripe]: 0xa47a3c, [M.cab]: 0x3a3d42, [M.skin]: 0xd9a47e, [M.jacket]: 0x2a3140, [M.jeans]: 0x334a6b,
+  [M.blue]: 0x1b3f8f, [M.hiviz]: 0xd4e01c, [M.green]: 0x17803a, [M.beaconL]: 0x1a2e70, [M.beaconR]: 0x1a2e70,
 };
 
 class Grid {
@@ -146,6 +148,24 @@ function carriage(len: number) {
   return g;
 }
 
+/** emergency livery: a band of alternating checks along both sides (two rows below the belt line), and a
+ *  roof bar of blue beacons one voxel above the model (left half / right half flash in turn) */
+function emergency(src: Grid, band: number, a: number, b: number) {
+  const g = new Grid(src.nx * src.vox, (src.ny + 1) * src.vox, src.nz * src.vox, src.vox);
+  g.v.set(src.v);   // (same layout: y is the outermost index, the extra row is on top)
+  for (let x = 0; x < g.nx; x++)
+    for (let y = band; y < band + 2; y++)
+      for (const z of [0, g.nz - 1])
+        if (g.get(x, y, z) === M.paint) g.set(x, y, z, (Math.floor(x / 2) + y) % 2 ? a : b);
+  // roof bar: the highest painted row, middle third of the length
+  let top = src.ny - 1;
+  const mid = Math.floor(g.nx / 2), half = Math.max(2, Math.floor(g.nx / 6));
+  while (top > 0 && !src.get(mid, top, Math.floor(g.nz / 2))) top--;
+  for (let x = mid - half; x < mid + half; x++)
+    for (let z = 1; z < g.nz - 1; z++) g.set(x, top + 1, z, z < g.nz / 2 ? M.beaconL : M.beaconR);
+  return g;
+}
+
 /** fill a box of voxels [x0, x1) × [y0, y1) × [z0, z1) */
 function box(g: Grid, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, m: number) {
   for (let x = x0; x < x1; x++) for (let y = y0; y < y1; y++) for (let z = z0; z < z1; z++) g.set(x, y, z, m);
@@ -225,7 +245,7 @@ function mesh(g: Grid) {
               (corner[2] + e1[2] * a + e2[2] * bb) * VOX - oz);
             nrm.push(dx, dy, dz);
             col.push(c.r, c.g, c.b);
-            mat.push(m === M.paint ? 1 : m === M.head ? 2 : m === M.tail ? 3 : 0);
+            mat.push(m === M.paint ? 1 : m === M.head ? 2 : m === M.tail ? 3 : m === M.beaconL ? 4 : m === M.beaconR ? 5 : 0);
           }
           // winding: front side along the normal
           if (!flip) idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
@@ -278,6 +298,9 @@ export function buildModels() {
     carriage: carriage(24),
     bike: bicycle(), moped: moped(),
   };
+  // emergency vehicles: a police estate (white, blue / yellow checks) and an ambulance van (yellow, green checks)
+  grids.police = emergency(grids.estate, vox(0.9) - 2, M.blue, M.hiviz);
+  grids.ambulance = emergency(van(), vox(1.0) - 2, M.green, M.paint);
   const out: Record<string, { geo: THREE.BufferGeometry; far: THREE.BufferGeometry; len: number; h: number; w: number }> = {};
   for (const [k, g] of Object.entries(grids))
     out[k] = { geo: mesh(g), far: mesh(coarse(g)), len: g.nx * g.vox, h: g.ny * g.vox, w: g.nz * g.vox };

@@ -27,6 +27,9 @@ export const TYPES = {
     sec('tramPanto', 0.8, 4.4), sec('tramMid', 0.8, 4.4), sec('tramRear', 0.8, 4.8)], 0.15, 1.0, 1.3, 2.0, 3.0),
   bike: { ...kind('bike', [sec('bike', 0.25, 1.05)], 0, 1.0, 2.2, 0.9, 1.0), maxV: 6 },        // ~22 km/h
   scooter: { ...kind('scooter', [sec('moped', 0.2, 1.3)], 0, 3.0, 3.5, 1.0, 1.5), maxV: 14 },
+  // emergency vehicles (rare, siren on): quick off the mark
+  police: kind('police', [sec('police', 0.9, 2.8)], 0, 3.0, 3.5, 1.0, 2.0),
+  ambulance: kind('ambulance', [sec('ambulance', 0.9, 3.6)], 0, 2.2, 3.0, 1.2, 2.0),
   train: kind('train', [0, 1, 2, 3].map(() => sec('carriage', 3, 18)), 0.8, 0.6, 0.8, 3.0, 5.0),
 };
 // road vehicle mix
@@ -34,5 +37,6 @@ export const ROAD_MIX: [Kind, number][] = [[TYPES.hatch, 0.27], [TYPES.sedan, 0.
   [TYPES.van, 0.14], [TYPES.bus, 0.05]];
 export const pickKind = () => { let r = Math.random(); for (const [k, w] of ROAD_MIX) { r -= w; if (r <= 0) return k; } return TYPES.hatch; };
 export const STIB_BUS = 0xc9ccd0;
+export const POLICE_WHITE = 0xf1f2ef, AMBULANCE_YELLOW = 0xf0d21a;
 export const VAN_WHITE = 0xeceeee, BUS_COLORS = [0xe9e9e4, 0xd0d3d6, 0x2f5597, 0xb22a2a], TRAM_SILVER = 0xb9bdc0, TRAIN = 0xcfd2d4;
 export const ACCENTS = [0x8c1c1c, 0x1f3f7a, 0x3c6fb0, 0xc9b99a];   // a few real colours the aerial palette misses

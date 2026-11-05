@@ -21,6 +21,10 @@ import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { night, windowsLit } from './nightlights';
 import { BOKEH, focalLength, focusDistance } from './tiltshift';
 import { config } from './config';
+import { noiseLevelAt, noiseOverlay } from './noisemap';
+
+/** seconds, for the emergency beacons' flash pattern (main.ts sets it every frame) */
+export const beaconTime = uniform(0);
 
 /** Less clean: the city's voxels carry photo noise and grime, so models should too. Per-voxel brightness
  *  variation (voxel cell from the model-space position, nudged inside along the normal), darker towards
@@ -121,7 +125,10 @@ export class Deferred {
     const fogged = mix(lit.add(glow), this.fogCol, smoothstep(this.fogNear, this.fogFar, dist));
     // (?dbg=holes: magenta where no geometry was drawn)
     const bg: any = config.debug === 'holes' ? vec3(1, 0, 1) : vec3(this.background as any);
-    const cityCol = select(depth.greaterThanEqual(1), bg, fogged);
+    // noise map (noisemap.ts): the city tinted by the averaged sound level at each point of the ground plan
+    const wpos = world ?? this.camWorld.mul(vec4(getViewPosition(uv(), depth, this.projInv), 1)).xyz;
+    const noisy = noiseOverlay(fogged, noiseLevelAt(wpos));
+    const cityCol = select(depth.greaterThanEqual(1), bg, noisy);
     // forward layer is premultiplied (cleared to transparent black)
     const f = texture(this.fwd.texture, uv());
     const g = texture(this.glow.texture, uv());
@@ -179,7 +186,13 @@ export class Deferred {
     l = l.mul(weathered(0.25, 0.9));
     if (extra) l = l.add(extra(positionWorld));
     const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
-    m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1)).mul(attribute('lights', 'float'))), 1);   // parked: off
+    // lights: 0 parked (off), 1 driving, 2 driving with blue beacons (emergency call)
+    const lights = attribute('lights', 'float');
+    // beacons: a double flash, the left half and right half of the roof bar in turn
+    const flash = (ph: any) => { const f = fract(beaconTime.mul(1.4).add(ph)); return step(f, 0.1).add(step(abs(f.sub(0.2)), 0.05)); };
+    const beacon = select(kind.equal(4), flash(0), select(kind.equal(5), flash(0.5), float(0))).mul(step(1.5, lights));
+    m.colorNode = vec4(alb.mul(l).add(lamp.mul(night.mul(0.9).add(0.1)).mul(min(lights, 1)))
+      .add(vec3(0.08, 0.3, 4.5).mul(beacon)), 1);
     return m;
   }
 

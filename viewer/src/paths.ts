@@ -60,6 +60,7 @@ export interface Vehicle {
   agent: Agent | null;         // cars: who drives (agents.ts); null for trams / trains
   transit?: TransitRun;        // STIB trams and buses: line and stops (transit.ts)
   stuck: number;               // s without moving
+  siren?: boolean;             // emergency vehicle on a call: beacons and siren
   block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
   why?: string;                // debugging: why it may not enter its next junction
 }

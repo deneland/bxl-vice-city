@@ -25,6 +25,8 @@ export const config = {
   roads: q.get('roads') === '1',
   traffic: q.get('traffic') !== '0',
   cars: num('cars', 400),
+  /** emergency vehicles (siren): mean seconds between calls near where you look (?sirens=0: none) */
+  sirens: num('sirens', 240),
   agents: opt('agents'), walkers: opt('walkers'), cyclists: opt('cyclists'),
   /** ?date=YYYY-MM-DD, ?time=hours (not live), ?weather=clear|... */
   date: q.get('date'),

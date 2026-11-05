@@ -29,7 +29,8 @@ import { Fleet } from './fleet';
 import type { Agent } from './agents';
 import { AMBER, GREEN, LIGHT_COLORS, RED, conflict, heading, longHeading, makeCurve, makePath, sample, signalState,
   type Junction, type Path, type Signal, type Spot, type Vehicle } from './paths';
-import { ACCENTS, BUS_COLORS, MODELS, STIB_BUS, TRAIN, TRAM_SILVER, TYPES, VAN_WHITE, pickKind, type Kind } from './vehicleTypes';
+import { ACCENTS, AMBULANCE_YELLOW, BUS_COLORS, MODELS, POLICE_WHITE, STIB_BUS, TRAIN, TRAM_SILVER, TYPES, VAN_WHITE, pickKind,
+  type Kind } from './vehicleTypes';
 
 const PLAN = 120;            // m of route planned ahead
 const LOOK = 90;             // m looked ahead for obstacles and curves
@@ -234,15 +235,17 @@ export class Traffic {
   private carPaint!: () => number;
   /** a STIB vehicle has stopped at stop `id` (transit.ts stop index): people board / alight */
   onDwell: ((id: number) => void) | null = null;
+  /** a STIB vehicle has stopped at a stop ('arrive') / pulls away from it after its dwell ('depart') (sounds) */
+  onTransit: ((v: Vehicle, e: 'arrive' | 'depart') => void) | null = null;
   /** called when a car's trip ends (arrived, left the region, or given up when stuck) */
   onArrive: ((agent: Agent, arrived: boolean) => void) | null = null;
 
   /** a new vehicle with instances for its sections */
-  private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: Agent | null): Vehicle {
+  private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: Agent | null, lights = 1): Vehicle {
     const c = new THREE.Color(paint);
     const v: Vehicle = { t, kind, route: [], hist: [], s: 0, v: 0, ag, f, grant: null, inJunction: null, wait: 0,
       arrive: 0, inst: [], stuck: 0, trip: [], dest: null, agent };
-    for (const x of t.secs) v.inst.push(this.fleet.add(x.model, c, 1));
+    for (const x of t.secs) v.inst.push(this.fleet.add(x.model, c, lights));
     this.vehicles.push(v);
     if (agent) this.byAgent.set(agent, v);
     return v;
@@ -475,6 +478,27 @@ export class Traffic {
     return 0;
   }
 
+  /** An emergency vehicle on a call (police or ambulance, beacons and siren): from a kerb spot `dist` m
+   *  from (x, z) on one side to one on the other side, so it passes near there. Drives the normal network
+   *  (stops at red lights; traffic does not make way yet). null: no route found. */
+  spawnEmergency(x: number, z: number, dist = 500): Vehicle | null {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const a = Math.random() * Math.PI * 2, dx = Math.cos(a) * dist, dz = Math.sin(a) * dist;
+      const from = this.spotNear(x + dx, z + dz), to = this.spotNear(x - dx, z - dz);
+      if (!from || !to || from.p === to.p) continue;
+      const lanes = this.route(from.p, to.p, false, dist / 2 + 600);
+      if (!lanes) continue;
+      const police = Math.random() < 0.5;
+      const v = this.make(police ? TYPES.police : TYPES.ambulance, KIND.road, police ? POLICE_WHITE : AMBULANCE_YELLOW, 1.3, 1.25, null, 2);
+      v.siren = true;
+      v.route = [lanes[0]]; v.s = from.s; v.v = 0;
+      v.trip = lanes.slice(1); v.dest = to;
+      this.plan(v);
+      return v;
+    }
+    return null;
+  }
+
   /** someone is on (or stepping onto) the mapped crosswalk with this key (pedestrians.ts) */
   private zebraBusy: ((key: number) => boolean) | null = null;
   setZebras(busy: (key: number) => boolean) { this.zebraBusy = busy; }
@@ -521,6 +545,7 @@ export class Traffic {
   /** a short description of a vehicle that has no agent (trams, trains) */
   describe(v: Vehicle) {
     if (v.transit) return `${v.transit.mode === 0 ? 'Tram' : 'Bus'} ${v.transit.line} → ${v.transit.headsign}`;
+    if (v.siren) return v.t === TYPES.police ? 'Police car on a call' : 'Ambulance on a call';
     return v.t.name === 't3000' ? 'STIB tram (T3000-style)' : v.t.name === 't4000' ? 'STIB tram (T4000-style)' : 'train'; }
   pickable() { return this.fleet.meshes(); }
   speedOf(v: Vehicle) { return v.v; }
@@ -906,11 +931,12 @@ export class Traffic {
         if (st && v.route[0] === st.p && v.s > st.s - 2.5) {
           if (v.s > st.s + 3) st.served = true;                            // drove past it
           else if (v.v < 0.5) {
-            if (st.arrived < 0) { st.arrived = this.now; this.onDwell?.(st.id); }   // people get on / off
+            if (st.arrived < 0) { st.arrived = this.now; this.onDwell?.(st.id); this.onTransit?.(v, 'arrive'); }   // people get on / off
             const late = this.now > st.dep + 30;   // running late: shorter stops
             if (this.now >= st.dep && this.now - st.arrived >= (late ? 6 : 12)) st.served = true;
           }
           if (st.served) {
+            if (st.arrived >= 0) this.onTransit?.(v, 'depart');
             R.next++;
             // (after the last stop in the region it drives on to the edge and leaves there)
           }
