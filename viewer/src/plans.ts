@@ -1,0 +1,243 @@
+// Day plans: what each person does on a given day (activities with times and places), by type and
+// weekday. Made to feel right, not a calibrated model: school runs around 8:15 and 15:30 (Wednesday noon),
+// commuters, shoppers, evenings out (busier on Friday and Saturday), delivery vans, taxis, through traffic;
+// walkers: kids to school, shopping, dog walks, errands, strolls, tram / bus rides. Seeded per person and
+// date: the same plan every time for that day.
+import { H, M, weekday as weekdayOf } from './clock';
+import { rng } from './rng';
+import type { PlaceIndex, Where } from './places';
+import type { WalkSpot } from './pedestrians';
+import type { Agent } from './agents';
+
+export interface Activity { where: Where; purpose: string; until: number }   // until: seconds of the day
+
+/** what plans need: the places, park paths for walks (pedestrians.ts), counters for diagnostics */
+export interface PlanContext {
+  places: PlaceIndex;
+  parkSpot: ((x: number, z: number, min: number, max: number, r: () => number) => WalkSpot | null) | null;
+  /** visits planned to an open place / swapped to an open one / to a closed one (nothing open near) */
+  openStats: { open: number; swapped: number; closed: number };
+}
+
+export const PURPOSE: Record<string, string> = {
+  home: 'at home', school: 'dropping the kids at school', pickup: 'picking up the kids', work: 'at work',
+  out: 'working outside the area', shop: 'shopping', dinner: 'out for dinner', errand: 'running an errand',
+  delivery: 'delivering', fare: 'with a passenger', away: 'outside the area', passing: 'passing through',
+  dog: 'walking the dog', stroll: 'out for a walk', wait: 'taking the tram / bus', 'pickup-food': 'collecting an order',
+};
+
+const VISITS = new Set(['shop', 'dinner', 'errand', 'pickup-food']);   // purposes that need the place open
+const VISIT_REACH = 1500;   // m: how far a closed place may be swapped for an open one
+
+/** visitors (not staff, pupils or parents dropping off) go somewhere open when they arrive: a closed place is
+ * swapped for the nearest open one of its kind within VISIT_REACH (else they go anyway). wd: 0 Sunday */
+function openFor(ctx: PlanContext, w: Where, purpose: string, wd: number, leave: number): Where {
+  if (w.kind !== 'poi' || !VISITS.has(purpose)) return w;
+  const t = leave + 10 * M, monday0 = (wd + 6) % 7;   // (about when they get there)
+  if (ctx.places.isOpen(w.i, monday0, t)) { ctx.openStats.open++; return w; }
+  const best = ctx.places.openNear(w.i, monday0, t, VISIT_REACH);
+  ctx.openStats[best >= 0 ? 'swapped' : 'closed']++;
+  return best >= 0 ? { kind: 'poi', i: best } : w;
+}
+
+/** a walk: preferably to a park path or square 250-900 m away, else around the block */
+function around(a: Agent, r: () => number, ctx: PlanContext): Where {
+  const [x, z] = ctx.places.homePos(a.home);
+  const sp = ctx.parkSpot?.(x, z, 250, 900, r);
+  if (sp && r() < 0.75) return { kind: 'park', spot: sp };
+  const i = ctx.places.houseNear(a.home, r);
+  return i >= 0 ? { kind: 'house', i } : { kind: 'home' };
+}
+
+/** a walker's day */
+function walkPlan(a: Agent, r: () => number, wd: number, ctx: PlanContext): Activity[] {
+  const P = ctx.places;
+  const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
+  const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
+  const home: Where = { kind: 'home' };
+  const p: Activity[] = [];
+  const act = (where: Where, purpose: string, until: number) =>
+    p.push({ where: openFor(ctx, where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
+  const outAndBack = (where: Where | null, purpose: string, t: number, stay: number) => {
+    if (!where) return;
+    act(home, 'home', t); act(where, purpose, t + stay);
+  };
+  switch (a.type) {
+    case 'kid': {
+      const school = weekday ? P.near(a.home, r, 1200, 'school', 'kindergarten') : null;
+      if (!school) { outAndBack(P.near(a.home, r, 900, 'shop', 'supermarket', 'food'), 'shop', u(10 * H, 17 * H), u(20 * M, 60 * M)); break; }
+      act(home, 'home', u(7 * H + 45 * M, 8 * H + 15 * M));
+      act(school, 'school', wed ? u(11 * H + 55 * M, 12 * H + 10 * M) : u(15 * H + 20 * M, 15 * H + 45 * M));
+      break;
+    }
+    case 'walkShop':
+      outAndBack(P.near(a.home, r, 900, 'supermarket', 'shop'), 'shop', u(9 * H, 19 * H), u(10 * M, 35 * M));
+      if (r() < 0.6) outAndBack(P.near(a.home, r, 900, 'shop', 'food', 'health'), 'shop', u(p.length ? p[p.length - 1].until + 30 * M : 10 * H, 19 * H), u(10 * M, 30 * M));
+      break;
+    case 'dog':
+      for (const t of [u(7 * H, 8 * H + 30 * M), u(12 * H, 14 * H), u(19 * H, 22 * H)].slice(0, r() < 0.5 ? 2 : 3))
+        outAndBack(around(a, r, ctx), 'dog', t, u(1 * M, 4 * M));
+      break;
+    case 'walkErrand':
+      if (wd !== 0) outAndBack(P.near(a.home, r, 1000, 'health', 'services', 'leisure', 'food'), 'errand', u(9 * H, 18 * H), u(15 * M, 50 * M));
+      break;
+    case 'transit': {   // to work / town by tram or bus; weekends sometimes into town
+      const stop = P.stopNear(a.home);
+      if (stop < 0) break;
+      const go = weekday ? u(7 * H, 9 * H) : r() < 0.5 ? u(10 * H, 16 * H) : -1;
+      if (go < 0) break;
+      act(home, 'home', go);
+      act({ kind: 'stop', i: stop }, 'wait', weekday ? u(16 * H + 30 * M, 19 * H + 30 * M) : go + u(2 * H, 4 * H));
+      break;
+    }
+    case 'stroll':
+      if (r() < 0.5) outAndBack(P.near(a.home, r, 1000, 'food', 'leisure'), 'dinner', u(17 * H, 21 * H + 30 * M), u(30 * M, 120 * M));
+      else outAndBack(around(a, r, ctx), 'stroll', u(wd === 0 || wd === 6 ? 10 * H : 16 * H, 20 * H), u(15 * M, 60 * M));
+      break;
+  }
+  act(home, 'home', 24 * H);
+  for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
+  return p;
+}
+
+/** the day's plan for an agent (seeded by agent and date: the same every time for that day) */
+export function dayPlan(a: Agent, date: string, ctx: PlanContext): Activity[] {
+  const P = ctx.places;
+  const [y, m, d] = date.split('-').map(Number);
+  const wd = (weekdayOf(date) + 1) % 7;   // (the plans count from Sunday: 0 Sunday … 3 Wednesday … 6 Saturday)
+  const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
+  const r = rng(a.id * 7919 + y * 372 + m * 31 + d);
+  if (a.mode === 'walk') return walkPlan(a, r, wd, ctx);
+  const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
+  const home: Where = a.home >= 0 ? { kind: 'home' } : { kind: 'edge' };
+  const p: Activity[] = [];
+  const act = (where: Where, purpose: string, until: number) =>
+    p.push({ where: openFor(ctx, where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
+  const shopping = () => {
+    if (weekday || wd === 6 || r() < 0.3) {   // Sundays: most shops closed
+      act(home, 'home', u(9 * H, 19 * H));
+      act(P.poi(r, 'supermarket', 'shop'), 'shop', 0);
+      p[p.length - 1].until = p[p.length - 2].until + u(15 * M, 50 * M);
+      if (r() < 0.3) act(P.poi(r, 'shop', 'supermarket'), 'shop', p[p.length - 1].until + u(15 * M, 40 * M));
+    }
+    act(home, 'home', 24 * H);
+  };
+  switch (a.type) {
+    case 'cyclist': {   // to work / school or an errand by bike, mostly weekdays
+      if (weekday && r() < 0.6) {
+        act(home, 'home', u(7 * H + 15 * M, 9 * H));
+        act(P.poi(r, 'office', 'school', 'shop', 'health', 'services'), 'work', u(16 * H + 30 * M, 18 * H + 45 * M));
+      } else if (r() < 0.7) {
+        act(home, 'home', u(9 * H, 18 * H));
+        act(P.poi(r, 'shop', 'supermarket', 'food', 'leisure'), 'shop', p[0].until + u(20 * M, 90 * M));
+      }
+      act(home, 'home', 24 * H);
+      break;
+    }
+    case 'courier': {   // meal deliveries in the evening (and some lunchtimes): restaurant -> customer -> ...
+      const slots = [[18 * H, 22 * H + 30 * M]];
+      if (r() < 0.4) slots.unshift([11 * H + 45 * M, 13 * H + 45 * M]);
+      let t = slots[0][0] + u(-20 * M, 20 * M);
+      act({ kind: 'edge' }, 'away', t);
+      for (const [s0, s1] of slots) {
+        t = Math.max(t, s0);
+        while (t < s1) {
+          act(P.poi(r, 'food'), 'pickup-food', t + u(3 * M, 8 * M));
+          t = p[p.length - 1].until;
+          act({ kind: 'house', i: Math.floor(r() * P.homeCount) }, 'delivery', t + u(4 * M, 9 * M));
+          t = p[p.length - 1].until + u(1 * M, 6 * M);
+        }
+      }
+      act({ kind: 'edge' }, 'away', 24 * H);
+      break;
+    }
+    case 'parent': {
+      if (!weekday) return (shopping(), p);
+      const school = P.poi(r, 'school', 'kindergarten');
+      const drop = u(7 * H + 40 * M, 8 * H + 15 * M);
+      const pick = wed ? u(11 * H + 50 * M, 12 * H + 20 * M) : u(15 * H + 15 * M, 15 * H + 45 * M);
+      act(home, 'home', drop);
+      act(school, 'school', drop + u(4 * M, 9 * M));
+      const x = r();
+      if (x < 0.4) act(P.poi(r, 'office', 'shop', 'health', 'school'), 'work', pick - u(10 * M, 20 * M));
+      else if (x < 0.7) act({ kind: 'edge' }, 'out', pick - u(15 * M, 25 * M));
+      else act(home, 'home', pick - u(8 * M, 15 * M));
+      act(school, 'pickup', pick + u(5 * M, 10 * M));
+      act(home, 'home', 24 * H);
+      break;
+    }
+    case 'commuterOut':
+      if (!weekday) return (shopping(), p);
+      act(home, 'home', u(7 * H, 9 * H + 15 * M));
+      act({ kind: 'edge' }, 'out', u(16 * H + 30 * M, 19 * H + 30 * M));
+      act(home, 'home', 24 * H);
+      break;
+    case 'commuterIn':
+      if (!weekday) { act(home, 'away', 24 * H); break; }
+      act(home, 'away', u(7 * H + 15 * M, 9 * H + 15 * M));
+      act(P.poi(r, 'office', 'shop', 'supermarket', 'health', 'school', 'services'), 'work', u(16 * H, 18 * H + 30 * M));
+      act(home, 'away', 24 * H);
+      break;
+    case 'shopper': shopping(); break;
+    case 'evening': {
+      const go = wd === 5 || wd === 6 ? 0.85 : 0.4;
+      if (r() > go) { act(home, 'home', 24 * H); break; }
+      const t = u(18 * H + 30 * M, 20 * H + 45 * M);
+      act(home, 'home', t);
+      act(P.poi(r, 'food', 'leisure'), 'dinner', t + u(80 * M, 160 * M));
+      act(home, 'home', 24 * H);
+      break;
+    }
+    case 'errands':
+      if (!weekday && wd !== 6) { act(home, 'home', 24 * H); break; }
+      act(home, 'home', u(9 * H, 17 * H));
+      act(P.poi(r, 'health', 'services', 'leisure', 'shop'), 'errand', p[0].until + u(20 * M, 60 * M));
+      act(home, 'home', 24 * H);
+      break;
+    case 'delivery': {
+      if (wd === 0) { act(home, 'away', 24 * H); break; }
+      let t = u(8 * H, 10 * H);
+      act(home, 'away', t);
+      const stops = 5 + Math.floor(r() * 5);
+      for (let k = 0; k < stops; k++) {
+        t += u(10 * M, 35 * M);
+        act(r() < 0.6 ? P.poi(r, 'shop', 'supermarket', 'food', 'office') : { kind: 'home' }, 'delivery', t + u(4 * M, 9 * M));
+        t = p[p.length - 1].until;
+      }
+      act(home, 'away', 24 * H);
+      break;
+    }
+    case 'taxi': {
+      let t = u(6 * H, 9 * H);
+      act({ kind: 'edge' }, 'away', t);
+      while (t < 25 * H) {
+        t += u(8 * M, 30 * M);
+        act(r() < 0.5 ? { kind: 'home' } : P.poi(r, 'food', 'leisure', 'health'), 'fare', t);
+      }
+      p[p.length - 1].until = 24 * H;
+      break;
+    }
+    case 'through': {
+      // edge to edge, a few times a day, following the daily traffic curve
+      let t = 0;
+      const n = weekday ? 3 : 2;
+      const times = Array.from({ length: n }, () => {
+        // rush hours more likely
+        const pk = r();
+        return pk < 0.35 ? u(7 * H, 9 * H + 30 * M) : pk < 0.7 ? u(16 * H, 19 * H) : pk < 0.95 ? u(6 * H, 23 * H)
+          : u(0, 6 * H);   // a little night traffic
+      }).sort((x, y) => x - y);
+      for (const tt of times) {
+        act({ kind: 'edge' }, 'away', Math.max(tt, t + 10 * M));
+        act({ kind: 'edge' }, 'passing', 0);   // (arrives at the other edge; leaves 'immediately')
+        t = p[p.length - 2].until;
+        p[p.length - 1].until = t + 1;
+      }
+      act({ kind: 'edge' }, 'away', 24 * H);
+      break;
+    }
+  }
+  // make the times increasing (short stays are fine)
+  for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
+  return p;
+}

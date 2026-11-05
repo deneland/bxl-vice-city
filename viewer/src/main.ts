@@ -1,6 +1,7 @@
 import { config } from './config';
 import { H, brusselsInstant, brusselsNow, weekday } from './clock';
 import { DynamicResolution } from './dynres';
+import { PlaceIndex } from './places';
 import * as THREE from 'three/webgpu';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
@@ -237,10 +238,11 @@ async function main() {
         const k = places ? places.homes.length / 5224 : 1;
         await nextFrame();
         const parking = pk ? new Parking(pk, VS) : null;
-        if (places) agents = new Agents(places, traffic, VS, config.agents ?? Math.round(8000 * k), peds,
+        const index = places ? new PlaceIndex(places, VS) : null;
+        if (index && tt) index.setStops(tt.stops, VS);
+        if (index) agents = new Agents(index, traffic, config.agents ?? Math.round(8000 * k), peds,
           config.walkers ?? Math.round(10000 * k), config.cyclists ?? Math.round(1500 * k), parking);
-        if (agents && tt) {   // tram / bus riders: stops, and who gets on / off when a vehicle stops
-          agents.setStops(tt.stops);
+        if (agents && tt) {   // tram / bus riders: who gets on / off when a vehicle stops
           const ag = agents;
           traffic.onDwell = (id) => ag.onDwell(id);
         }

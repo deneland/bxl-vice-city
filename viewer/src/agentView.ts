@@ -2,7 +2,8 @@
 // rest of their trip is drawn on the street. Trams and trains just say what they are.
 import { hhmm } from './clock';
 import * as THREE from 'three/webgpu';
-import { PURPOSE, type Agent, type Agents } from './agents';
+import type { Agent, Agents } from './agents';
+import { PURPOSE } from './plans';
 import type { Traffic } from './traffic';
 import type { Vehicle } from './paths';
 import type { Pedestrians } from './pedestrians';
@@ -149,7 +150,7 @@ export class AgentView {
         return `<div class="${cur ? 'cur' : k < a.i ? 'past' : ''}"><span class="t">${when}</span>${PURPOSE[p.purpose] ?? p.purpose} · ${A.label(a, p.where)}</div>`;
       }).join('');
       html = `<div class="hd"><b>${a.name}</b> ${btn}</div>` +
-        `<div class="dim">${TYPE_LABEL[a.type] ?? a.type} · ${a.home >= 0 ? `lives on ${A.street(A.places.homes[a.home][3])}` : 'lives outside the area'} · ${car}</div>` +
+        `<div class="dim">${TYPE_LABEL[a.type] ?? a.type} · ${a.home >= 0 ? `lives on ${A.places.homeStreet(a.home)}` : 'lives outside the area'} · ${car}</div>` +
         `<div class="now">${doing}</div><div class="plan">${plan}</div>`;
     } else if (this.vehicle && t) {
       const R = this.vehicle.transit;
