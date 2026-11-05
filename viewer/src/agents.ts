@@ -128,8 +128,8 @@ export class Agents {
           : { kind: 'bike', paint: BIKE_COLORS[Math.floor(r() * BIKE_COLORS.length)], ag: 1, f: 1 },
         plan: [], i: 0, driving: false, departed: 0, travel: null, ver: 0, parked: -1, reserve: -1, shown: false, departedFrom: -1, ride: 0, rideT: 0, retry: 0 });
     }
-    traffic.onArrive = (a, arrived) => this.arrive(a as Agent, arrived);
-    if (peds) peds.onArrive = (a) => this.arrive(a as Agent, true);
+    traffic.onArrive = (a, arrived) => this.arrive(a, arrived);
+    if (peds) peds.onArrive = (a) => this.arrive(a, true);
     // kerbs about as full as real ones (~88 %): what our drivers do not fill, anonymous cars do
     if (parking) {
       const own = this.list.filter((a) => this.parks(a)).length;
@@ -396,7 +396,7 @@ export class Agents {
         }
         return;
       }
-      const a = owner as Agent;
+      const a = owner;
       if (a && !a.shown && a.parked === k) { budget--; this.showParked(a); }
     });
   }

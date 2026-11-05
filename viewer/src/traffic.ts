@@ -26,6 +26,7 @@ import { CONTROL, KIND, type Lane } from './roads';
 import { MinHeap } from './heap';
 import { PointGrid } from './grid';
 import { Fleet } from './fleet';
+import type { Agent } from './agents';
 import { AMBER, GREEN, LIGHT_COLORS, RED, conflict, heading, longHeading, makeCurve, makePath, sample, signalState,
   type Junction, type Path, type Signal, type Spot, type Vehicle } from './paths';
 import { ACCENTS, BUS_COLORS, MODELS, STIB_BUS, TRAIN, TRAM_SILVER, TYPES, VAN_WHITE, pickKind, type Kind } from './vehicleTypes';
@@ -234,10 +235,10 @@ export class Traffic {
   /** a STIB vehicle has stopped at stop `id` (transit.ts stop index): people board / alight */
   onDwell: ((id: number) => void) | null = null;
   /** called when a car's trip ends (arrived, left the region, or given up when stuck) */
-  onArrive: ((agent: unknown, arrived: boolean) => void) | null = null;
+  onArrive: ((agent: Agent, arrived: boolean) => void) | null = null;
 
   /** a new vehicle with instances for its sections */
-  private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: unknown): Vehicle {
+  private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: Agent | null): Vehicle {
     const c = new THREE.Color(paint);
     const v: Vehicle = { t, kind, route: [], hist: [], s: 0, v: 0, ag, f, grant: null, inJunction: null, wait: 0,
       arrive: 0, inst: [], stuck: 0, trip: [], dest: null, agent };
@@ -246,7 +247,7 @@ export class Traffic {
     if (agent) this.byAgent.set(agent, v);
     return v;
   }
-  private byAgent = new Map<unknown, Vehicle>();   // agent -> the vehicle they drive
+  private byAgent = new Map<Agent, Vehicle>();   // agent -> the vehicle they drive
 
   /** take a vehicle off the road: free its instances and junction */
   private release(v: Vehicle) {
@@ -263,7 +264,7 @@ export class Traffic {
   private finish(v: Vehicle, arrived: boolean) {
     const a = v.agent;
     this.release(v);
-    this.onArrive?.(a, arrived);
+    if (a) this.onArrive?.(a, arrived);
   }
 
   /** car paint: the measured palette (lifted a little: aerial colours are shaded roofs) plus a few accents */
@@ -363,9 +364,8 @@ export class Traffic {
 
   /** shortest way in from the region edge to `p` / out from `p` to the edge (cached per lane) */
   private edgeWay(p: Path, inbound: boolean): Path[] | null {
-    const key = p as unknown as object;
     const cache = inbound ? this.inCache : this.outCache;
-    if (cache.has(key)) return cache.get(key)!;
+    if (cache.has(p)) return cache.get(p)!;
     // one search for all region-edge lanes at once (inbound: from all of them to p; outbound: from p to the
     // nearest one), instead of a search per edge lane
     const G = this.routeGraph(), ip = G.id.get(p);
@@ -378,11 +378,11 @@ export class Traffic {
         best = src.length ? this.search(src, (i) => i === ip, G.ex[ip], G.ez[ip]) : null;
       } else best = this.search([ip], edge, NaN, NaN);
     }
-    cache.set(key, best);
+    cache.set(p, best);
     return best;
   }
-  private inCache = new Map<object, Path[] | null>();
-  private outCache = new Map<object, Path[] | null>();
+  private inCache = new Map<Path, Path[] | null>();
+  private outCache = new Map<Path, Path[] | null>();
   /** seconds to drive in from the edge to a stop (for starting runs early) */
   leadIn(sp: Spot, mode: number) {
     const r = this.edgeWay(sp.p, true);
@@ -441,7 +441,7 @@ export class Traffic {
   /** Put a car on the road for a trip, from a kerb spot or the region edge to a kerb spot or the
    *  region edge. progress (0-1): already that far along (after a jump in time). Returns the route
    *  length in metres, or 0 if there is no route. */
-  spawn(agent: unknown, from: Spot | 'edge', to: Spot | 'edge', car: { kind: string; paint: number; ag: number; f: number },
+  spawn(agent: Agent, from: Spot | 'edge', to: Spot | 'edge', car: { kind: string; paint: number; ag: number; f: number },
     progress = 0): number {
     for (let attempt = 0; attempt < 4; attempt++) {
       if ((from === 'edge' && !this.entries.length) || (to === 'edge' && !this.exits.length)) return 0;
@@ -498,7 +498,7 @@ export class Traffic {
     return h < 0 ? null : this.vehicles.find((v) => v.inst.includes(h)) ?? null;
   }
   /** the car an agent drives now, if any */
-  vehicleOf(agent: unknown) { return this.byAgent.get(agent) ?? null; }
+  vehicleOf(agent: Agent) { return this.byAgent.get(agent) ?? null; }
   /** a vehicle's front bumper position (this group's frame) */
   positionOf(v: Vehicle, out = new THREE.Vector3()) { return this.at(v, v.s, out); }
   /** points along what is left of a vehicle's trip (this group's frame; points = false: none), and its length (m) */
@@ -526,15 +526,15 @@ export class Traffic {
   speedOf(v: Vehicle) { return v.v; }
 
   /** position of the vehicle an agent drives (this group's frame), if any */
-  positionOfAgent(agent: unknown) { const v = this.vehicleOf(agent); return v ? this.positionOf(v) : null; }
+  positionOfAgent(agent: Agent) { const v = this.vehicleOf(agent); return v ? this.positionOf(v) : null; }
   /** metres left of an agent's trip */
-  routeLeft(agent: unknown) { const v = this.vehicleOf(agent); return v ? this.routeAhead(v, false).len : 0; }
+  routeLeft(agent: Agent) { const v = this.vehicleOf(agent); return v ? this.routeAhead(v, false).len : 0; }
 
   // --- parked cars: static instances, no simulation ---
-  private parked = new Map<unknown, number[]>();
+  private parked = new Map<object, number[]>();   // parked car (its owner, or a key for an anonymous one) -> bodies
   /** show an agent's car parked at (x, z) with a heading (rad about y), on the ground of the nearest lane */
-  park(agent: unknown, car: { kind: string; paint: number }, x: number, z: number, heading: number) {
-    if (this.parked.has(agent)) return;
+  park(key: object, car: { kind: string; paint: number }, x: number, z: number, heading: number) {
+    if (this.parked.has(key)) return;
     const t = (TYPES as Record<string, Kind>)[car.kind] ?? TYPES.hatch;
     const sp = this.spotNear(x, z);
     const y = sp ? sample(sp.p, sp.s, tmp).y : 0;
@@ -545,18 +545,18 @@ export class Traffic {
       this.fleet.setPose(h, this.m4);
       list.push(h);
     }
-    this.parked.set(agent, list);
+    this.parked.set(key, list);
   }
-  unpark(agent: unknown) {
-    const list = this.parked.get(agent);
+  unpark(key: object) {
+    const list = this.parked.get(key);
     if (!list) return;
     for (const h of list) this.fleet.remove(h);
-    this.parked.delete(agent);
+    this.parked.delete(key);
   }
   clearParked() { for (const a of [...this.parked.keys()]) this.unpark(a); }
 
   /** take an agent's car off the road (e.g. after a jump in time) */
-  remove(agent: unknown) {
+  remove(agent: Agent) {
     const v = this.byAgent.get(agent);
     if (v) this.release(v);
   }

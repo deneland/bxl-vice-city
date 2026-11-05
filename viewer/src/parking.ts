@@ -4,6 +4,7 @@
 
 import { rng } from './rng';
 import { PointGrid } from './grid';
+import type { Agent } from './agents';
 
 export interface ParkingData { spots: [number, number, number, number?][] }   // x, y (voxels), heading (rad, x east / y north), kind
 export const GARAGE = 2;   // kind: 0 kerb, 1 car park, 2 garage
@@ -11,7 +12,7 @@ export const GARAGE = 2;   // kind: 0 kerb, 1 car park, 2 garage
 export class Parking {
   readonly x: Float32Array; readonly z: Float32Array; readonly heading: Float32Array;
   readonly hidden: Uint8Array;   // 1: in a garage (not drawn)
-  private owner: (unknown | null)[];
+  private owner: (Agent | typeof Parking.ANON | null)[];
   private grid = new PointGrid<number>(40);   // places
   private drawn = new PointGrid<number>(40);  // places that are drawn (not in garages)
 
@@ -32,7 +33,7 @@ export class Parking {
   get size() { return this.x.length; }
   /** cars of nobody we simulate (second cars, visitors, people from outside): a fixed random share of the
    *  places is taken by them, so the kerbs are about as full as real ones; they never leave */
-  static readonly ANON = { anon: true };
+  static readonly ANON: unique symbol = Symbol('anonymous car');
   fillAnon(share: number, seed = 7) {
     const r = rng(seed);
     for (let i = 0; i < this.size; i++) if (r() < share && this.owner[i] === null) this.owner[i] = Parking.ANON;
@@ -43,10 +44,10 @@ export class Parking {
     return this.grid.nearest(x, z, max, (k) => this.owner[k] === null) ?? -1;
   }
   /** places to draw within r of (x, z) (not the ones in garages), with who stands there (null: free) */
-  forEachNear(x: number, z: number, r: number, fn: (k: number, owner: unknown | null) => void) {
+  forEachNear(x: number, z: number, r: number, fn: (k: number, owner: Agent | typeof Parking.ANON | null) => void) {
     this.drawn.forEachWithin(x, z, r, (k) => fn(k, this.owner[k]));
   }
-  take(i: number, who: unknown) { this.owner[i] = who; }
+  take(i: number, who: Agent | typeof Parking.ANON) { this.owner[i] = who; }
   free(i: number) { if (i >= 0) this.owner[i] = null; }
   clear() { for (let i = 0; i < this.size; i++) if (this.owner[i] !== Parking.ANON) this.owner[i] = null; }
 }

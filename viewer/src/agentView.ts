@@ -60,13 +60,13 @@ export class AgentView {
     if (P && hit.object === P.mesh) {
       const a = P.agentAt(hit.instanceId);
       if (!a) return false;
-      this.agent = a as Agent; this.vehicle = null; this.hasPos = false;
+      this.agent = a; this.vehicle = null; this.hasPos = false;
       this.render(true); this.onChange();
       return true;
     }
     const v = t.vehicleAt(hit.object, hit.instanceId);
     if (!v) return false;
-    this.agent = (v.agent as Agent) ?? null;
+    this.agent = v.agent;
     this.vehicle = v.agent ? null : v;
     this.hasPos = false;
     this.render(true);
@@ -91,10 +91,10 @@ export class AgentView {
   update(now: number) {
     if (!this.active) return;
     const t = this.traffic(), P = this.peds();
-    const walking = this.agent?.mode === 'walk';
-    const v = this.agent && !walking ? t?.vehicleOf(this.agent) ?? null : this.vehicle;
+    const a = this.agent, walking = a?.mode === 'walk';
+    const v = a && !walking ? t?.vehicleOf(a) ?? null : this.vehicle;
     const pos = new THREE.Vector3();
-    const has = walking ? !!(P && P.positionOf(this.agent, pos)) : !!(v && t && t.positionOf(v, pos));
+    const has = walking ? !!(P && P.positionOf(a, pos)) : !!(v && t && t.positionOf(v, pos));
     if (has) {
       pos.applyMatrix4((walking ? P!.mesh : t!.group).matrixWorld);
       if (this.following) {
@@ -113,13 +113,13 @@ export class AgentView {
     } else this.hasPos = false;
     if (now - this.tPanel > 0.5 || now < this.tPanel) {
       this.tPanel = now;
-      if (this.agent && (walking ? has : v && t)) {
-        const r = walking ? P!.routeAhead(this.agent) : t!.routeAhead(v!);
+      const r = walking ? (has ? P!.routeAhead(a) : null) : a && v && t ? t.routeAhead(v) : null;
+      if (r) {
         const g = this.line.geometry as THREE.BufferGeometry;
         g.setAttribute('position', new THREE.Float32BufferAttribute(r.pts, 3));
         this.line.visible = r.pts.length > 3;
       } else this.line.visible = false;
-      this.render(false, v, walking ? P!.routeAhead(this.agent, false).len : -1);
+      this.render(false, v, walking ? r?.len ?? 0 : -1);
       this.onChange();
     }
   }

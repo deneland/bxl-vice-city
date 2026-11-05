@@ -5,6 +5,7 @@
 import * as THREE from 'three/webgpu';
 import { crosswalkKey, KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
+import type { Agent } from './agents';
 import { cumulative, pointAt } from './polyline';
 import { MinHeap } from './heap';
 import { PointGrid } from './grid';
@@ -15,7 +16,7 @@ const CROSS_PATIENCE = 25;   // s waiting for a gap before crossing anyway (cars
 
 interface Seg { pts: Float32Array; cum: Float32Array; len: number; a: number; b: number; cross: number | null; park?: boolean }   // cross: crosswalk key (roads.ts crosswalkKey)
 interface Walker {
-  agent: unknown; segs: { seg: Seg; fwd: boolean }[]; k: number; s: number; v: number; dist: number;
+  agent: Agent; segs: { seg: Seg; fwd: boolean }[]; k: number; s: number; v: number; dist: number;
   wait: number; crossing: number | null; idx: number; end: number;   // end: m to walk on the last segment
 }
 export interface WalkSpot { seg: Seg; s: number }
@@ -73,12 +74,12 @@ export class Pedestrians {
   private segs: Seg[] = [];
   private adj = new Map<number, { seg: Seg; fwd: boolean }[]>();   // graph vertex -> segments leaving it
   private walkers: Walker[] = [];
-  private byAgent = new Map<unknown, Walker>();
+  private byAgent = new Map<Agent, Walker>();
   private free: number[] = [];
   private busy = new Map<number, number>();     // crosswalk key -> people on it
   private grid = new PointGrid<WalkSpot>(40);   // pavement / path points, for spotNear
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
-  onArrive: ((agent: unknown) => void) | null = null;
+  onArrive: ((agent: Agent) => void) | null = null;
 
   constructor(net: RoadNetwork, vs: number, material: THREE.Material, private traffic: Traffic | null, capacity = 1500) {
     this.net = net; this.vs = vs;
@@ -304,9 +305,9 @@ export class Pedestrians {
   get walking() { return this.walkers.length; }
 
   // --- people standing still (waiting at a stop) ---
-  private standing = new Map<unknown, number>();
+  private standing = new Map<Agent, number>();
   /** show someone standing at a spot (facing a random way) */
-  stand(agent: unknown, sp: WalkSpot) {
+  stand(agent: Agent, sp: WalkSpot) {
     if (this.standing.has(agent) || !this.free.length) return;
     const i = this.free.pop()!;
     const p = at(sp.seg, sp.s, new THREE.Vector3());
@@ -318,7 +319,7 @@ export class Pedestrians {
     this.mesh.instanceMatrix.needsUpdate = true;
     this.standing.set(agent, i);
   }
-  unstand(agent: unknown) {
+  unstand(agent: Agent) {
     const i = this.standing.get(agent);
     if (i === undefined) return;
     this.mesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
@@ -414,7 +415,7 @@ export class Pedestrians {
   }
 
   /** start a walk; progress (0-1): already that far (after a jump in time). Returns its length (0: none) */
-  spawn(agent: unknown, from: WalkSpot, to: WalkSpot, progress = 0) {
+  spawn(agent: Agent, from: WalkSpot, to: WalkSpot, progress = 0) {
     if (!this.free.length) return 0;
     const segs = this.route(from, to);
     if (!segs) return 0;
@@ -441,7 +442,7 @@ export class Pedestrians {
     return total;
   }
 
-  remove(agent: unknown) {
+  remove(agent: Agent) {
     const w = this.byAgent.get(agent);
     if (w) this.release(w);
   }
@@ -459,7 +460,7 @@ export class Pedestrians {
 
   /** the instance of an agent (for picking) */
   agentAt(i: number) { return this.walkers.find((w) => w.idx === i)?.agent ?? [...this.standing].find(([, k]) => k === i)?.[0] ?? null; }
-  positionOf(agent: unknown, out = new THREE.Vector3()) {
+  positionOf(agent: Agent, out = new THREE.Vector3()) {
     const w = this.byAgent.get(agent);
     if (!w) {
       const i = this.standing.get(agent);
@@ -471,7 +472,7 @@ export class Pedestrians {
     return at(seg, fwd ? w.s : seg.len - w.s, out);
   }
   /** what is left of a walk: points (this group's frame; points = false: none) and length */
-  routeAhead(agent: unknown, points = true) {
+  routeAhead(agent: Agent, points = true) {
     const w = this.byAgent.get(agent);
     const pts: number[] = [];
     let len = 0;

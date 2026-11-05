@@ -4,6 +4,7 @@ import * as THREE from 'three/webgpu';
 import { KIND, type Lane } from './roads';
 import { cumulative, pointAt } from './polyline';
 import type { Kind } from './vehicleTypes';
+import type { Agent } from './agents';
 
 export const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
 const MIN_RADIUS = 5.5;             // m, car turning circle (path of the car's centre)
@@ -56,7 +57,7 @@ export interface Vehicle {
   dest: { p: Path; s: number } | null;   // cars: where to pull over (null: leave the region)
   arrive: number;              // when it started approaching its next junction (first come, first served)
   inst: number[];             // per section: its body in the fleet (fleet.ts draws it)
-  agent: unknown;              // cars: who drives (agents.ts); null for trams / trains
+  agent: Agent | null;         // cars: who drives (agents.ts); null for trams / trains
   transit?: TransitRun;        // STIB trams and buses: line and stops (transit.ts)
   stuck: number;               // s without moving
   block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
