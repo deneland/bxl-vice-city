@@ -3,7 +3,7 @@
 // while someone crosses, cars may not enter that arm of the intersection (traffic.ts). Drawn as small
 // voxel people (0.125 m voxels) whose legs and arms swing in the vertex shader.
 import * as THREE from 'three/webgpu';
-import { crosswalkKey, KIND, type RoadNetwork } from './roads';
+import { crosswalkKey, KIND, sceneLine, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
 import type { Agent } from './agents';
 import { cumulative, pointAt } from './polyline';
@@ -127,7 +127,7 @@ export class Pedestrians {
       if (e[2] !== KIND.road) continue;
       const raw = e[6], n = raw.length / 3;
       if (n < 2) continue;
-      const p = Array.from({ length: n }, (_, i) => [raw[i * 3] * vs, raw[i * 3 + 2] * vs, -raw[i * 3 + 1] * vs]);
+      const flat = sceneLine(raw, vs), p = Array.from({ length: n }, (_, i) => flat.slice(i * 3, i * 3 + 3));
       const pav = e[10] ?? [0, 0];
       for (const side of [0, 1]) {   // 0 left, 1 right of the edge direction
         const w = pav[side] || DEFAULT_PAVEMENT[e[7]] || 6;
@@ -211,17 +211,11 @@ export class Pedestrians {
     net.edges.forEach((e, ei) => {
       const xw = e[11];
       if (e[2] !== KIND.road || !xw?.length) return;
-      const raw = e[6], n = raw.length / 3;
-      const cum = [0];
-      for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(raw[i * 3] - raw[i * 3 - 3], raw[i * 3 + 1] - raw[i * 3 - 2]) * vs);
+      const line = sceneLine(e[6], vs), cum = cumulative(line, true);   // (crosswalks: m along the edge, horizontally)
       xw.forEach(([m], i) => {
         const L = sides.get(`${ei}:0`), R = sides.get(`${ei}:1`);
         if (!L || !R) return;
-        let k = 1;
-        while (k < n - 1 && cum[k] < m) k++;
-        const f = Math.min(1, Math.max(0, (m - cum[k - 1]) / Math.max(1e-6, cum[k] - cum[k - 1])));
-        const q = new THREE.Vector3((raw[(k - 1) * 3] + (raw[k * 3] - raw[(k - 1) * 3]) * f) * vs, 0,
-          -(raw[(k - 1) * 3 + 1] + (raw[k * 3 + 1] - raw[(k - 1) * 3 + 1]) * f) * vs);
+        const q = pointAt(line, cum, m, new THREE.Vector3());
         const l = nearestOn(L, q), r = nearestOn(R, q);
         if (l.d > 25 || r.d > 25) return;   // (no pavement near: a crosswalk to nowhere)
         const vl = cut(L, l.s), vr = cut(R, r.s);
@@ -236,8 +230,7 @@ export class Pedestrians {
       const deg = new Map<number, number>();
       const paths: Seg[] = [];
       for (const [[na, nb], raw] of net.paths) {
-        const pts: number[] = [];
-        for (let i = 0; i < raw.length; i += 3) pts.push(raw[i] * vs, raw[i + 2] * vs + 0.05, -raw[i + 1] * vs);
+        const pts = sceneLine(raw, vs, 0.05);
         if (pts.length < 6) continue;
         const seg: Seg = { ...polyline(pts), a: fvtx(na), b: fvtx(nb), cross: null, park: true };
         paths.push(seg);

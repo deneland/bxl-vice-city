@@ -50,7 +50,14 @@ export async function loadRoads(url: string): Promise<RoadNetwork | null> {
   return r.ok ? r.json() : null;
 }
 
+// roads.json is in voxels (x east, y north, z up); the scene in metres (x east, y up, z south)
 const toScene = (vs: number, x: number, y: number, z: number) => [x * vs, z * vs, -y * vs];
+/** a roads.json polyline (voxels: x, y, z per point) as a flat scene polyline (metres: x, y up, z) */
+export function sceneLine(raw: ArrayLike<number>, vs: number, lift = 0): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < raw.length; i += 3) out.push(raw[i] * vs, raw[i + 2] * vs + lift, -raw[i + 1] * vs);
+  return out;
+}
 
 /** polyline shifted sideways by `off` metres (positive: to the right of the direction of travel) */
 function offsetLine(p: number[], off: number) {
@@ -96,8 +103,7 @@ function reversed(p: number[]) {
 export function buildLanes(net: RoadNetwork, vs: number): Lane[] {
   const lanes: Lane[] = [];
   net.edges.forEach(([from, to, kind, oneway, kmh, , raw, rank, ctl, contra, , xw], edge) => {
-    const p: number[] = [];
-    for (let i = 0; i < raw.length; i += 3) p.push(...toScene(vs, raw[i], raw[i + 1], raw[i + 2]));
+    const p = sceneLine(raw, vs);
     let len = 0;
     for (let i = 3; i < p.length; i += 3) len += Math.hypot(p[i] - p[i - 3], p[i + 2] - p[i - 1]);
     const off = kind === KIND.road && !oneway ? HALF_LANE : 0;   // tracks are mapped one per line: no shift

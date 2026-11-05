@@ -17,7 +17,10 @@ export class Transit {
   private next = 0;          // index of the next run to start today
   private last = -1;
 
-  constructor(private data: TransitData, private traffic: Traffic, private vs: number) {
+  private stopX: Float32Array; private stopZ: Float32Array;   // stop positions (scene metres)
+
+  constructor(private data: TransitData, private traffic: Traffic, vs: number) {
+    this.stopX = Float32Array.from(data.stops, (s) => s[0] * vs); this.stopZ = Float32Array.from(data.stops, (s) => -s[1] * vs);
     setTimeout(() => this.warm(), 8000);   // (after the start-up work: it is only needed for later runs)
   }
 
@@ -48,8 +51,7 @@ export class Transit {
   private spot(stop: number, mode: number) {
     const key = `${stop}:${mode}`;
     if (!this.spots.has(key)) {
-      const [x, y] = this.data.stops[stop];
-      this.spots.set(key, this.traffic.spotNear(x * this.vs, -y * this.vs, mode === 0 ? KIND.tram : KIND.road));
+      this.spots.set(key, this.traffic.spotNear(this.stopX[stop], this.stopZ[stop], mode === 0 ? KIND.tram : KIND.road));
     }
     return this.spots.get(key)!;
   }
@@ -58,8 +60,7 @@ export class Transit {
   private cands(stop: number, mode: number) {
     const key = `${stop}:${mode}:c`;
     if (!this.candCache.has(key)) {
-      const [x, y] = this.data.stops[stop];
-      const c = mode === 0 ? this.traffic.spotsNear(x * this.vs, -y * this.vs, KIND.tram) : [this.spot(stop, mode)].filter(Boolean) as Spot[];
+      const c = mode === 0 ? this.traffic.spotsNear(this.stopX[stop], this.stopZ[stop], KIND.tram) : [this.spot(stop, mode)].filter(Boolean) as Spot[];
       this.candCache.set(key, c);
     }
     return this.candCache.get(key)!;
@@ -80,10 +81,7 @@ export class Transit {
     const [ri, headsign, st] = run;
     if (this.focus) {
       const f = this.focus, r2 = this.radius * this.radius;
-      if (!st.some(([stop]) => {
-        const [x, y] = this.data.stops[stop];
-        return (x * this.vs - f[0]) ** 2 + (-y * this.vs - f[1]) ** 2 < r2;
-      })) return true;   // far from where you look
+      if (!st.some(([stop]) => (this.stopX[stop] - f[0]) ** 2 + (this.stopZ[stop] - f[1]) ** 2 < r2)) return true;   // far from where you look
     }
     const [line, mode, color] = this.data.routes[ri];
     // routes between consecutive stops: search the missing ones within the frame budget first
