@@ -24,6 +24,7 @@
 import * as THREE from 'three/webgpu';
 import { CONTROL, KIND, type Lane } from './roads';
 import { MinHeap } from './heap';
+import { PointGrid } from './grid';
 import { Fleet } from './fleet';
 import { AMBER, GREEN, LIGHT_COLORS, RED, conflict, heading, longHeading, makeCurve, makePath, sample, signalState,
   type Junction, type Path, type Signal, type Spot, type Vehicle } from './paths';
@@ -40,6 +41,7 @@ const STUCK = 90;            // s without moving (not queueing for a light): tak
 const SWITCH_COS = Math.cos(50 * Math.PI / 180);   // trams / trains: sharpest track connection
 const ETA = 4;               // s: give way only to conflicting vehicles arriving within this time
 const QUEUE_COST = 6;        // s of routing cost per vehicle already on a lane
+const KERB_REACH = 160;      // m: farthest a place may be from the kerb spot it is reached from
 const TRIM = 9;              // m: lanes end this far before the intersection; curves turn in that space
 
 
@@ -335,28 +337,14 @@ export class Traffic {
   /** nearest kerb spot to a scene position (in this group's frame), away from intersections */
   spotNear(x: number, z: number, kind: number = KIND.road): Spot | null {
     if (kind !== KIND.road) return this.trackSpot(x, z, kind);
-    if (!this.grid) {
-      this.grid = new Map();
+    if (!this.kerbGrid) {   // (built on first use)
+      this.kerbGrid = new PointGrid<Spot>(40);
       for (const p of this.kerb)
-        for (let s = p.start + 8; s < p.end - 15; s += 6) {
-          sample(p, s, tmp);
-          const k = `${Math.floor(tmp.x / 40)},${Math.floor(tmp.z / 40)}`;
-          if (!this.grid.has(k)) this.grid.set(k, []);
-          this.grid.get(k)!.push({ p, s, x: tmp.x, z: tmp.z });
-        }
+        for (let s = p.start + 8; s < p.end - 15; s += 6) { sample(p, s, tmp); this.kerbGrid.add(tmp.x, tmp.z, { p, s }); }
     }
-    const cx = Math.floor(x / 40), cz = Math.floor(z / 40);
-    let best: { p: Path; s: number; d: number } | null = null;
-    for (let r = 0; r <= 3 && !best; r++)
-      for (let i = cx - r; i <= cx + r; i++)
-        for (let j = cz - r; j <= cz + r; j++)
-          for (const c of this.grid.get(`${i},${j}`) ?? []) {
-            const d = (c.x - x) ** 2 + (c.z - z) ** 2;
-            if (!best || d < best.d) best = { p: c.p, s: c.s, d };
-          }
-    return best && { p: best.p, s: best.s };
+    return this.kerbGrid.nearest(x, z, KERB_REACH);
   }
-  private grid: Map<string, { p: Path; s: number; x: number; z: number }[]> | null = null;
+  private kerbGrid: PointGrid<Spot> | null = null;
 
   /** candidate points on tracks / lanes of this kind near a position, nearest first, one per lane */
   spotsNear(x: number, z: number, kind: number, max = 25): Spot[] {

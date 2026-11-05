@@ -7,6 +7,7 @@ import { crosswalkKey, KIND, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
 import { cumulative, pointAt } from './polyline';
 import { MinHeap } from './heap';
+import { PointGrid } from './grid';
 
 const DEFAULT_PAVEMENT = [6, 6, 6, 7, 8.5, 9.5, 10];   // m from the centreline, by road rank (no facade found)
 const RED_PATIENCE = 120;   // s at a red light before walking anyway (when no car is near)
@@ -75,7 +76,7 @@ export class Pedestrians {
   private byAgent = new Map<unknown, Walker>();
   private free: number[] = [];
   private busy = new Map<number, number>();     // crosswalk key -> people on it
-  private grid = new Map<string, { seg: Seg; s: number; x: number; z: number }[]>();
+  private grid = new PointGrid<WalkSpot>(40);   // pavement / path points, for spotNear
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: unknown) => void) | null = null;
 
@@ -242,17 +243,13 @@ export class Pedestrians {
         deg.set(seg.a, (deg.get(seg.a) ?? 0) + 1); deg.set(seg.b, (deg.get(seg.b) ?? 0) + 1);
       }
       // nearest pavement points (sampled) for linking path ends
-      const pave: { seg: Seg; s: number; x: number; y: number; z: number }[] = [];
-      const PC = 15, paveGrid = new Map<string, typeof pave>();   // (spatial index: a commune has ~300k points)
+      const paveGrid = new PointGrid<{ seg: Seg; s: number; x: number; y: number; z: number }>(15);   // (a commune: ~300k points)
       let nY = 0;
       for (const seg of this.segs) if (seg.cross === null && seg.pts.length > 6) {
         if (++nY % 1500 === 0) yield;
         for (let s = 0.5; s < seg.len - 0.5; s += 2) {
           at(seg, s, tmp);
-          const q = { seg, s, x: tmp.x, y: tmp.y, z: tmp.z }, key = `${Math.floor(q.x / PC)},${Math.floor(q.z / PC)}`;
-          pave.push(q);
-          if (!paveGrid.has(key)) paveGrid.set(key, []);
-          paveGrid.get(key)!.push(q);
+          paveGrid.add(tmp.x, tmp.z, { seg, s, x: tmp.x, y: tmp.y, z: tmp.z });
         }
       }
       for (const seg of paths) {
@@ -260,10 +257,7 @@ export class Pedestrians {
         for (const [v, s] of [[seg.a, 0], [seg.b, seg.len]] as const) {
           if ((deg.get(v) ?? 0) > 1) continue;   // only dangling ends
           at(seg, s, tmp);
-          let best: (typeof pave)[0] | null = null, bd = 15 * 15;
-          const gx = Math.floor(tmp.x / PC), gz = Math.floor(tmp.z / PC);
-          for (let i = gx - 1; i <= gx + 1; i++) for (let j = gz - 1; j <= gz + 1; j++)
-            for (const q of paveGrid.get(`${i},${j}`) ?? []) { const d = (q.x - tmp.x) ** 2 + (q.z - tmp.z) ** 2; if (d < bd) { bd = d; best = q; } }
+          const best = paveGrid.nearest(tmp.x, tmp.z, 15);
           if (!best) continue;
           const nv = cut(best.seg, best.s);
           link(v, nv, tmp.clone(), new THREE.Vector3(best.x, best.y, best.z), null);
@@ -300,9 +294,7 @@ export class Pedestrians {
       const tmp = new THREE.Vector3();
       for (let s = 1; s < seg.len - 1; s += 4) {
         at(seg, s, tmp);
-        const key = `${Math.floor(tmp.x / 40)},${Math.floor(tmp.z / 40)}`;
-        if (!this.grid.has(key)) this.grid.set(key, []);
-        this.grid.get(key)!.push({ seg, s, x: tmp.x, z: tmp.z });
+        this.grid.add(tmp.x, tmp.z, { seg, s });
       }
     }
     this.traffic?.setZebras((key) => (this.busy.get(key) ?? 0) > 0);
@@ -376,16 +368,7 @@ export class Pedestrians {
 
   /** nearest pavement point to a scene position (this group's frame) */
   spotNear(x: number, z: number): WalkSpot | null {
-    const cx = Math.floor(x / 40), cz = Math.floor(z / 40);
-    let best: { seg: Seg; s: number; d: number } | null = null;
-    for (let r = 0; r <= 3 && !best; r++)
-      for (let i = cx - r; i <= cx + r; i++)
-        for (let j = cz - r; j <= cz + r; j++)
-          for (const c of this.grid.get(`${i},${j}`) ?? []) {
-            const d = (c.x - x) ** 2 + (c.z - z) ** 2;
-            if (!best || d < best.d) best = { seg: c.seg, s: c.s, d };
-          }
-    return best && { seg: best.seg, s: best.s };
+    return this.grid.nearest(x, z, 160);
   }
 
   /** shortest walk (A* over pavements, corners and crossings): the segments with their direction */
