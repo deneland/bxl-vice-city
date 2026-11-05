@@ -115,7 +115,11 @@ async function main() {
   scene.fog = new THREE.Fog(SKY.clone(), 700, 2600);
   // shadows (on by default, ?shadows=0 off): our own two-layer shadow maps in deferred.ts; the box covers the region from any sun direction
   const deferred = new Deferred(renderer, SHADOWS ? { half: (Math.hypot(L0.size[0], L0.size[1]) * VS) / 2 + 60 } : undefined);
-  let cityDirty = true; // the city G-buffer must be redrawn (view mode, size)
+  // what the next tick must redraw (set from input, settings and loading anywhere below)
+  let cityDirty = true;       // the city G-buffer (view mode, size)
+  let dirty = true;           // something outside camera / tiles changed: draw the next tick
+  let dynShadowDirty = true;  // the vehicle shadows (traffic switched on / off)
+  let clickTimer = 0;         // a click waits briefly: a double-click sets the orbit point instead
 
   const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 6000);
   camera.position.set(-110, 120, 150);
@@ -380,7 +384,6 @@ async function main() {
       inspector.pick(raycaster.ray).then(() => telemetry.event('inspect', {}));
     }, walk.active ? 0 : 250);
   });
-  let clickTimer = 0;
 
   // double-click: orbit around / focus on that voxel (smoothly turn towards it)
   let targetAnim: { from: THREE.Vector3; to: THREE.Vector3; t0: number } | null = null;
@@ -430,7 +433,6 @@ async function main() {
     if (e.key === 'f' || e.key === 'F') agentView.setFollow(!agentView.isFollowing);
     dirty = true;
   });
-  let dirty = true; // something outside camera/tiles changed: draw the next tick
   setTime(Number(timeInput.value));
   updateWeather();
   setTilt(config.tilt);
@@ -459,7 +461,7 @@ async function main() {
   let flashUntil = 0;
   let lastTickRendered = false, rendered = 0, skipped = 0, cityRenders = 0, shadowRenders = 0;
   const shadowSun = new THREE.Vector3();   // sun direction of the current city shadow map
-  let shadowTiles = true, dynShadowDirty = true;
+  let shadowTiles = true;
   let wasMoving = false, lastCpu = 0;
   let prevTags: Record<string, boolean> = {}, prevOwn: Record<string, boolean> = {}, shadowStepped = false, dynShadowDrawn = false;
   renderer.setAnimationLoop(() => {
