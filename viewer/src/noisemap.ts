@@ -1,11 +1,12 @@
 // Noise map: the averaged sound level (Leq, dB(A)) the simulated traffic produces at every point of the
 // ground plan, shown as a colour layer over the city (N). Vehicles emit sound power by type and speed
 // (rough CNOSSOS-like figures), horns / bells / sirens add theirs; the worker (noise.worker.ts) spreads the
-// energy over the map and divides by how long each area was simulated. The layer is a texture sampled in
+// energy over the map, measured where traffic was simulated and estimated per street type elsewhere. The layer is a texture sampled in
 // the resolve pass (deferred.ts), so switching it on costs no city redraw.
 import * as THREE from 'three/webgpu';
 import { mix, select, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
 import { gridOrigin } from './nightlights';
+import type { Lane } from './roads';
 
 const CELL = 4;                       // m per map cell
 const DB = [40, 85] as const;         // byte 1..255 of the map covers this range
@@ -68,6 +69,12 @@ export class NoiseMap {
   private busy = false;
   private tex: THREE.DataTexture;
   private focus: [number, number] = [0, 0];
+  /** calibrated power per street type (bench/noisecal.mjs): W per cell by kind × class, at hours of the day */
+  private prior: { hours: number[]; rates: number[][] } | null = null;
+  /** hour of the day (agent clock), for the prior */
+  hour = 12;
+  /** false: emissions and observation are dropped (calibration: while traffic fills in after a jump) */
+  recording = true;
 
   /** region size (m, east × north); onUpdate: a new map arrived (redraw) */
   constructor(size: [number, number], private onUpdate: () => void) {
@@ -80,21 +87,68 @@ export class NoiseMap {
     noiseSize.value.set(w * CELL, h * CELL);
     this.worker = new Worker(new URL('./noise.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e) => {
-      if (e.data.type !== 'map') return;
+      if (e.data.type !== 'map') return;   // (rates: see rates())
       this.busy = false;
       this.tex.image.data = e.data.data;
       this.tex.needsUpdate = true;
       this.onUpdate();
     };
     this.worker.postMessage({ type: 'init', w, h, cell: CELL, db: DB });
+    this.worker.addEventListener('message', (e) => { if (e.data.type === 'rates') this.ratesWaiting?.(e.data); });
   }
 
+  /** the calibration table (missing: estimated from what was watched so far) */
+  async loadPrior(url: string) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) { this.prior = await r.json(); this.sinceCompute = COMPUTE; }
+    } catch { /* (no table: live estimates) */ }
+  }
+  /** the prior at this hour (linear between the calibrated hours, round the clock) */
+  private priorNow(): Float64Array | null {
+    const P = this.prior;
+    if (!P?.hours.length) return null;
+    const hs = P.hours, n = hs.length, h = ((this.hour % 24) + 24) % 24;
+    let i = n - 1;
+    while (i > 0 && hs[i] > h) i--;
+    if (hs[i] > h) i = n - 1;   // (before the first: from the last of the previous day)
+    const j = (i + 1) % n, span = ((hs[j] - hs[i] + 24) % 24) || 24, f = (((h - hs[i]) + 24) % 24) / span;
+    const a = P.rates[i], b = P.rates[j], out = new Float64Array(a.length);
+    for (let k = 0; k < a.length; k++) {
+      const x = a[k] ?? NaN, y = b[k] ?? NaN;   // (JSON: null where a class was never seen)
+      out[k] = Number.isNaN(x) ? y : Number.isNaN(y) ? x : x + (y - x) * f;
+    }
+    return out;
+  }
+  private ratesWaiting: ((d: { e: Float64Array; t: Float64Array; kinds: number; ranks: number; cell: number }) => void) | null = null;
+  /** (calibration) energy and observed time per kind × class so far */
+  rates() { return new Promise<{ e: Float64Array; t: Float64Array; kinds: number; ranks: number; cell: number }>((res) => {
+    this.ratesWaiting = (d) => { this.ratesWaiting = null; res(d); };
+    this.worker.postMessage({ type: 'rates' });
+  }); }
   get visible() { return noiseOn.value > 0.5; }
   set visible(on: boolean) { noiseOn.value = on ? 1 : 0; if (on) this.sinceCompute = COMPUTE; }
 
-  /** sound energy emitted at a scene position (group frame: x east, z south) over dt seconds */
-  emit(x: number, z: number, lw: number, dt: number) {
-    if (lw > 0) this.batch.push(x, -z, dbToWatt(lw) * dt);
+  /** sound energy emitted at a scene position (group frame: x east, z south) over dt seconds, by a source
+   *  of `kind` (roads.ts KIND: road, tram, rail) */
+  emit(x: number, z: number, lw: number, dt: number, kind: number) {
+    if (lw > 0) this.batch.push(x, -z, dbToWatt(lw) * dt, kind);
+  }
+
+  /** the street network (scene metres): streets not watched get the level of their kind and class */
+  setLanes(lanes: Lane[]) {
+    const out: number[] = [];
+    for (const l of lanes) {
+      if (l.bikeOnly) continue;
+      const p = l.pts;
+      for (let i = 0; i + 5 < p.length; i += 3) {
+        const x0 = p[i], z0 = p[i + 2], x1 = p[i + 3], z1 = p[i + 5];
+        const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, z1 - z0) / 2));
+        for (let k = 0; k < n; k++) out.push(x0 + ((x1 - x0) * k) / n, -(z0 + ((z1 - z0) * k) / n), l.kind, l.rank);
+      }
+    }
+    const pts = new Float32Array(out);
+    this.worker.postMessage({ type: 'lanes', pts }, [pts.buffer]);
   }
   setFocus(x: number, z: number) { this.focus[0] = x; this.focus[1] = -z; }
 
@@ -102,16 +156,20 @@ export class NoiseMap {
   update(dt: number) {
     this.sinceSend += dt;
     if (this.sinceSend >= SEND) {
+      if (!this.recording) { this.batch.length = 0; this.sinceSend = 0; }
+      else {
       const src = new Float32Array(this.batch);
       this.worker.postMessage({ type: 'add', src, focus: this.focus, radius: OBSERVED_RADIUS, dt: this.sinceSend }, [src.buffer]);
       this.batch.length = 0;
       this.sinceSend = 0;
+      }
     }
     this.sinceCompute += dt;
     if (this.visible && !this.busy && this.sinceCompute >= COMPUTE) {
       this.busy = true;
       this.sinceCompute = 0;
-      this.worker.postMessage({ type: 'compute' });
+      const prior = this.priorNow();
+      this.worker.postMessage({ type: 'compute', prior }, prior ? [prior.buffer] : []);
     }
   }
 
@@ -128,7 +186,7 @@ export class NoiseMap {
   /** legend: the colour scale as HTML */
   static legend() {
     const hex = (h: number) => '#' + h.toString(16).padStart(6, '0');
-    return '<b>noise</b> Leq dB(A), traffic since you started watching<br>' +
+    return '<b>noise</b> Leq dB(A): traffic measured where you watched,<br>estimated per street type elsewhere<br>' +
       STOPS.map(([db, h], i) => `<span style="background:${hex(h)}"></span>${i === 0 ? '< ' : ''}${db}${i === STOPS.length - 1 ? '+' : ''}`).join('<br>');
   }
 }

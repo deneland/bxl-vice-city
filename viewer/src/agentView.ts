@@ -47,28 +47,28 @@ export class AgentView {
   get active() { return !!(this.agent || this.vehicle); }
   get isFollowing() { return this.following; }
 
-  /** try to pick a vehicle along a ray; true if one was hit */
-  pick(ray: THREE.Ray) {
+  /** the agent or vehicle along a ray, if any (at the moment of the click: vehicles move on before the
+   *  click is acted on, see select) */
+  find(ray: THREE.Ray): { agent: Agent | null; vehicle: Vehicle | null } | null {
     const t = this.traffic();
-    if (!t) return false;
+    if (!t) return null;
     const P = this.peds();
     const meshes: THREE.Object3D[] = [...t.pickable(), ...(P ? [P.mesh] : [])];
     for (const m of meshes) (m as THREE.InstancedMesh).computeBoundingSphere();   // instances move: refresh first
     this.ray.ray.copy(ray);
     const hit = this.ray.intersectObjects(meshes, false)[0];
-    if (!hit || hit.instanceId === undefined) return false;
+    if (!hit || hit.instanceId === undefined) return null;
     if (P && hit.object === P.mesh) {
       const a = P.agentAt(hit.instanceId);
-      if (!a) return false;
-      this.agent = a; this.vehicle = null; this.hasPos = false;
-      this.render(true); this.onChange();
-      return true;
+      return a ? { agent: a, vehicle: null } : null;
     }
     const v = t.vehicleAt(hit.object, hit.instanceId);
-    if (!v) return false;
-    this.agent = v.agent;
-    this.vehicle = v.agent ? null : v;
-    this.hasPos = false;
+    return v ? { agent: v.agent, vehicle: v.agent ? null : v } : null;
+  }
+  /** show what find returned; false: nothing (or it has gone since) */
+  select(f: { agent: Agent | null; vehicle: Vehicle | null } | null) {
+    if (!f || (f.vehicle && !this.traffic()?.vehicles.includes(f.vehicle))) return false;
+    this.agent = f.agent; this.vehicle = f.vehicle; this.hasPos = false;
     this.render(true);
     this.onChange();
     return true;

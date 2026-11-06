@@ -35,6 +35,7 @@ import { ACCENTS, AMBULANCE_YELLOW, BUS_COLORS, MODELS, POLICE_WHITE, STIB_BUS, 
 const PLAN = 120;            // m of route planned ahead
 const LOOK = 90;             // m looked ahead for obstacles and curves
 const BUMP = 20 / 3.6;       // m/s over a speed bump / raised table
+const RED_RUN = 15 / 3.6;    // m/s: an emergency vehicle through a red light (braking comfortably before)
 const APPROACH = 30;         // m: signals / signs this close to a lane's end belong to the junction
 const PATIENCE = 6;          // s waiting at a junction before ignoring priority (if nothing is in the way)
 const NO_ROOM_PATIENCE = 8;  // s before entering even without room after the junction
@@ -479,8 +480,9 @@ export class Traffic {
   }
 
   /** An emergency vehicle on a call (police or ambulance, beacons and siren): from a kerb spot `dist` m
-   *  from (x, z) on one side to one on the other side, so it passes near there. Drives the normal network
-   *  (stops at red lights; traffic does not make way yet). null: no route found. */
+   *  from (x, z) on one side to one on the other side, so it passes near there. Drives the normal network;
+   *  goes through red lights at walking-ish speed when the junction is clear, and cross traffic gives way to
+   *  it (traffic ahead does not pull over). null: no route found. */
   spawnEmergency(x: number, z: number, dist = 500): Vehicle | null {
     for (let attempt = 0; attempt < 6; attempt++) {
       const a = Math.random() * Math.PI * 2, dx = Math.cos(a) * dist, dz = Math.sin(a) * dist;
@@ -739,6 +741,7 @@ export class Traffic {
 
   /** does vehicle y (approaching curve cy) go before x (curve cx)? */
   private before(y: Vehicle, cy: Path, x: Vehicle, cx: Path) {
+    if (!!y.siren !== !!x.siren) return !!y.siren;            // way for the siren
     const ay = cy.from!.approach!, ax = cx.from!.approach!;
     if (!ax.junction.signalled) {
       if (ay.yields !== ax.yields) return ax.yields;           // give way / stop signs
@@ -834,7 +837,7 @@ export class Traffic {
       const j = x.c.junction!, sig = x.c.from!.approach!.signal;
       const canStop = x.d > stopDistance(x.v);
       x.v.why = '';
-      if (sig && !(sig.state === GREEN || (sig.state === AMBER && !canStop))) x.v.why = 'light';
+      if (sig && !x.v.siren && !(sig.state === GREEN || (sig.state === AMBER && !canStop))) x.v.why = 'light';
       else if (this.occupied(j, x.v, x.c)) x.v.why = 'occupied';
       else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'committed';
       else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'no room';   // don't block the box
@@ -898,11 +901,17 @@ export class Traffic {
           }
         }
         // stop lines: a junction curve we may not enter yet, crossing lights
+        // a siren at a red light: down to RED_RUN at the stop line, braking comfortably (then on through)
+        if (v.siren && i > 0 && p.junction && p.from!.approach!.signal && p.from!.approach!.signal.state !== GREEN && d + p.start > 0)
+          v0 = Math.min(v0, Math.sqrt(RED_RUN * RED_RUN + 2 * t.b * 0.6 * (d + p.start)));
         if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = junctionBlock(v.why); v.blockBy = null; }
         if (v.kind === KIND.road)
-          for (const x of p.crossings)
-            if (x.s > from && x.sig.state !== GREEN && d + x.s < gap
+          for (const x of p.crossings) {
+            if (x.s <= from - t.total || x.sig.state === GREEN) continue;
+            if (v.siren) { const dd = d + x.s; v0 = Math.min(v0, dd <= 0 ? RED_RUN : Math.sqrt(RED_RUN * RED_RUN + 2 * t.b * 0.6 * dd)); continue; }
+            if (x.s > from && d + x.s < gap
               && (x.sig.state === RED || d + x.s > stopDistance(v))) { gap = d + x.s; vLead = 0; v.block = 'crossing'; v.blockBy = null; }
+          }
         // mapped crosswalks with someone on them: stop before (unless too close to stop: drive on)
         if (v.kind === KIND.road && this.zebraBusy)
           for (const z of p.zebras)

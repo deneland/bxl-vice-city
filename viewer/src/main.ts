@@ -259,6 +259,8 @@ async function main() {
         }
         noise = new NoiseMap([L0.size[0] * VS, L0.size[1] * VS], () => { dirty = true; });
         noise.visible = noiseWanted;
+        noise.setLanes(n.lanes);
+        noise.loadPrior(`noise/${ROI}.json`);   // street-type levels from a calibration run (bench/noisecal.mjs)
         city = new CitySound(traffic, noise);
         if (soundWanted) city.setSound(true);
       } catch (e) {   // (whatever failed: traffic stays off, and T can try again)
@@ -386,12 +388,14 @@ async function main() {
     if (walk.active && !walk.locked) return; // this click re-locks the mouse
     const ndc = walk.active ? new THREE.Vector2(0, 0)
       : new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+    // a vehicle first (who drives it; hit-tested now, it moves on), else the voxel under the cursor
+    raycaster.setFromCamera(ndc, camera);
+    const found = trafficOn ? agentView.find(raycaster.ray) : null;
     // wait briefly: a double-click sets the orbit point instead
     clearTimeout(clickTimer);
     clickTimer = setTimeout(() => {
       raycaster.setFromCamera(ndc, camera);
-      // a vehicle first (who drives it), else the voxel under the cursor
-      if (trafficOn && agentView.pick(raycaster.ray)) { inspector.clear(); telemetry.event('inspect-vehicle', {}); return; }
+      if (agentView.select(found)) { inspector.clear(); telemetry.event('inspect-vehicle', {}); return; }
       agentView.clear();
       inspector.pick(raycaster.ray).then(() => telemetry.event('inspect', {}));
     }, walk.active ? 0 : 250);
@@ -536,6 +540,7 @@ async function main() {
         city.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
         city.update(Math.min(interval, 100) / 1000);
         noise.setFocus(f.x - fx.position.x, f.z - fx.position.z);
+        noise.hour = now / H;
         noise.update(Math.min(interval, 100) / 1000);
         prof.end('sound');
       }

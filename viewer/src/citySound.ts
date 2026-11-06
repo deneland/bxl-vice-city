@@ -56,7 +56,7 @@ export class CitySound {
 
   /** a one-shot: energy into the noise map; heard if sound is on */
   private event(kind: keyof typeof LW, p: THREE.Vector3, buf: AudioBuffer | undefined, rate: number) {
-    this.noise.emit(p.x, p.z, LW[kind], DUR[kind]);
+    this.noise.emit(p.x, p.z, LW[kind], DUR[kind], kind === 'bell' ? KIND.tram : KIND.road);
     if (!buf || !this.audio?.enabled) return;
     const g = lwGain(LW[kind]);
     if (g * REF_DIST / Math.max(REF_DIST, p.distanceTo(this.ear)) < 0.002) return;   // (inaudible)
@@ -78,7 +78,7 @@ export class CitySound {
     for (const v of this.traffic.vehicles) {
       this.traffic.positionOf(v, p);
       const lw = vehicleLw(v.t.name, v.v, !!v.siren);
-      this.noise.emit(p.x, p.z, lw, step);
+      this.noise.emit(p.x, p.z, lw, step, v.kind);
       // events
       if (v.kind === KIND.road && !v.transit && !v.siren && v.t.name !== 'bike' && v.stuck > HONK_AFTER
         && Math.random() < HONK_RATE * v.ag * step && (this.nextHonk.get(v) ?? 0) < this.time) {
