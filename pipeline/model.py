@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from common import FLAG_APRON, ROOT, read_tile
+from common import FLAG_APRON, ROOT, level_tiles, read_tile
 
 
 
@@ -17,7 +17,7 @@ class Model:
         self.man = json.loads((self.dir / "manifest.json").read_text())
         L0 = self.man["levels"][0]
         self.vs, self.size = L0["voxelSize"], L0["size"]
-        self.files = {(t["tx"], t["ty"]): t["file"] for t in L0["tiles"]}
+        self.files = {(t["tx"], t["ty"]): t["file"] for t in level_tiles(L0, self.man["tileSize"])}
         self.cache = OrderedDict()
 
     def tile(self, tx, ty):

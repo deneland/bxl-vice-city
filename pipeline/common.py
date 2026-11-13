@@ -115,10 +115,109 @@ def read_tile(path: Path) -> np.ndarray:
     return decode_tile(path.read_bytes())
 
 
+# --- manifest (version 4): each level's tile list as columns, file names implied ---
+#   tiles: {"at": [ty * W + tx of each tile, ascending, as differences (first: from 0)],
+#           "zmin": [...], "zh": [zmax - zmin]}     W = tiles across the level
+MANIFEST_VERSION = 4
+
+
+def tile_file(level: int, tx: int, ty: int) -> str:
+    return f"L{level}/t_{tx}_{ty}.vxt"
+
+
+def pack_level_tiles(tiles: list, level: dict, tile_size: int) -> dict:
+    W = -(-level["size"][0] // tile_size)
+    ts = sorted(tiles, key=lambda t: (t["ty"], t["tx"]))
+    at = [t["ty"] * W + t["tx"] for t in ts]
+    return {"at": [a - b for a, b in zip(at, [0] + at[:-1])], "zmin": [t["zmin"] for t in ts],
+            "zh": [t["zmax"] - t["zmin"] for t in ts]}
+
+
+def level_tiles(level: dict, tile_size: int) -> list:
+    """a manifest level's tiles as [{file, tx, ty, zmin, zmax}] (any manifest version)"""
+    t = level["tiles"]
+    if isinstance(t, list):
+        return t
+    W, at, out = -(-level["size"][0] // tile_size), 0, []
+    for d, z0, zh in zip(t["at"], t["zmin"], t["zh"]):
+        at += d
+        tx, ty = at % W, at // W
+        out.append({"file": tile_file(level["level"], tx, ty), "tx": tx, "ty": ty, "zmin": z0, "zmax": z0 + zh})
+    return out
+
+
 # --- road network (roads.py -> viewer/public/roads/<roi>.json): each edge is a list in this order ---
 (E_FROM, E_TO, E_KIND, E_ONEWAY, E_KMH, E_LANES, E_XYZ, E_RANK, E_CONTROLS, E_CONTRA, E_PAVEMENT, E_CROSSWALKS,
  E_RING, E_PARKING) = range(14)
 KIND_ROAD, KIND_TRAM, KIND_RAIL = 0, 1, 2
+# Polylines (edge and piece xyz, footpath points) are stored as whole tenths of a voxel, each point as the
+# difference to the previous one ("xyz": "delta10"); read_roads gives them back as voxel floats.
+ROADS_XYZ = "delta10"
+
+
+def pack_line(xyz: list) -> list:
+    q = [round(v * 10) for v in xyz]
+    return q[:3] + [q[i] - q[i - 3] for i in range(3, len(q))]
+
+
+def unpack_line(q: list) -> list:
+    out = list(q[:3])
+    for i in range(3, len(q)):
+        out.append(out[i - 3] + q[i])
+    return [v / 10 for v in out]
+
+
+def _map_lines(net: dict, fn) -> dict:
+    net = dict(net)
+    for k in ("edges", "pieces"):
+        net[k] = [[*e[:E_XYZ], fn(e[E_XYZ]), *e[E_XYZ + 1:]] for e in net.get(k, [])]
+    net["paths"] = [[ends, fn(p)] for ends, p in net.get("paths", [])]
+    return net
+
+
+def write_roads(path: Path, net: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**_map_lines(net, pack_line), "xyz": ROADS_XYZ}, separators=(",", ":")))
+
+
+def read_roads(path: Path) -> dict:
+    net = json.loads(path.read_text())
+    return _map_lines(net, unpack_line) if net.get("xyz") == ROADS_XYZ else net
+
+
+# --- timetable (transit.py -> viewer/public/transit/<roi>.json) ---
+# Trips repeat: the same stops in the same order (a pattern) and the same times between them (a timing).
+#   patterns: [[route, headsign, [stop, ...]]]   timings: [[arrival - first arrival, departure - arrival] per stop, flat]
+#   schedules: [[[pattern, timing, first arrival s], ...]]   (distinct days)   week: [schedule of Monday .. Sunday]
+def pack_timetable(days: list) -> dict:
+    patterns, timings, schedules, week, seen = {}, {}, [], [], {}
+    for day in days:
+        trips = []
+        for route, headsign, st in day:
+            t0 = st[0][1]
+            p = patterns.setdefault((route, headsign, tuple(s[0] for s in st)), len(patterns))
+            q = timings.setdefault(tuple(x for s in st for x in (s[1] - t0, s[2] - s[1])), len(timings))
+            trips.append([p, q, t0])
+        key = json.dumps(trips)
+        if key not in seen:
+            seen[key] = len(schedules)
+            schedules.append(trips)
+        week.append(seen[key])
+    return {"patterns": [[r, h, list(st)] for r, h, st in patterns], "timings": [list(t) for t in timings],
+            "schedules": schedules, "week": week}
+
+
+def unpack_timetable(tt: dict) -> list:
+    """-> days: Monday .. Sunday, [[route, headsign, [[stop, arrival s, departure s], ...]], ...]"""
+    days = []
+    for k in tt["week"]:
+        day = []
+        for p, q, t0 in tt["schedules"][k]:
+            route, headsign, stops = tt["patterns"][p]
+            tm = tt["timings"][q]
+            day.append([route, headsign, [[s, t0 + tm[2 * i], t0 + tm[2 * i] + tm[2 * i + 1]] for i, s in enumerate(stops)]])
+        days.append(day)
+    return days
 
 
 def log_clock():

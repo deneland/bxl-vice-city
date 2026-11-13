@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from common import KIND_RAIL, KIND_ROAD, KIND_TRAM, C_BUILDING as BUILDING, C_GROUND, ROOT, bbox, overpass, region, to_l72
+from common import KIND_RAIL, KIND_ROAD, KIND_TRAM, C_BUILDING as BUILDING, C_GROUND, ROOT, bbox, overpass, region, to_l72, write_roads
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -651,8 +651,7 @@ def build():
                                       "pavement [left, right] m from the centreline (0: none found)",
                                       "crosswalks [[m, 1 signals|2 marked|3 unmarked]]", "roundabout",
                                       "OSM parking [left, right]: 0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular"]}
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(out, separators=(",", ":")))
+    write_roads(OUT, out)
     nctl = sum(len(e.controls) for e in edges)
     print(f"{len(node_xy)} nodes ({sum(node_sig)} signalled), {len(edges)} edges ({nctl} controls); road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "
           f"rail {stats['rail'] / 1000:.1f} km -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")

@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (E_CROSSWALKS, E_FROM, E_KIND, E_ONEWAY, E_PARKING, E_PAVEMENT, E_TO, E_XYZ, KIND_ROAD, ROOT,
+from common import (read_roads, E_CROSSWALKS, E_FROM, E_KIND, E_ONEWAY, E_PARKING, E_PAVEMENT, E_TO, E_XYZ, KIND_ROAD, ROOT,
                     VS, bbox, overpass, region, to_l72)
 from model import Model
 
@@ -179,7 +179,7 @@ def main():
         out[ok] = grid[iy[ok], ix[ok]]
         return out
 
-    roads = json.loads(ROADS.read_text())
+    roads = read_roads(ROADS)
     edges = roads["edges"]
     # how far each junction's crossing streets reach: the kerb is ~1 m inside the pavement walking line
     # (pavement offsets from the LiDAR facades, roads.py); degree-2 nodes are bends, not junctions

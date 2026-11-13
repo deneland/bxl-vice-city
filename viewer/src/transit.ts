@@ -11,6 +11,24 @@ export interface TransitData {
   days: [number, string, [number, number, number][]][][];   // Monday..Sunday: [route, headsign, [[stop, arr, dep]]]
 }
 
+/** the timetable as stored (pipeline common.pack_timetable): trips as a stop pattern, a timing and a start
+ *  time; distinct days once, the week as indices. Older files have `days` directly. */
+interface PackedTimetable {
+  routes: TransitData['routes']; stops: TransitData['stops'];
+  patterns: [number, string, number[]][];    // route, headsign, stops
+  timings: number[][];                       // per stop: arrival - first arrival, departure - arrival
+  schedules: [number, number, number][][];   // per distinct day: [pattern, timing, first arrival s]
+  week: number[];                            // Monday..Sunday -> schedule
+}
+export function unpackTimetable(d: TransitData | PackedTimetable): TransitData {
+  if (!('week' in d)) return d;
+  const days = d.week.map((k) => d.schedules[k].map(([p, q, t0]) => {
+    const [route, headsign, stops] = d.patterns[p], tm = d.timings[q];
+    return [route, headsign, stops.map((s, i) => [s, t0 + tm[2 * i], t0 + tm[2 * i] + tm[2 * i + 1]])] as TransitData['days'][number][number];
+  }));
+  return { routes: d.routes, stops: d.stops, days };
+}
+
 export class Transit {
   private spots = new Map<string, Spot | null>();
   private day = -1;

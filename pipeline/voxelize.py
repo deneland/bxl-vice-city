@@ -45,7 +45,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (CFG, encode_tile, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+from common import (CFG, MANIFEST_VERSION, encode_tile, pack_level_tiles, read_roads, tile_file, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
                     FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
 
 ROI_NAME, ROI = region()
@@ -282,7 +282,7 @@ def write_tiles(L, v: Vox, tx_range, ty_range):
             buf[:, 3:6] = v.col[m]
             buf[:, 6] = v.cls[m]
             buf[:, 7] = v.flag[m] | np.where(apron, FLAG_APRON, 0)
-            name = f"L{L}/t_{tx}_{ty}.vxt"
+            name = tile_file(L, tx, ty)
             data = encode_tile(buf, CH + 2)
             (DEST / name).write_bytes(data)
             nbytes += len(data)
@@ -570,7 +570,7 @@ def build_zones() -> bool:
     if not ROADS_F.exists():
         return False
     from PIL import Image, ImageDraw
-    net = json.loads(ROADS_F.read_text())
+    net = read_roads(ROADS_F)
     img = Image.new("L", (NX, NY), 0)
     dr = ImageDraw.Draw(img)
     road_polys, pave_polys = [], []
@@ -756,9 +756,10 @@ def main() -> None:
         log(f"L{L}: {VS * (1 << L)} m, {lv['voxels']:,} voxels, ~{lv['faces']:,} faces, "
             f"{len(lv['tiles'])} tiles, {lv['bytes'] / 1e6:.1f} MB")
         out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
-                           "voxels": lv["voxels"], "faces": lv["faces"], "tiles": lv["tiles"]})
+                           "voxels": lv["voxels"], "faces": lv["faces"]})
+        out_levels[-1]["tiles"] = pack_level_tiles(lv["tiles"], out_levels[-1], CH)
     manifest = {
-        "version": 3, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
+        "version": MANIFEST_VERSION, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
         "origin": [ROI["xmin"], ROI["ymin"], z0], "tileSize": CH,
         "home": [CFG.get("view", {}).get("x", (ROI["xmin"] + ROI["xmax"]) / 2),
                  CFG.get("view", {}).get("y", (ROI["ymin"] + ROI["ymax"]) / 2)],

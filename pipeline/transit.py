@@ -14,7 +14,7 @@ import json
 import zipfile
 from datetime import date, timedelta
 
-from common import ROOT, VS, region, to_l72
+from common import ROOT, VS, pack_timetable, region, to_l72
 
 ROI_NAME, ROI = region()
 ZIP = ROOT / "data/raw/gtfs/stib.zip"
@@ -104,10 +104,9 @@ def main():
     if not all(out_days):
         raise SystemExit(f"no trips on {[days[k] for k, d in enumerate(out_days) if not d]} of the week of {ref_week[0]}")
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"routes": out_routes, "stops": out_stops, "days": out_days,
+    OUT.write_text(json.dumps({"routes": out_routes, "stops": out_stops, **pack_timetable(out_days),
                                "fields": {"routes": ["name", "mode (0 tram, 3 bus)", "colour"],
-                                          "trips": ["route", "headsign", "[[stop, arrival s, departure s]]"],
-                                          "days": "Monday .. Sunday"}}, separators=(",", ":"), ensure_ascii=False))
+                                          "trips": "see common.pack_timetable"}}, separators=(",", ":"), ensure_ascii=False))
     print(f"week of {ref_week[0]}: {len(out_stops)} stops, {len(out_routes)} lines ({', '.join(r[0] for r in out_routes)}); "
           f"trips per day {[len(d) for d in out_days]} -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 

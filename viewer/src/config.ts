@@ -5,6 +5,9 @@ const opt = (k: string) => (q.has(k) ? Number(q.get(k)) : null);
 
 export const config = {
   roi: q.get('roi') ?? 'schaerbeek',
+  /** where the data files are (tiles, roads, timetable, ...): ?data=<url>, else VITE_DATA_URL set at build
+   *  time, else next to the page. Lets the data live on another host than the app (a bigger region). */
+  data: (q.get('data') ?? import.meta.env.VITE_DATA_URL ?? '').replace(/([^/])$/, '$1/'),
   /** ?backend=webgl: force the WebGL2 backend */
   forceWebGL: q.get('backend') === 'webgl',
   shadows: q.get('shadows') !== '0',
@@ -42,3 +45,6 @@ export const config = {
   /** ?dbg=shadow: shadow maps as colours; ?dbg=holes: magenta where nothing was drawn */
   debug: q.get('dbg'),
 } as const;
+
+/** a data file's address (path relative to the data root, e.g. `roads/schaerbeek.json`) */
+export const dataUrl = (path: string) => config.data + path;

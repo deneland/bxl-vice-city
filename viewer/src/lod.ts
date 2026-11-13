@@ -9,7 +9,7 @@ import * as THREE from 'three/webgpu';
 import { ATLAS_W, createVoxelMaterial, voxelGeometryBase } from './voxelMaterial';
 import type { MeshRequest, MeshResult } from './mesher.worker';
 
-export interface TileInfo { file: string; tx: number; ty: number; count: number; zmin: number; zmax: number }
+export interface TileInfo { file: string; tx: number; ty: number; zmin: number; zmax: number }
 export interface LevelInfo { level: number; voxelSize: number; size: [number, number, number]; voxels: number; faces: number; tiles: TileInfo[] }
 
 /** Face data (colour, class) of all resident tiles in one texture: each tile owns a range of rows. Merged

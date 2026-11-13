@@ -1,4 +1,5 @@
-import { config } from './config';
+import { config, dataUrl } from './config';
+import { levelTiles } from './tileFormat';
 import { H, brusselsInstant, brusselsNow, weekday } from './clock';
 import { DynamicResolution } from './dynres';
 import { PlaceIndex } from './places';
@@ -12,7 +13,7 @@ import { Traffic } from './traffic';
 import { Agents } from './agents';
 import { AgentView } from './agentView';
 import { Pedestrians } from './pedestrians';
-import { Transit } from './transit';
+import { Transit, unpackTimetable } from './transit';
 import { Parking } from './parking';
 import { baseVoxel, gridOrigin, lampLightAt, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
@@ -67,7 +68,8 @@ const matricesClose = (a: THREE.Matrix4, b: THREE.Matrix4, eps: number) =>
 
 async function main() {
   const tStart = performance.now();
-  const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`, { cache: 'no-store' })).json();
+  const manifest: Manifest = await (await fetch(dataUrl(`tiles/${ROI}/manifest.json`), { cache: 'no-store' })).json();
+  for (const lv of manifest.levels) lv.tiles = levelTiles(lv, manifest.tileSize);
   const L0 = manifest.levels[0];
   const VS = L0.voxelSize, CH = manifest.tileSize;
   // data credits, short as on web maps (the full wording in each tooltip and in the README, Data sources and licences)
@@ -85,6 +87,10 @@ async function main() {
     el.href = href; el.target = '_blank'; el.rel = 'noopener'; el.textContent = text; el.title = title;
     attr.append(el);
   }
+  const repo = document.createElement('a');
+  repo.href = 'https://github.com/deneland/bxl-vice-voxel'; repo.target = '_blank'; repo.rel = 'noopener';
+  repo.textContent = 'source on GitHub'; repo.title = 'code (MIT) and how the city is built';
+  attr.prepend(repo, ' · ');
 
   // scene frame: origin at the home point, ground ≈ y 0
   const homeVX = (manifest.home[0] - manifest.origin[0]) / VS;
@@ -194,13 +200,13 @@ async function main() {
   gridOrigin.value.copy(world.position);
   baseVoxel.value = VS;
   let lamps: THREE.Object3D | null = null;
-  loadLamps(`lights/${ROI}.json`, glowFx, VS, [L0.size[0], L0.size[1]]).then((m) => {
+  loadLamps(dataUrl(`lights/${ROI}.json`), glowFx, VS, [L0.size[0], L0.size[1]]).then((m) => {
     lamps = m;
     if (m) m.visible = night.value > 0.01;
     dirty = true;
   }).catch((e) => console.warn('street lights unavailable', e));
   // movement network (OSM): debug overlay (R) and traffic (T)
-  const network = loadRoads(`roads/${ROI}.json`).then((net) => net && { net, lanes: buildLanes(net, VS) })
+  const network = loadRoads(dataUrl(`roads/${ROI}.json`)).then((net) => net && { net, lanes: buildLanes(net, VS) })
     .catch((e) => { console.warn('road network unavailable', e); return null; });
   let roads: THREE.Object3D | null = null;
   const setRoads = async (on: boolean) => {
@@ -236,7 +242,7 @@ async function main() {
       buildingTraffic = true;
       try {
         // all data files at once (they used to be fetched one after another)
-        const json = (u: string) => fetch(u).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        const json = (u: string) => fetch(dataUrl(u)).then((r) => (r.ok ? r.json() : null)).catch(() => null);
         const [n, palette, tt, places, pk] = await Promise.all([network,
           json(`vehicles/${ROI}.json`),    // car paint colours measured on the parked cars in the LiDAR (vehicles.py)
           json(`transit/${ROI}.json`),     // STIB lines from the timetable (transit.py); without it trams wander
@@ -249,7 +255,7 @@ async function main() {
           deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
           (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
           palette?.palette ?? []);
-        if (tt) transit = new Transit(tt, traffic, VS);
+        if (tt) transit = new Transit(unpackTimetable(tt), traffic, VS);
         traffic.enableLayer(DYNAMIC_SHADOW_LAYER);
         fx.add(traffic.group, traffic.lights);
         await nextFrame();
@@ -274,7 +280,7 @@ async function main() {
         noise = new NoiseMap([L0.size[0] * VS, L0.size[1] * VS], () => { dirty = true; });
         noise.visible = noiseWanted;
         noise.setLanes(n.lanes);
-        noise.loadPrior(`noise/${ROI}.json`);   // street-type levels from a calibration run (bench/noisecal.mjs)
+        noise.loadPrior(dataUrl(`noise/${ROI}.json`));   // street-type levels from a calibration run (bench/noisecal.mjs)
         city = new CitySound(traffic, noise);
         if (soundWanted) city.setSound(true);
       } catch (e) {   // (whatever failed: traffic stays off, and T can try again)
@@ -349,7 +355,7 @@ async function main() {
 
   // --- level-of-detail tiles ------------------------------------------------
   const ERR = config.err;           // max on-screen size of one voxel, px
-  const lod = new TileManager(`tiles/${ROI}`, CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer);
+  const lod = new TileManager(dataUrl(`tiles/${ROI}`), CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
   lod.budgetFaces = config.budget * 1e6;  // resident faces, millions (the face atlas holds 33.5M: slack)
   const t0 = performance.now();
@@ -368,7 +374,7 @@ async function main() {
   if (config.traffic) ready.then(() => setTraffic(true));
 
   // --- CPU voxel access, walking, picking ---------------------------------
-  const vox = new Voxels(`tiles/${ROI}`, CH, L0, world, lod.query);
+  const vox = new Voxels(dataUrl(`tiles/${ROI}`), CH, L0, world, lod.query);
   const crosshair = document.getElementById('crosshair')!;
   const walkHint = document.getElementById('walk-hint')!;
   const walk = new Walk(camera, renderer.domElement, vox, (active) => {

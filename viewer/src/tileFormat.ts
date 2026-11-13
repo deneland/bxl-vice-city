@@ -6,7 +6,22 @@ export const FLAG_APRON = 2;     // belongs to the neighbouring tile (culling on
 export const FLAG_PHOTO = 8;     // colour from street-level photos
 export const C_GROUND = 2;       // LiDAR (ASPRS) ground class
 
-const MAGIC = [0x56, 0x58, 0x54, 0x03];   // "VXT\x03"
+const MAGIC = [0x56, 0x58, 0x54, 0x03];
+
+/** a manifest level's tile list: version 4 stores it as columns with the file names implied
+ *  (pipeline common.pack_level_tiles); older manifests as a list of objects. Returns the objects. */
+export function levelTiles(level: { level: number; size: number[]; tiles: unknown }, tileSize: number) {
+  const t = level.tiles as { at: number[]; zmin: number[]; zh: number[] } | { file: string; tx: number; ty: number; zmin: number; zmax: number }[];
+  if (Array.isArray(t)) return t;
+  const W = Math.ceil(level.size[0] / tileSize), out = [];
+  let at = 0;
+  for (let i = 0; i < t.at.length; i++) {
+    at += t.at[i];
+    const tx = at % W, ty = (at - tx) / W;
+    out.push({ file: `L${level.level}/t_${tx}_${ty}.vxt`, tx, ty, zmin: t.zmin[i], zmax: t.zmin[i] + t.zh[i] });
+  }
+  return out;
+}   // "VXT\x03"
 
 /** fetch a tile and decode it (a page instead of a tile, e.g. a server's fallback for a missing file, is an error) */
 export async function fetchTile(url: string): Promise<Uint8Array> {

@@ -15,6 +15,16 @@ export interface RoadNetwork {
   pieces?: RoadNetwork['edges'];
   /** footpaths (parks, squares, pedestrian streets): [[node a, node b], xyz...] */
   paths?: [[number, number], number[]][];
+  /** 'delta10': polylines stored as whole tenths of a voxel, each point the difference to the previous
+   *  (pipeline common.write_roads); loadRoads turns them back into voxel coordinates */
+  xyz?: string;
+}
+
+/** a delta10 polyline -> voxel coordinates */
+function unpackLine(q: number[]): number[] {
+  const out = q.slice(0, 3);
+  for (let i = 3; i < q.length; i++) out.push(out[i - 3] + q[i]);
+  return out.map((v) => v / 10);
 }
 
 /** traffic control codes on edges (pipeline roads.py) */
@@ -47,7 +57,14 @@ export interface Lane {
 
 export async function loadRoads(url: string): Promise<RoadNetwork | null> {
   const r = await fetch(url);
-  return r.ok ? r.json() : null;
+  if (!r.ok) return null;
+  const net: RoadNetwork = await r.json();
+  if (net.xyz === 'delta10') {
+    for (const e of [...net.edges, ...(net.pieces ?? [])]) e[6] = unpackLine(e[6]);
+    for (const p of net.paths ?? []) p[1] = unpackLine(p[1]);
+    delete net.xyz;
+  }
+  return net;
 }
 
 // roads.json is in voxels (x east, y north, z up); the scene in metres (x east, y up, z south)
