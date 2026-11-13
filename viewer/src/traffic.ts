@@ -22,6 +22,7 @@
 //
 // The paths and their geometry are in paths.ts, the vehicle types in vehicleTypes.ts.
 import * as THREE from 'three/webgpu';
+import { rng } from './rng';
 import { CONTROL, KIND, type Lane } from './roads';
 import { MinHeap } from './heap';
 import { PointGrid } from './grid';
@@ -290,6 +291,25 @@ export class Traffic {
   draw(camera: THREE.Camera) { this.fleet.update(camera); }
   private kerb: Path[] = [];   // lanes cars park along (spotNear)
   private entries: Path[] = []; private exits: Path[] = [];
+
+  /** where a trip through the region comes in and leaves (seeded: the same for the same trip): an entry lane at
+   *  the region edge and the farthest of a few exit lanes, so it crosses the region */
+  throughSpots(seed: number): [Spot, Spot] | null {
+    if (!this.entries.length || !this.exits.length) return null;
+    const r = rng(seed), a = this.entries[Math.floor(r() * this.entries.length)];
+    sample(a, a.start, tmp);
+    const ax = tmp.x, az = tmp.z;
+    let b = this.exits[0], best = -1;
+    for (let k = 0; k < 4; k++) {
+      const c = this.exits[Math.floor(r() * this.exits.length)];
+      sample(c, c.end, tmp);
+      const d = (tmp.x - ax) ** 2 + (tmp.z - az) ** 2;
+      if (d > best) { best = d; b = c; }
+    }
+    return [{ p: a, s: a.start }, { p: b, s: Math.max(b.start, b.end - 1) }];
+  }
+  /** a spot's position (this group's frame: x, z) */
+  spotXZ(sp: Spot): [number, number] { sample(sp.p, sp.s, tmp); return [tmp.x, tmp.z]; }
 
   /** nearest kerb spot to a scene position (in this group's frame), away from intersections */
   spotNear(x: number, z: number): Spot | null {

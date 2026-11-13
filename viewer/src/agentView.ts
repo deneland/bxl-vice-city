@@ -11,7 +11,7 @@ import type { Pedestrians } from './pedestrians';
 const TYPE_LABEL: Record<string, string> = {
   parent: 'parent, school run', commuterOut: 'works outside the area', commuterIn: 'comes in to work',
   shopper: 'running errands, shopping', evening: 'going out tonight', errands: 'errands', delivery: 'delivery driver',
-  taxi: 'taxi driver', through: 'passing through',
+  taxi: 'taxi driver', through: 'passing through', nightShift: 'works nights', earlyShift: 'works early shifts',
   transit: 'takes the tram / bus', cyclist: 'cyclist', courier: 'meal delivery courier', kid: 'walks the kids to school', walkShop: 'shops on foot', dog: 'dog owner', walkErrand: 'errands on foot', stroll: 'evening walk',
 };
 const CAR_LABEL: Record<string, string> = { hatch: 'hatchback', sedan: 'saloon', estate: 'estate car', suv: 'SUV', van: 'van',

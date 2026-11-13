@@ -75,8 +75,9 @@ const WALK_SPEED = 1.3;   // m/s: average walking speed (estimates for trips awa
 const JUMP_MIN = 200;   // agents re-planned per frame after a jump in time, at least (then by time budget)
 
 // share of each type in the population
-const TYPES: [string, number][] = [['parent', 0.14], ['commuterOut', 0.18], ['commuterIn', 0.12], ['shopper', 0.18],
-  ['evening', 0.1], ['errands', 0.08], ['delivery', 0.06], ['taxi', 0.04], ['through', 0.1]];
+const TYPES: [string, number][] = [['parent', 0.14], ['commuterOut', 0.16], ['commuterIn', 0.11], ['shopper', 0.172],
+  ['evening', 0.1], ['errands', 0.1], ['delivery', 0.06], ['taxi', 0.008], ['through', 0.08], ['nightShift', 0.03],
+  ['earlyShift', 0.04]];
 
 
 export class Agents {
@@ -177,10 +178,10 @@ export class Agents {
   }
 
   /** a rough trip duration before the route is known (for jumps in time) */
-  private guess(a: Agent, from: Where, to: Where) {
-    if (from.kind === 'park' || to.kind === 'park') return 700 / WALK_SPEED + 20;
-    if (from.kind === 'stop' || to.kind === 'stop') return 400 / WALK_SPEED + 20;
-    const pa = this.posOf(a, from), pb = this.posOf(a, to);
+  private guess(a: Agent, from: Activity, to: Activity) {
+    if (from.where.kind === 'park' || to.where.kind === 'park') return 700 / WALK_SPEED + 20;
+    if (from.where.kind === 'stop' || to.where.kind === 'stop') return 400 / WALK_SPEED + 20;
+    const [pa, pb] = this.ends(a, from, to);
     const d = pa && pb ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) * 1.4 : 900;
     return a.mode === 'walk' ? d / WALK_SPEED + 20 : d / 6 + 60;
   }
@@ -240,6 +241,17 @@ export class Agents {
     return dx * dx + dz * dz < r * r;
   }
   /** scene position (x, z) of a place: home / poi / house / park; null for outside the area */
+  /** a trip through the region (edge to edge): where it comes in and leaves (the same for the same trip) */
+  private through(a: Agent, from: Activity, to: Activity): [Spot, Spot] | null {
+    if (from.where.kind !== 'edge' || to.where.kind !== 'edge' || to.purpose !== 'passing') return null;
+    return this.traffic.throughSpots(a.id * 7919 + Math.round(from.until));
+  }
+  /** a trip's straight-line ends (through trips: their entry and exit) */
+  private ends(a: Agent, from: Activity, to: Activity): [[number, number] | null, [number, number] | null] {
+    const th = this.through(a, from, to);
+    return th ? [this.traffic.spotXZ(th[0]), this.traffic.spotXZ(th[1])] : [this.posOf(a, from.where), this.posOf(a, to.where)];
+  }
+
   private posOf(a: Agent, w: Where): [number, number] | null {
     switch (w.kind) {
       case 'home': return a.home >= 0 ? this.places.homePos(a.home) : null;
@@ -260,7 +272,8 @@ export class Agents {
   /** put the agent's trip on the road / pavement in detail (progress: share already done) */
   private detail(a: Agent, progress: number) {
     const from = a.plan[a.i], to = a.plan[a.i + 1];
-    let sa = this.spot(a, from.where), sb = this.spot(a, to.where);
+    const th = this.through(a, from, to);
+    let sa = th ? th[0] : this.spot(a, from.where), sb = th ? th[1] : this.spot(a, to.where);
     if (a.mode === 'car' && a.departedFrom >= 0) sa = this.parkSpot(a.departedFrom) ?? sa;   // pull out of the parking place
     if (a.mode === 'car' && a.reserve >= 0) sb = this.parkSpot(a.reserve) ?? sb;             // and drive to the one taken there
     if (!sa || !sb) return false;
@@ -279,9 +292,10 @@ export class Agents {
       this.leaveParking(a);
       a.reserve = this.parkNear(a, to.where);
     }
-    const dur = this.guess(a, from.where, to.where);
+    const dur = this.guess(a, from, to);
     if (from.where.kind === 'edge' && to.where.kind === 'edge' && to.purpose !== 'passing') { this.arrive(a); return; }
-    const t: Travel = { t0: now - progress * dur, t1: now - progress * dur + dur, pa: this.posOf(a, from.where), pb: this.posOf(a, to.where) };
+    const [pa, pb] = this.ends(a, from, to);
+    const t: Travel = { t0: now - progress * dur, t1: now - progress * dur + dur, pa, pb };
     const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
     if (this.inZone(this.travelPos(t, now), r) && this.spare() && this.detail(a, progress)) {
       a.driving = true; this.drivingSet.add(a); a.ver++;
@@ -411,8 +425,8 @@ export class Agents {
       demote--;
       if (a.mode === 'walk') this.peds?.remove(a); else this.traffic.remove(a);
       const from = a.plan[a.i], to = a.plan[a.i + 1];
-      const t: Travel = { t0: a.departed, t1: now + left / (a.mode === 'walk' ? WALK_SPEED : 7) + 5,
-        pa: this.posOf(a, from.where), pb: this.posOf(a, to.where) };
+      const [pa, pb] = this.ends(a, from, to);
+      const t: Travel = { t0: a.departed, t1: now + left / (a.mode === 'walk' ? WALK_SPEED : 7) + 5, pa, pb };
       a.driving = false; a.travel = t; a.ver++;
       this.drivingSet.delete(a);
       this.travelling.add(a);
@@ -458,7 +472,7 @@ export class Agents {
         a.i = Math.max(0, i - 1);
         const prev = a.plan[a.i];
         if (i > 0 && prev.until <= now) {
-          const dur = this.guess(a, prev.where, a.plan[i].where);
+          const dur = this.guess(a, prev, a.plan[i]);
           if (now < prev.until + dur) { this.depart(a, prev.until, (now - prev.until) / dur); continue; }
           a.i = i;
         }
