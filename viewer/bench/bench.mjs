@@ -99,7 +99,7 @@ if (idleBefore != null && idleBefore > 10) {
 
 const browser = await chromium.launch({
   executablePath: CHROME, headless: true,
-  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface',
+  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--enable-unsafe-webgpu', '--disable-gpu-vsync', '--disable-frame-rate-limit'],
 });
 const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });

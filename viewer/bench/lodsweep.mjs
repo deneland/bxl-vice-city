@@ -32,7 +32,7 @@ mkdirSync(OUT, { recursive: true });
 // a fresh browser per capture: later pages in one headless browser came out blank
 const launch = () => chromium.launch({
   executablePath: opt('chrome', '/usr/bin/chromium'), headless: true,
-  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface',
+  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--disable-gpu-vsync', '--disable-frame-rate-limit', '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'],
 });

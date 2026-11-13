@@ -35,7 +35,7 @@ async function runHour(hour) {
   let browser = null;
   try {
     browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true,
-      args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface'] });
+      args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan'] });
     const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));

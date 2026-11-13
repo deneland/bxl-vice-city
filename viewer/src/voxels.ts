@@ -4,7 +4,7 @@
 import * as THREE from 'three/webgpu';
 import type { LevelInfo, TileInfo } from './lod';
 
-import { FLAG_APRON, FLAG_PHOTO } from './tileFormat';
+import { FLAG_APRON, FLAG_PHOTO, fetchTile } from './tileFormat';
 const MAX_TILES = 48;   // ~1 MB occupancy each
 
 export interface VoxelRecord { x: number; y: number; z: number; r: number; g: number; b: number; cls: number; flags: number }
@@ -60,11 +60,7 @@ export class Voxels {
     if (!info) return Promise.resolve(null);
     let p = this.pending.get(k);
     if (!p) {
-      p = fetch(`${this.base}/${info.file}${this.query}`).then((r) => {
-        if (!r.ok) throw new Error(`tile ${info.file}: HTTP ${r.status}`);
-        return r.arrayBuffer();
-      }).then((buf) => {
-        const raw = new Uint8Array(buf);
+      p = fetchTile(`${this.base}/${info.file}${this.query}`).then((raw) => {
         const ch = this.ch, occ = new Uint8Array(ch * ch * this.nz), photo = new Uint8Array(ch * ch);
         for (let o = 0; o < raw.length; o += 8) {
           if (raw[o + 7] & FLAG_APRON) continue;

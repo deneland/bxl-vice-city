@@ -45,7 +45,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (CFG, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+from common import (CFG, encode_tile, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
                     FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
 
 ROI_NAME, ROI = region()
@@ -282,9 +282,10 @@ def write_tiles(L, v: Vox, tx_range, ty_range):
             buf[:, 3:6] = v.col[m]
             buf[:, 6] = v.cls[m]
             buf[:, 7] = v.flag[m] | np.where(apron, FLAG_APRON, 0)
-            name = f"L{L}/t_{tx}_{ty}.bin"
-            (DEST / name).write_bytes(buf.tobytes())
-            nbytes += buf.nbytes
+            name = f"L{L}/t_{tx}_{ty}.vxt"
+            data = encode_tile(buf, CH + 2)
+            (DEST / name).write_bytes(data)
+            nbytes += len(data)
             zr = v.z[m][~apron]
             tiles.append({"file": name, "tx": tx, "ty": ty, "count": int((~apron).sum()),
                           "zmin": int(zr.min()), "zmax": int(zr.max())})
@@ -757,7 +758,7 @@ def main() -> None:
         out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
                            "voxels": lv["voxels"], "faces": lv["faces"], "tiles": lv["tiles"]})
     manifest = {
-        "version": 2, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
+        "version": 3, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
         "origin": [ROI["xmin"], ROI["ymin"], z0], "tileSize": CH,
         "home": [CFG.get("view", {}).get("x", (ROI["xmin"] + ROI["xmax"]) / 2),
                  CFG.get("view", {}).get("y", (ROI["ymin"] + ROI["ymax"]) / 2)],

@@ -28,7 +28,7 @@ const OUT = resolve(ROOT, 'data/metrics/junctions', stamp);
 mkdirSync(OUT, { recursive: true });
 
 const b = await chromium.launch({ executablePath: process.env.CHROME ?? '/usr/bin/chromium', headless: true,
-  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface'] });
+  args: ['--ignore-gpu-blocklist', '--enable-features=Vulkan', '--use-angle=vulkan'] });
 const p = await b.newPage({ viewport: { width: 800, height: 500 } });
 await p.goto('http://127.0.0.1:5173/?telemetry=0&time=3&date=2026-11-04&weather=clear');
 await p.waitForFunction(() => window.__viewer?.traffic, null, { timeout: 90000 });

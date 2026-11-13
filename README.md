@@ -44,6 +44,10 @@ Schaerbeek build takes ~7 minutes. The viewer serves the newest build (`manifest
 (config, region argument, coordinate transforms, OSM / Mapillary access, the tile and road formats) is in
 `pipeline/common.py`. Lint: `uv run ruff check`.
 
+Tiles are stored compactly (`.vxt`: positions delta-coded, a 256-colour palette per tile, gzipped; about
+a fifth of the raw records, ~0.4 GB for Schaerbeek; `common.encode_tile`). Builds from before this format
+(`.bin`) still load; `uv run python repack.py [name]` converts one in place without rebuilding.
+
 ## Viewer
 
 ```

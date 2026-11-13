@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from common import FLAG_APRON, ROOT
+from common import FLAG_APRON, ROOT, read_tile
 
 
 
@@ -27,7 +27,7 @@ class Model:
             occ = np.zeros((64, 64, self.size[2]), np.uint8)
             f = self.files.get((tx, ty))
             if f:
-                v = np.frombuffer((self.dir / f).read_bytes(), np.uint8).reshape(-1, 8)
+                v = read_tile(self.dir / f)
                 v = v[(v[:, 7] & FLAG_APRON) == 0]
                 occ[v[:, 0] - 1, v[:, 1] - 1, v[:, 2]] = np.maximum(v[:, 6], 1)
             self.cache[(tx, ty)] = occ

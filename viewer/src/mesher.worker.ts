@@ -1,6 +1,6 @@
 // Turns one chunk of sparse voxels into merged visible faces (rectangles).
 //
-// Input voxel record (8 bytes): x+1, y+1, z, r, g, b, class, flags
+// Input voxel record (8 bytes, tileFormat.ts decodeTile): x+1, y+1, z, r, g, b, class, flags
 //   x/y are chunk-local with a 1-voxel apron (0 and CH+1 are neighbours' voxels).
 //
 // Every visible face is found as before (one per exposed voxel side, skirts at tile edges, ambient
@@ -21,7 +21,7 @@
 export interface MeshRequest { id: number; url: string; ch: number; nz: number }   // (the worker fetches the tile itself)
 export interface MeshResult { id: number; q: Float32Array; t: Uint8Array; quads: number; faces: number; failed?: boolean }
 
-import { FLAG_APRON, FLAG_FILL } from './tileFormat';
+import { FLAG_APRON, FLAG_FILL, fetchTile } from './tileFormat';
 
 const SKIRT = 8;   // voxels below a column's top that get side faces along the tile edge
 const MAXRUN = 255;
@@ -31,14 +31,11 @@ const E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
 self.onmessage = async (ev: MessageEvent<MeshRequest>) => {
   const { id, url, ch, nz } = ev.data;
-  let buf: ArrayBuffer;
+  let v: Uint8Array;
   try {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    buf = await r.arrayBuffer();
+    v = await fetchTile(url);
   }
   catch { (self as unknown as Worker).postMessage({ id, q: new Float32Array(0), t: new Uint8Array(0), quads: 0, faces: 0, failed: true }); return; }
-  const v = new Uint8Array(buf);
   const n = v.length / 8;
   const W = ch + 2;
   // occupancy: 0 empty, 1 measured, 2 fill (solid)
