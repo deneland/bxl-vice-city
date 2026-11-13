@@ -18,7 +18,6 @@ dev = ["ruff>=0.14"]
 
 [tool.ruff]
 line-length = 130
-extend-exclude = ["poc"]
 
 [tool.ruff.lint]
 select = ["E9", "F", "B"]

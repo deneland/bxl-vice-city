@@ -87,7 +87,6 @@ bottom-right corner.
 | [Mapillary](https://www.mapillary.com) (API) | 360° street-level images (façade colours, semantic labels), street-lamp map features | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) ([terms](https://www.mapillary.com/terms)) | imagery © Mapillary contributors, CC BY-SA |
 | [STIB-MIVB open data](https://data.stib-mivb.brussels) (GTFS) | tram and bus lines, stops and timetable | STIB-MIVB open data licence ([terms](https://data.stib-mivb.brussels/terms/terms-and-conditions/)) | timetable: STIB-MIVB open data (used in modified form: lines clipped to the region, trips simulated) |
 | [Open-Meteo](https://open-meteo.com) (API, fetched by the viewer) | live weather (clouds, rain) | data [CC BY 4.0](https://open-meteo.com/en/licence); the free API is for non-commercial use | weather data by Open-Meteo.com |
-| [Panoramax Belgium](https://panoramax.osm.be) | prototype scripts only (`pipeline/poc/`, street-level image alignment); not used by the pipeline | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) | imagery © Panoramax contributors, CC BY-SA |
 
 What follows from these licences when publishing a built city (not the code):
 
