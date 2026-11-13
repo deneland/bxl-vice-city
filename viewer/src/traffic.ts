@@ -29,9 +29,10 @@ import { Fleet } from './fleet';
 import type { Agent } from './agents';
 import { AMBER, GREEN, LIGHT_COLORS, RED, conflict, heading, longHeading, makeCurve, makePath, sample, signalState,
   type Junction, type Path, type Signal, type Spot, type Vehicle } from './paths';
-import { ACCENTS, AMBULANCE_YELLOW, BUS_COLORS, MODELS, POLICE_WHITE, STIB_BUS, TRAIN, TRAM_SILVER, TYPES, VAN_WHITE, pickKind,
+import { ACCENTS, AMBULANCE_YELLOW, MODELS, POLICE_WHITE, STIB_BUS, TRAIN, TRAM_SILVER, TYPES, VAN_WHITE, pickKind,
   type Kind } from './vehicleTypes';
 
+const TRAINS = 3;            // trains on the network at a time
 const PLAN = 120;            // m of route planned ahead
 const LOOK = 90;             // m looked ahead for obstacles and curves
 const BUMP = 20 / 3.6;       // m/s over a speed bump / raised table
@@ -85,8 +86,8 @@ export class Traffic {
   /** material: reads the model attributes vcol / vmat and the per-instance paint (deferred.ts vehicleMaterial);
    *  boundary: is this node where the network leaves the region (entry / exit for through traffic)?;
    *  palette: car paint colours (sRGB 0-255) with their shares (pipeline vehicles.py) */
-  constructor(lanes: Lane[], counts = { car: 400, tram: 12, train: 3 }, material: THREE.Material,
-    private boundary: (node: number) => boolean = () => false, palette: { rgb: number[]; share: number }[] = []) {
+  constructor(lanes: Lane[], material: THREE.Material, private boundary: (node: number) => boolean,
+    palette: { rgb: number[]; share: number }[]) {
     // --- paths: lanes trimmed back from the junctions, so the curves have room to turn ---
     const incoming = new Map<number, Path[]>();
     for (const l of lanes) {
@@ -177,17 +178,9 @@ export class Traffic {
     this.fleet = new Fleet(MODELS, material);
     this.group.add(this.fleet.group);
     this.carPaint = this.paintPicker(palette);
-    // --- trams and trains: always on the network ---
-    const byKind = (k: number) => this.paths.filter((p) => p.kind === k && p.end - p.start > 10);
-    for (const [kindNo, n] of [[KIND.tram, counts.tram], [KIND.rail, counts.train]] as const) {
-      const pool = byKind(kindNo);
-      if (!pool.length) continue;
-      for (let i = 0; i < n; i++) {
-        const t = kindNo === KIND.tram ? (Math.random() < 0.3 ? TYPES.t4000 : TYPES.t3000) : TYPES.train;
-        const v = this.make(t, kindNo, kindNo === KIND.tram ? TRAM_SILVER : TRAIN, 1, 0.95, null);
-        this.place(v, pool);
-      }
-    }
+    // --- trains: always on the network (trams and buses run to the timetable: transit.ts) ---
+    const rails = this.paths.filter((p) => p.kind === KIND.rail && p.end - p.start > 10);
+    for (let i = 0; rails.length && i < TRAINS; i++) this.place(this.make(TYPES.train, KIND.rail, TRAIN, 1, 0.95, null), rails);
     // --- signal heads: a small box at the right of each stop line ---
     const heads: { pos: THREE.Vector3; sig: Signal }[] = [];
     const right = (p: Path, s: number, d: number) => {
@@ -214,7 +207,7 @@ export class Traffic {
 
   /** put a vehicle somewhere on a random lane of its kind */
   private place(v: Vehicle, pool?: Path[]) {
-    // trams / trains come in at the region edge (as if from the rest of the line); else anywhere
+    // trains come in at the region edge (as if from the rest of the line); else anywhere
     if (!pool) {
       const edge = this.paths.filter((p) => p.kind === v.kind && this.boundary(p.lane!.from));
       pool = edge.length ? edge : this.paths.filter((p) => p.kind === v.kind && p.end - p.start > Math.min(v.t.total, 60));
@@ -226,8 +219,7 @@ export class Traffic {
     v.route = [p]; v.hist = []; v.v = p.speed * 0.5;
     v.s = edge ? p.start : room > 0 ? p.start + v.t.total + Math.random() * room : p.end;
     v.grant = null; v.wait = 0;
-    if (v.inJunction) v.inJunction.junction?.occ.delete(v);
-    v.inJunction = null;
+    this.leaveJunction(v);
     this.plan(v);
   }
 
@@ -239,7 +231,7 @@ export class Traffic {
   /** a STIB vehicle has stopped at a stop ('arrive') / pulls away from it after its dwell ('depart') (sounds) */
   onTransit: ((v: Vehicle, e: 'arrive' | 'depart') => void) | null = null;
   /** called when a car's trip ends (arrived, left the region, or given up when stuck) */
-  onArrive: ((agent: Agent, arrived: boolean) => void) | null = null;
+  onArrive: ((agent: Agent) => void) | null = null;
 
   /** a new vehicle with instances for its sections */
   private make(t: Kind, kind: number, paint: number, ag: number, f: number, agent: Agent | null, lights = 1): Vehicle {
@@ -257,18 +249,22 @@ export class Traffic {
   private release(v: Vehicle) {
     for (const h of v.inst) this.fleet.remove(h);
     v.inst = [];
-    if (v.inJunction) v.inJunction.junction?.occ.delete(v);
-    v.inJunction = null;
+    this.leaveJunction(v);
     if (v.agent && this.byAgent.get(v.agent) === v) this.byAgent.delete(v.agent);
     const k = this.vehicles.indexOf(v);
     if (k >= 0) this.vehicles.splice(k, 1);
   }
 
+  private leaveJunction(v: Vehicle) {
+    v.inJunction?.junction!.occ.delete(v);
+    v.inJunction = null;
+  }
+
   /** a car's trip ends */
-  private finish(v: Vehicle, arrived: boolean) {
+  private finish(v: Vehicle) {
     const a = v.agent;
     this.release(v);
-    if (a) this.onArrive?.(a, arrived);
+    if (a) this.onArrive?.(a);
   }
 
   /** car paint: the measured palette (lifted a little: aerial colours are shaded roofs) plus a few accents */
@@ -288,50 +284,6 @@ export class Traffic {
     return h.block === 'junction:light' || h.block === 'crossing';
   }
 
-  /** (development) every road junction with all its possible curves and the lane ends around it, to check
-   *  the geometry the pipeline produced (bench/junctions.mjs) */
-  junctionGeometry() {
-    const byTo = new Map<number, Path[]>();
-    for (const p of this.paths)
-      if (p.lane && p.kind === KIND.road && !p.lane.bikeOnly) {
-        if (!byTo.has(p.lane.to)) byTo.set(p.lane.to, []);
-        byTo.get(p.lane.to)!.push(p);
-      }
-    const pt = (p: Path, s: number) => { const v = sample(p, s, new THREE.Vector3()); return [+v.x.toFixed(2), +v.z.toFixed(2)]; };
-    const stretch = (p: Path, s0: number, s1: number) => {
-      const o: number[][] = [];
-      for (let s = Math.max(0, s0); s <= Math.min(p.length, s1); s += 2) o.push(pt(p, s));
-      return o;
-    };
-    const out = [];
-    for (const [node, ins] of byTo) {
-      const outs = (this.byNode.get(node) ?? []).filter((b) => b.kind === KIND.road && !b.lane!.bikeOnly);
-      const curves = [];
-      for (const a of ins)
-        for (const b of outs) {
-          if (b.lane!.edge === a.lane!.edge) continue;   // (U-turns)
-          const c = makeCurve(a, b);
-          const p0 = pt(a, a.end), p1 = pt(b, b.start);
-          curves.push({ from: a.lane!.edge, to: b.lane!.edge, len: +c.length.toFixed(2), chord: +Math.hypot(p1[0] - p0[0], p1[1] - p0[1]).toFixed(2),
-            turn: +c.turn.toFixed(3), pts: stretch(c, 0, c.length) });
-        }
-      // lights: each approach's stop line (OSM's or the mouth), lights just past the junction, and its crosswalks
-      const sigId = (g: Signal | null | undefined) => (g ? this.signals.indexOf(g) : -1);
-      const zebras = (p: Path, s0: number, s1: number) => p.zebras.filter((z) => z.s >= s0 && z.s <= s1)
-        .map((z) => ({ at: pt(p, z.s), walk: sigId(this.walkSig.get(z.key)) }));
-      out.push({ node, signalled: !!ins[0].lane!.toSignal,
-        ins: ins.map((a) => ({ edge: a.lane!.edge, end: pt(a, a.end), line: stretch(a, a.end - 30, a.end),
-          light: a.approach?.signal ? { at: pt(a, a.approach.lightS), back: +(a.end - a.approach.lightS).toFixed(1), group: sigId(a.approach.signal),
-            osm: a.lane!.controls.some((c) => c.code === CONTROL.signals) } : null,
-          crossings: a.crossings.filter((c) => c.s > a.end - 30).map((c) => pt(a, c.s)),
-          zebras: zebras(a, a.end - 30, a.end) })),
-        outs: outs.map((b) => ({ edge: b.lane!.edge, start: pt(b, b.start), line: stretch(b, b.start, b.start + 30),
-          crossings: b.crossings.filter((c) => c.s < b.start + 25).map((c) => pt(b, c.s)),
-          zebras: zebras(b, b.start, b.start + 30) })), curves });
-    }
-    return out;
-  }
-
   /** for the shadow pass: let every vehicle mesh render in another layer too */
   enableLayer(layer: number) { this.fleet.enableLayer(layer); }
   /** fill the vehicle instance buffers for this camera (once per frame, before rendering) */
@@ -340,8 +292,7 @@ export class Traffic {
   private entries: Path[] = []; private exits: Path[] = [];
 
   /** nearest kerb spot to a scene position (in this group's frame), away from intersections */
-  spotNear(x: number, z: number, kind: number = KIND.road): Spot | null {
-    if (kind !== KIND.road) return this.trackSpot(x, z, kind);
+  spotNear(x: number, z: number): Spot | null {
     if (!this.kerbGrid) {   // (built on first use)
       this.kerbGrid = new PointGrid<Spot>(40);
       for (const p of this.kerb)
@@ -394,20 +345,6 @@ export class Traffic {
     return (r.slice(0, -1).reduce((a, x) => a + x.end - x.start, 0) + sp.s) / (mode === 0 ? 7 : 8) + 10;
   }
 
-  /** nearest point on a track of this kind (tram stops) */
-  private trackSpot(x: number, z: number, kind: number): Spot | null {
-    let best: { p: Path; s: number; d: number } | null = null;
-    for (const p of this.paths) {
-      if (p.kind !== kind || p.end - p.start < 4) continue;
-      for (let s = p.start + 1; s < p.end - 1; s += 2) {
-        sample(p, s, tmp);
-        const d = (tmp.x - x) ** 2 + (tmp.z - z) ** 2;
-        if (!best || d < best.d) best = { p, s, d };
-      }
-    }
-    return best && best.d < 30 * 30 ? { p: best.p, s: best.s } : null;
-  }
-
   /** Put a STIB tram or bus on the road for its run: it drives from stop to stop and waits at each
    *  until the timetabled departure; it leaves after the last stop. `from`: index of the first stop
    *  to start at (after a jump in time). */
@@ -439,7 +376,6 @@ export class Traffic {
   clearTransit() { for (const v of this.vehicles.filter((x) => x.transit)) this.release(v); }
 
   /** where a spot is in the scene (this group's frame) */
-  spotPosition(sp: Spot, out = new THREE.Vector3()) { return sample(sp.p, sp.s, out); }
 
 
   /** Put a car on the road for a trip, from a kerb spot or the region edge to a kerb spot or the
@@ -544,11 +480,12 @@ export class Traffic {
     });
     return { pts, len };
   }
-  /** a short description of a vehicle that has no agent (trams, trains) */
+  /** a short description of a vehicle that has no agent (trams, buses, emergency vehicles, trains) */
   describe(v: Vehicle) {
     if (v.transit) return `${v.transit.mode === 0 ? 'Tram' : 'Bus'} ${v.transit.line} → ${v.transit.headsign}`;
     if (v.siren) return v.t === TYPES.police ? 'Police car on a call' : 'Ambulance on a call';
-    return v.t.name === 't3000' ? 'STIB tram (T3000-style)' : v.t.name === 't4000' ? 'STIB tram (T4000-style)' : 'train'; }
+    return 'Train';
+  }
   pickable() { return this.fleet.meshes(); }
   speedOf(v: Vehicle) { return v.v; }
 
@@ -594,12 +531,10 @@ export class Traffic {
   /** default car model and paint for a new agent */
   randomCar() {
     const t = pickKind();
-    const paint = t === TYPES.van ? (Math.random() < 0.65 ? VAN_WHITE : this.carPaint())
-      : t === TYPES.bus ? BUS_COLORS[Math.floor(Math.random() * BUS_COLORS.length)] : this.carPaint();
-    const calm = t === TYPES.bus;
+    const paint = t === TYPES.van && Math.random() < 0.65 ? VAN_WHITE : this.carPaint();
     // drivers differ: most moderate, some fast (up to ~50 % over the limit, hard on the pedals)
-    const ag = calm ? 1 : 0.75 + 0.65 * Math.random() ** 1.5;
-    return { kind: t.name, paint, ag, f: calm ? 0.95 : 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() };
+    const ag = 0.75 + 0.65 * Math.random() ** 1.5;
+    return { kind: t.name, paint, ag, f: 0.95 + 0.5 * (ag - 0.75) / 0.65 + 0.1 * Math.random() };
   }
 
   // --- routing graph: lanes as nodes (directed: one-ways included), built once; per search only typed arrays
@@ -952,9 +887,9 @@ export class Traffic {
         }
         v.stuck = 0;
       }
-      if (v.stuck > STUCK) { this.finish(v, false); continue; }            // gridlock safety valve
+      if (v.stuck > STUCK) { this.finish(v); continue; }            // gridlock safety valve
       if (v.dest && v.route.length === 1 && v.route[0] === v.dest.p && v.s > v.dest.s - 2 && v.v < 1) {
-        this.finish(v, true);                                               // arrived: parks
+        this.finish(v);                                               // arrived: parks
         continue;
       }
       v.s += v.v * dt;
@@ -1011,13 +946,13 @@ export class Traffic {
       if (v.hist.length > 6) v.hist.pop();
       if (!v.route.length) {                              // left the region (or the network)
         if (v.transit) this.release(v);
-        else if (v.kind === KIND.road) this.finish(v, true); else this.place(v);
+        else if (v.kind === KIND.road) this.finish(v); else this.place(v);
         return;
       }
       const p = v.route[0];
       v.s = p.start + over;
       if (p.junction) {                                     // entering a junction curve
-        if (v.inJunction) v.inJunction.junction?.occ.delete(v);
+        this.leaveJunction(v);
         v.inJunction = p; p.junction.occ.add(v); v.grant = null;
       }
       this.plan(v);
@@ -1025,7 +960,7 @@ export class Traffic {
     // leave the junction once the rear is out of the curve
     if (v.inJunction && v.route[0] !== v.inJunction) {
       const behind = v.route[0] === v.inJunction.to ? v.s - v.route[0].start : Infinity;
-      if (behind > v.t.total) { v.inJunction.junction?.occ.delete(v); v.inJunction = null; }
+      if (behind > v.t.total) this.leaveJunction(v);
     }
   }
 

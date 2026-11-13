@@ -10,12 +10,10 @@
     canvas { display: block; }
     #hud { position: fixed; top: 8px; left: 8px; padding: 6px 8px; background: #0008; color: #fff; border-radius: 4px; white-space: pre; pointer-events: none; display: none; }
     body.debug #hud, #hud.error { display: block; }
-    #bottom-left { position: fixed; bottom: 8px; left: 8px; max-width: calc(100vw - 510px); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+    #bottom-left { position: fixed; bottom: 8px; left: 8px; max-width: calc(100vw - 640px); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
     #help { display: none; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
-    #legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
-    #noise-legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
-    #noise-legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
-    #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+    #legend, #noise-legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
+    #legend span, #noise-legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
     #tools { padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; display: flex; gap: 8px; align-items: center; }
     #tools input { width: 220px; }
     #tools button { font: inherit; padding: 0 6px; cursor: pointer; }
@@ -36,12 +34,11 @@
     #agent .plan .t { display: inline-block; width: 42px; color: #888; }
     #crosshair { position: fixed; left: 50%; top: 50%; width: 10px; height: 10px; margin: -6px 0 0 -6px; border: 1px solid #fffc; border-radius: 50%; pointer-events: none; display: none; }
     #walk-hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 10px 14px; background: #000b; color: #fff; border-radius: 6px; pointer-events: none; display: none; text-align: center; }
-    #attr { position: fixed; bottom: 8px; right: 8px; padding: 4px 8px; background: #fffa; color: #222; border-radius: 4px; }
-    #attr { font-size: 11px; }
+    #attr { position: fixed; bottom: 8px; right: 8px; padding: 4px 8px; background: #fffa; color: #222; border-radius: 4px; font-size: 11px; }
     body.help #help { display: block; }
     #lost { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); padding: 12px 16px; background: #000c; color: #fff; border-radius: 6px; display: none; text-align: center; max-width: calc(100vw - 48px); }
     #lost a { color: #9cf; }
-    @media (max-width: 1000px) { #bottom-left { max-width: calc(100vw - 16px); bottom: auto; top: 8px; } #tools { flex-wrap: wrap; } #inspect, #agent { top: 120px; max-height: calc(100vh - 180px); } #agent { width: auto; left: 8px; } }
+    @media (max-width: 1150px) { #bottom-left { max-width: calc(100vw - 16px); bottom: auto; top: 8px; } #tools { flex-wrap: wrap; } #inspect, #agent { top: 120px; max-height: calc(100vh - 180px); } #agent { width: auto; left: 8px; } }
     #attr a { color: inherit; }
   </style>
 </head>

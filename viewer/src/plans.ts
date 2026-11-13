@@ -11,12 +11,10 @@ import type { Agent } from './agents';
 
 export interface Activity { where: Where; purpose: string; until: number }   // until: seconds of the day
 
-/** what plans need: the places, park paths for walks (pedestrians.ts), counters for diagnostics */
+/** what plans need: the places, park paths for walks (pedestrians.ts) */
 export interface PlanContext {
   places: PlaceIndex;
   parkSpot: ((x: number, z: number, min: number, max: number, r: () => number) => WalkSpot | null) | null;
-  /** visits planned to an open place / swapped to an open one / to a closed one (nothing open near) */
-  openStats: { open: number; swapped: number; closed: number };
 }
 
 export const PURPOSE: Record<string, string> = {
@@ -34,9 +32,8 @@ const VISIT_REACH = 1500;   // m: how far a closed place may be swapped for an o
 function openFor(ctx: PlanContext, w: Where, purpose: string, wd: number, leave: number): Where {
   if (w.kind !== 'poi' || !VISITS.has(purpose)) return w;
   const t = leave + 10 * M, monday0 = (wd + 6) % 7;   // (about when they get there)
-  if (ctx.places.isOpen(w.i, monday0, t)) { ctx.openStats.open++; return w; }
+  if (ctx.places.isOpen(w.i, monday0, t)) return w;
   const best = ctx.places.openNear(w.i, monday0, t, VISIT_REACH);
-  ctx.openStats[best >= 0 ? 'swapped' : 'closed']++;
   return best >= 0 ? { kind: 'poi', i: best } : w;
 }
 

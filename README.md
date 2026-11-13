@@ -48,8 +48,7 @@ Everything the viewer downloads is kept small (`pipeline/common.py`), since it i
 tiles are compact (positions delta-coded, a 256-colour palette per tile, gzipped; ~0.4 GB for Schaerbeek)
 and packed into archives of 16 x 16 tiles (~100 files, read with HTTP range requests); the manifest lists
 tiles as columns, road polylines are delta-coded, and the timetable stores each trip as a stop pattern, a
-timing and a start time. A first visit loads about 13 MB, mostly the tiles in view. Older builds still load;
-`uv run python repack.py [name]` converts one in place without rebuilding.
+timing and a start time. A first visit loads about 13 MB, mostly the tiles in view.
 
 ## Viewer
 
@@ -80,8 +79,8 @@ Performance comes first: an average laptop (Intel iGPU, Firefox) must run it smo
   camera scenarios in headless Chromium, compared with `bench/baseline.json`
 - `npm run sessions`: summary of real sessions; the viewer posts telemetry to the dev server
   (`data/metrics/sessions.jsonl`)
-- `npm run junctions`, then `uv run python qa_junctions.py` in `pipeline/`: checks every road junction
-  as the simulation builds it (geometry and traffic lights) and draws a contact sheet
+- `npm run noisecal`: runs the simulation headless at a few hours of the day and writes the noise levels
+  per street type that the noise map starts from (`public/noise/<roi>.json`)
 
 Measure on finished builds only.
 

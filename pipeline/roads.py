@@ -643,14 +643,10 @@ def build():
     pavements(edges, m, vs)
     pavements(pieces, m, vs)
     paths = walk_paths(m, X0, Y0, vs)
-    out = {"build": m.man["build"], "paths": paths,
+    # edges and pieces: lists in the order of common.E_* (fields described there)
+    out = {"paths": paths,
            "nodes": [[*(round(float(c), 1) for c in xyz), sig, b] for xyz, sig, b in zip(node_xy, node_sig, boundary)],
-           "edges": [e.json() for e in edges], "pieces": [e.json() for e in pieces], "fields": ["from", "to", "kind(0 road,1 tram,2 rail)", "oneway", "kmh", "lanes", "xyz...",
-                                      "rank", "controls [m, 1 stop line of the signalled junction ahead|2 give way|3 stop|4 crossing light|5 speed bump, dir]",
-                                      "bikes both ways (one-way street open to cycling against the traffic)",
-                                      "pavement [left, right] m from the centreline (0: none found)",
-                                      "crosswalks [[m, 1 signals|2 marked|3 unmarked]]", "roundabout",
-                                      "OSM parking [left, right]: 0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular"]}
+           "edges": [e.json() for e in edges], "pieces": [e.json() for e in pieces]}
     write_roads(OUT, out)
     nctl = sum(len(e.controls) for e in edges)
     print(f"{len(node_xy)} nodes ({sum(node_sig)} signalled), {len(edges)} edges ({nctl} controls); road {stats['road'] / 1000:.1f} km, tram {stats['tram'] / 1000:.1f} km, "

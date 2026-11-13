@@ -10,6 +10,7 @@ import { dayPlan, type Activity, type PlanContext } from './plans';
 import type { PlaceIndex, Where } from './places';
 import { rng } from './rng';
 import type { Traffic } from './traffic';
+import { VAN_WHITE } from './vehicleTypes';
 import type { Spot } from './paths';
 import type { Pedestrians, WalkSpot } from './pedestrians';
 import { Parking } from './parking';
@@ -41,7 +42,6 @@ interface Travel { t0: number; t1: number; pa: [number, number] | null; pb: [num
 /** timed events (departures, arrivals of timeline trips); an agent re-planned since (a.ver) skips its old ones */
 class Events {
   private h = new MinHeap<Agent>();
-  get size() { return this.h.size; }
   clear() { this.h.clear(); }
   push(t: number, a: Agent) { this.h.push(t, a, a.ver); }
   peek() { return this.h.peek(); }
@@ -67,6 +67,8 @@ const WALK_TYPES: [string, number][] = [['kid', 0.18], ['walkShop', 0.24], ['dog
 // cyclists and delivery couriers (counts set in the constructor)
 const BIKE_COLORS = [0x1b1b1d, 0x8c1c1c, 0x2f5597, 0xd8d4c8, 0x3d5a3a, 0xc9a227];
 const COURIER_BOXES = [0x00ccbc, 0xff8000, 0x06c167];
+const TAXI_BLACK = 0x1b1b1d;
+const ON_FOOT: Agent['car'] = { kind: 'hatch', paint: 0, ag: 1, f: 1 };   // (walkers have no vehicle; the field is required)
 
 const OCCUPANCY = 0.88;   // share of kerb parking places taken (simulated + anonymous cars)
 const WALK_SPEED = 1.3;   // m/s: average walking speed (estimates for trips away from the camera)
@@ -82,54 +84,45 @@ export class Agents {
   private spots = new Map<string, Spot | WalkSpot | null>();   // kerb (cars) / pavement (walkers) spot of a place
   private day = '';
   private last = -1;
-  /** called when something changed that the info panel shows */
-  onChange: ((a: Agent) => void) | null = null;
   /** agents still to re-plan after a jump in time (0: done) */
   get replanning() { return this.list.length - Math.min(this.pending, this.list.length); }
   /** counts for the benchmark: agents simulated in detail, as timelines, parked cars shown */
   stats() {
     let detailed = 0, timeline = 0, shown = 0;
     for (const a of this.list) { if (a.driving) detailed++; else if (a.travel) timeline++; if (a.shown) shown++; }
-    return { agents: this.list.length, detailed, timeline, parkedShown: shown, replanning: this.list.length - Math.min(this.pending, this.list.length), jumps: this.jumps.length,
+    return { agents: this.list.length, detailed, timeline, parkedShown: shown, replanning: this.replanning, jumps: this.jumps.length,
       promoted: this.promoStats.ok, failed: this.promoStats.fail, promoMs: Math.round(this.promoStats.ms) };
   }
 
   private plans: PlanContext;
-  /** visits planned to an open place / swapped to an open one / to a closed one (diagnostics) */
-  get openStats() { return this.plans.openStats; }
 
   constructor(readonly places: PlaceIndex, private traffic: Traffic, count = 3000,
     private peds: Pedestrians | null = null, walkers = 0, cyclists = 0, private parking: Parking | null = null) {
-    this.plans = { places, parkSpot: peds ? (x, z, min, max, r) => peds.parkSpot(x, z, min, max, r) : null,
-      openStats: { open: 0, swapped: 0, closed: 0 } };
+    this.plans = { places, parkSpot: peds ? (x, z, min, max, r) => peds.parkSpot(x, z, min, max, r) : null };
     const r = rng(1);
-    for (let id = 0; id < count; id++) {
-      let x = r(), type = TYPES[0][0];
-      for (const [t, w] of TYPES) { x -= w; if (x <= 0) { type = t; break; } }
+    const weighted = <T>(list: [T, number][]) => { let x = r(); for (const [t, w] of list) { x -= w; if (x <= 0) return t; } return list[0][0]; };
+    // (name, then home, then car: the seeded draws in a fixed order)
+    const add = (type: string, mode: Agent['mode'], home: () => number, car: () => Agent['car']) => this.list.push({
+      id: this.list.length, type, mode, name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
+      home: home(), car: car(), plan: [], i: 0, driving: false, departed: 0, travel: null, ver: 0, parked: -1, reserve: -1, shown: false,
+      departedFrom: -1, ride: 0, rideT: 0, retry: 0 });
+    for (let k = 0; k < count; k++) {
+      const type = weighted(TYPES);
       const outside = type === 'commuterIn' || type === 'through' || type === 'delivery';
       let car = traffic.randomCar();
-      while (car.kind === 'bus') car = traffic.randomCar();
-      if (type === 'delivery') car = { ...car, kind: 'van', paint: r() < 0.65 ? 0xeceeee : car.paint, ag: 1.1, f: 1.1 };
-      if (type === 'taxi') car = { ...car, kind: 'sedan', paint: 0x1b1b1d };
-      this.list.push({ id, type, mode: 'car', name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
-        home: outside ? -1 : places.pickHome(r), car, plan: [], i: 0, driving: false, departed: 0, travel: null, ver: 0, parked: -1, reserve: -1, shown: false, departedFrom: -1, ride: 0, rideT: 0, retry: 0 });
+      if (type === 'delivery') car = { ...car, kind: 'van', paint: r() < 0.65 ? VAN_WHITE : car.paint, ag: 1.1, f: 1.1 };
+      if (type === 'taxi') car = { ...car, kind: 'sedan', paint: TAXI_BLACK };
+      add(type, 'car', () => (outside ? -1 : places.pickHome(r)), () => car);
     }
-    for (let k = 0; k < (peds ? walkers : 0); k++) {
-      let x = r(), type = WALK_TYPES[0][0];
-      for (const [t, w] of WALK_TYPES) { x -= w; if (x <= 0) { type = t; break; } }
-      this.list.push({ id: count + k, type, mode: 'walk', name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`,
-        home: places.pickHome(r), car: traffic.randomCar(), plan: [], i: 0, driving: false, departed: 0, travel: null, ver: 0, parked: -1, reserve: -1, shown: false, departedFrom: -1, ride: 0, rideT: 0, retry: 0 });
-    }
+    for (let k = 0; k < (peds ? walkers : 0); k++) add(weighted(WALK_TYPES), 'walk', () => places.pickHome(r), () => ON_FOOT);
     for (let k = 0; k < cyclists; k++) {
       const courier = k < cyclists * 0.06;
-      this.list.push({ id: count + walkers + k, type: courier ? 'courier' : 'cyclist', mode: courier ? 'car' : 'bike',
-        name: `${FIRST[Math.floor(r() * FIRST.length)]} ${LAST[Math.floor(r() * LAST.length)]}`, home: courier ? -1 : places.pickHome(r),
-        car: courier ? { kind: 'scooter', paint: COURIER_BOXES[Math.floor(r() * 3)], ag: 1.3, f: 1.15 }
-          : { kind: 'bike', paint: BIKE_COLORS[Math.floor(r() * BIKE_COLORS.length)], ag: 1, f: 1 },
-        plan: [], i: 0, driving: false, departed: 0, travel: null, ver: 0, parked: -1, reserve: -1, shown: false, departedFrom: -1, ride: 0, rideT: 0, retry: 0 });
+      add(courier ? 'courier' : 'cyclist', courier ? 'car' : 'bike', () => (courier ? -1 : places.pickHome(r)),
+        () => (courier ? { kind: 'scooter', paint: COURIER_BOXES[Math.floor(r() * 3)], ag: 1.3, f: 1.15 }
+          : { kind: 'bike', paint: BIKE_COLORS[Math.floor(r() * BIKE_COLORS.length)], ag: 1, f: 1 }));
     }
-    traffic.onArrive = (a, arrived) => this.arrive(a, arrived);
-    if (peds) peds.onArrive = (a) => this.arrive(a, true);
+    traffic.onArrive = (a) => this.arrive(a);
+    if (peds) peds.onArrive = (a) => this.arrive(a);
     // kerbs about as full as real ones (~88 %): what our drivers do not fill, anonymous cars do
     if (parking) {
       const own = this.list.filter((a) => this.parks(a)).length;
@@ -149,7 +142,7 @@ export class Agents {
   }
   /** a tram / bus stopped at stop `id`: the people waiting get on, the ones riding to it get off */
   onDwell(id: number) {
-    for (const a of this.waiting.get(id) ?? []) { this.peds?.unstand(a); a.ride = 2; a.rideT = this.last; a.ver++; this.onChange?.(a); }
+    for (const a of this.waiting.get(id) ?? []) { this.peds?.unstand(a); a.ride = 2; a.rideT = this.last; a.ver++; }
     this.waiting.get(id)?.clear();
     for (const a of this.alighting.get(id) ?? []) { a.ride = 0; this.depart(a, this.last); }
     this.alighting.get(id)?.clear();
@@ -287,7 +280,7 @@ export class Agents {
       a.reserve = this.parkNear(a, to.where);
     }
     const dur = this.guess(a, from.where, to.where);
-    if (from.where.kind === 'edge' && to.where.kind === 'edge' && to.purpose !== 'passing') { this.arrive(a, true); return; }
+    if (from.where.kind === 'edge' && to.where.kind === 'edge' && to.purpose !== 'passing') { this.arrive(a); return; }
     const t: Travel = { t0: now - progress * dur, t1: now - progress * dur + dur, pa: this.posOf(a, from.where), pb: this.posOf(a, to.where) };
     const r = a.mode === 'walk' ? this.radius.walk : this.radius.drive;
     if (this.inZone(this.travelPos(t, now), r) && this.spare() && this.detail(a, progress)) {
@@ -297,10 +290,9 @@ export class Agents {
       this.travelling.add(a);
       this.events.push(t.t1, a);
     }
-    this.onChange?.(a);
   }
 
-  private arrive(a: Agent, _arrived: boolean) {
+  private arrive(a: Agent) {
     a.driving = false;
     this.drivingSet.delete(a);
     a.travel = null;
@@ -320,7 +312,6 @@ export class Agents {
     }
     a.ver++;
     if (a.i + 1 < a.plan.length) this.events.push(a.plan[a.i].until, a);
-    this.onChange?.(a);
   }
 
   // --- frame budget: starting detailed trips (route searches) and re-planning after a jump are spread
@@ -388,7 +379,7 @@ export class Agents {
           const key = { anonPlace: k };
           let car = this.anonCars.get(k);
           if (!car) {   // (once per place: the same car stands there whenever you come back)
-            do car = this.traffic.randomCar(); while (car.kind === 'bus');
+            car = this.traffic.randomCar();
             this.anonCars.set(k, car);
           }
           this.traffic.park(key, car, P.x[k], P.z[k], P.heading[k]);
@@ -485,7 +476,7 @@ export class Agents {
     while (this.events.peek() <= now) {
       const a = this.events.pop();
       if (!a || a.driving) continue;
-      if (a.travel) this.arrive(a, true);
+      if (a.travel) this.arrive(a);
       else if (a.ride === 2 || a.ride === 1) {   // time to come back: get off the next tram / bus at the stop
         const st = this.stopOf(a);
         this.waiting.get(st)?.delete(a); this.peds?.unstand(a);

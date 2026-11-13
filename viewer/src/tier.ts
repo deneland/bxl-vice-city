@@ -5,7 +5,7 @@
 //         or a GPU whose largest texture is under 8192 (the full face atlas would not fit)
 import { config } from './config';
 
-export interface Tier {
+interface Tier {
   name: 'low' | 'high';
   why: string;
   atlasRows: number;     // face atlas rows (x 4096 faces; 4 bytes each): 8192 = 134 MB, 4096 = 67 MB

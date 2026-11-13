@@ -4,10 +4,10 @@
 // Models are centred on their body (x forward, y up, z across), sizes in metres.
 import * as THREE from 'three/webgpu';
 
-export const VOX = 0.25;
+const VOX = 0.25;
 
 /** voxel materials: 1 paint (per instance); fixed colours; lights (emissive at night) */
-export const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9, skin: 10, jacket: 11, jeans: 12,
+const M = { paint: 1, glass: 2, tyre: 3, trim: 4, head: 5, tail: 6, roof: 7, stripe: 8, cab: 9, skin: 10, jacket: 11, jeans: 12,
   blue: 13, hiviz: 14, green: 15, beaconL: 16, beaconR: 17 };
 const FIXED: Record<number, number> = {
   [M.glass]: 0x1c2630, [M.tyre]: 0x141414, [M.trim]: 0x2b2c2e, [M.head]: 0xe8e4d8, [M.tail]: 0x7a1410,

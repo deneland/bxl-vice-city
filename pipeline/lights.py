@@ -10,12 +10,10 @@ Needs MAPILLARY_TOKEN in ../.env. Map data © Mapillary contributors, CC-BY-SA.
 """
 import json
 import sys
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from common import ROOT, mapillary_token, region, to_l72, to_wgs
+from common import C_GROUND, C_UNCLASSIFIED, ROOT, mapillary_grid, mapillary_offset, region, to_l72
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -23,43 +21,23 @@ RAW = ROOT / "data/raw" / f"mapillary_lights_{ROI_NAME}.json"
 CAL = ROOT / "data/cache/streetview" / ROI_NAME / "calibration.json"
 OUT = ROOT / "viewer/public/lights" / f"{ROI_NAME}.json"
 
-QUERY = 250.0      # m per API request
 MERGE = 4.0        # m; detections closer than this are one lamp
 SEARCH = 1.5       # m; radius around a lamp in which its pole is looked for
 HEAD_MIN, HEAD_MAX = 3.0, 12.0   # m above ground for a lamp head
 HEAD_DEFAULT = 5.0               # m; wall-mounted lamps and poles the LiDAR missed
-MIN_SCORE = 0.5    # same as streetview.py
 
 def fetch():
-    tok = mapillary_token()
-    x0, y0, x1, y1 = ROI["xmin"], ROI["ymin"], ROI["xmax"], ROI["ymax"]
-    cells = [(x, y) for x in np.arange(x0, x1, QUERY) for y in np.arange(y0, y1, QUERY)]
-
-    def query(c):
-        a = to_wgs.transform(c[0], c[1])
-        b = to_wgs.transform(min(c[0] + QUERY, x1), min(c[1] + QUERY, y1))
-        u = (f"https://graph.mapillary.com/map_features?bbox={a[0]:.6f},{a[1]:.6f},{b[0]:.6f},{b[1]:.6f}"
-             "&object_values=object--street-light&fields=id,geometry,last_seen_at&limit=2000")
-        req = urllib.request.Request(u, headers={"Authorization": f"OAuth {tok}"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read())["data"]
-
-    with ThreadPoolExecutor(8) as ex:
-        res = list(ex.map(query, cells))
-    if any(len(r) >= 2000 for r in res):
-        print("warning: a query hit the 2000 cap; lower QUERY")
-    feats = {d["id"]: d for r in res for d in r}
+    res = mapillary_grid(ROI["xmin"], ROI["ymin"], ROI["xmax"], ROI["ymax"], lambda bb: (
+        f"https://graph.mapillary.com/map_features?bbox={bb}&object_values=object--street-light&fields=id,geometry,last_seen_at&limit=2000"))
+    feats = {d["id"]: d for d in res}
     RAW.write_text(json.dumps(list(feats.values())))
     print(f"{len(feats)} street-light features")
 
 
 def snap():
     feats = json.loads(RAW.read_text())
-    # the global Mapillary offset (streetview.py calibrate); another region's is fine: it is a systematic bias
-    cal_f = CAL if CAL.exists() else next(iter(sorted(CAL.parent.parent.glob("*/calibration.json"))), None)
-    cal = json.loads(cal_f.read_text()) if cal_f else {}
-    good = [c["offset"] for c in cal.values() if c["score"] >= MIN_SCORE]
-    off = np.median(good, 0) if good else np.zeros(3)
+    # the global Mapillary offset (streetview.py calibrate)
+    off = mapillary_offset(json.loads(CAL.read_text()) if CAL.exists() else {})
     xy = np.array([to_l72.transform(*f["geometry"]["coordinates"]) for f in feats]) + off[:2]
 
     # merge duplicate detections (greedy, around the earliest-listed point)
@@ -82,7 +60,7 @@ def snap():
         # ground: lowest ground voxel near the lamp
         g = None
         for R in (2, 6, 12):
-            zs = [np.flatnonzero(c == 2) for dx in range(-R, R + 1) for dy in range(-R, R + 1)
+            zs = [np.flatnonzero(c == C_GROUND) for dx in range(-R, R + 1) for dy in range(-R, R + 1)
                   if (c := m.column(cx + dx, cy + dy)) is not None]
             zs = [z.max() for z in zs if len(z)]
             if zs:
@@ -100,7 +78,7 @@ def snap():
                     continue
                 z, top, gap = g + 1, None, 0
                 while z < g + int(HEAD_MAX / vs) + 2 and z < len(c):
-                    if c[z] == 1:
+                    if c[z] == C_UNCLASSIFIED:
                         top, gap = z, 0
                     elif top is None and z > g + int(1.5 / vs):
                         break               # no pole starting near the ground

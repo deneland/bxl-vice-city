@@ -43,11 +43,11 @@ for (const s of sessions) {
   const visible = s.sums.filter((x) => x.visible && x.frames > 0);
   const all = merge(visible, 'interval'), mov = merge(visible, 'intervalMoving'), gpu = merge(visible, 'gpu');
   const long = visible.reduce((a, x) => ({ o20: a.o20 + x.longFrames.over20, o33: a.o33 + x.longFrames.over33, o50: a.o50 + x.longFrames.over50 }), { o20: 0, o33: 0, o50: 0 });
-  const load = s.events.find((x) => x.name === 'all-chunks');
+  const load = s.events.find((x) => x.name === 'initial-load');
   const lastSum = visible.at(-1);
   console.log(`\n■ ${s.id}  (last seen ${s.last})`);
   console.log(`  ${browser(e.ua)} · ${e.backend ?? '?'} · ${e.gpu ?? '?'} · ${e.screen?.w}x${e.screen?.h}@${e.screen?.dpr} · url ${e.url}`);
-  if (load) console.log(`  load: all ${load.chunks} chunks in ${load.ms} ms`);
+  if (load) console.log(`  load: first view in ${load.ms} ms (${load.ready}/${load.total} tiles)`);
   if (all) {
     console.log(`  frames ${all.n} (${mov?.n ?? 0} moving) · interval avg ${f(all.avg)} p95 ${f(all.p95)} p99 ${f(all.p99)} max ${f(all.max)} ms`);
     if (mov) console.log(`  while moving: avg ${f(mov.avg)} p95 ${f(mov.p95)} p99 ${f(mov.p99)} ms`);

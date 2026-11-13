@@ -22,7 +22,6 @@ def main():
     c = np.load(SRC).astype(np.float32)
     if len(c) < K:
         raise SystemExit(f"only {len(c)} vehicle colours in {SRC.relative_to(ROOT)}")
-    build = json.loads((ROOT / "viewer/public/tiles" / ROI_NAME / "manifest.json").read_text())["build"]
     rng = np.random.default_rng(1)
     c = c[rng.choice(len(c), min(len(c), 200000), replace=False)]
     # k-means (Lloyd) in sRGB
@@ -34,7 +33,7 @@ def main():
     order = np.argsort(-w)
     palette = [{"rgb": [int(x) for x in cent[k]], "share": round(float(w[k]), 3)} for k in order]
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"build": build, "palette": palette}, indent=1))
+    OUT.write_text(json.dumps({"palette": palette}, indent=1))
     print(f"{len(c)} vehicle voxels sampled -> {OUT.relative_to(ROOT)}")
     for p in palette:
         print("  #%02x%02x%02x %.1f%%" % (*p["rgb"], 100 * p["share"]))

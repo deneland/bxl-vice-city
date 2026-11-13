@@ -133,13 +133,12 @@ export class Walk {
   }
 
   /** advance by dt seconds; returns true if the camera moved */
-  update(dt: number): boolean {
-    if (!this.active) return false;
+  update(dt: number) {
     dt = Math.min(dt, 0.1);
     const vs = this.vox.vs;
     // keep the neighbourhood loaded; stand still until it is
-    if (!this.vox.has(this.feet.x, this.feet.y)) { this.vox.preload(this.feet.x, this.feet.y, 80); return false; }
     this.vox.preload(this.feet.x, this.feet.y, 80);
+    if (!this.vox.has(this.feet.x, this.feet.y)) return;
 
     const k = this.keys;
     const fwd = +(k.has('KeyW') || k.has('ArrowUp')) - +(k.has('KeyS') || k.has('ArrowDown'));
@@ -169,8 +168,7 @@ export class Walk {
       this.feet.z = top >= 0 ? Math.max(nz, top) : Math.max(nz, 0);
       if (this.feet.z === top) this.vz = 0;
     }
-    if (this.feet.equals(before)) return false;
+    if (this.feet.equals(before)) return;
     this.place();
-    return true;
   }
 }

@@ -3,7 +3,7 @@
 // Input voxel record (8 bytes, tileFormat.ts decodeTile): x+1, y+1, z, r, g, b, class, flags
 //   x/y are chunk-local with a 1-voxel apron (0 and CH+1 are neighbours' voxels).
 //
-// Every visible face is found as before (one per exposed voxel side, skirts at tile edges, ambient
+// Every visible face is found (one per exposed voxel side, skirts at tile edges, ambient
 // occlusion per corner). Then faces of the same direction and plane are merged into rectangles (greedy):
 // a wall 20 voxels high and 10 wide is one quad instead of 200. Each face keeps its own colour and
 // occlusion: the quad points to its faces' texels (row by row) that the fragment shader reads

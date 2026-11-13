@@ -17,18 +17,15 @@ Needs MAPILLARY_TOKEN in ../.env. Image data © Mapillary contributors, CC-BY-SA
 import base64
 import json
 import multiprocessing as mp
-import sys
-import time
-import urllib.request
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from functools import cache
 
 import mapbox_vector_tile
 import numpy as np
 from numba import njit
 from PIL import Image, ImageDraw
 
-from common import ARGS, ROOT, VS, jobs as njobs, log_clock, level_tiles, mapillary_token, read_tile_at, region, to_l72, to_wgs
+from common import (ARGS, MAPILLARY_MIN_SCORE as MIN_SCORE, ROOT, VS, jobs as njobs, level_tiles, log_clock, mapillary_get,
+                    mapillary_grid, read_tile_at, region, to_l72)
 
 ROI_NAME, ROI = region(1)   # (the first argument is the stage)
 RAW = ROOT / "data/raw/mapillary"
@@ -39,43 +36,17 @@ FIELDS = "id,captured_at,sequence,computed_geometry,computed_rotation,thumb_1024
 SPACING = 5.0     # m between kept images along one capture session
 CELL = 25.0       # m; per cell keep only the newest SESSIONS sessions
 SESSIONS = 4
-QUERY = 250.0     # m; API bbox size per request (stays below the 2000-result cap)
 MARGIN = 30.0     # m; images just outside the region still see facades inside it
 
 log = log_clock()
-token = cache(mapillary_token)   # (read when first needed: calibrate / project work offline)
-
-
-def get(url, auth=True, tries=4):
-    for i in range(tries):
-        try:
-            req = urllib.request.Request(url, headers={"Authorization": f"OAuth {token()}"} if auth else {})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return r.read()
-        except Exception:
-            if i == tries - 1:
-                raise
-            time.sleep(2 ** i)
 
 
 def list_images():
     x0, y0 = ROI["xmin"] - MARGIN, ROI["ymin"] - MARGIN
     x1, y1 = ROI["xmax"] + MARGIN, ROI["ymax"] + MARGIN
-    cells = [(x, y) for x in np.arange(x0, x1, QUERY) for y in np.arange(y0, y1, QUERY)]
-
-    def query(c):
-        a = to_wgs.transform(c[0], c[1])
-        b = to_wgs.transform(min(c[0] + QUERY, x1), min(c[1] + QUERY, y1))
-        bb = f"{a[0]:.6f},{a[1]:.6f},{b[0]:.6f},{b[1]:.6f}"
-        d = json.loads(get(f"https://graph.mapillary.com/images?bbox={bb}&is_pano=true&limit=2000&fields={FIELDS}"))
-        return d["data"]
-
-    with ThreadPoolExecutor(12) as ex:
-        res = list(ex.map(query, cells))
-    if any(len(r) >= 2000 for r in res):
-        log("warning: a query hit the 2000-image cap; lower QUERY")
+    res = mapillary_grid(x0, y0, x1, y1, lambda bb: f"https://graph.mapillary.com/images?bbox={bb}&is_pano=true&limit=2000&fields={FIELDS}")
     seen, out = set(), []
-    for d in (d for r in res for d in r):
+    for d in res:
         if d["id"] in seen or not d.get("computed_rotation") or not d.get("computed_geometry"):
             continue
         seen.add(d["id"])
@@ -110,11 +81,11 @@ def download(d):
     n = 0
     f = IMG / f"{d['id']}.jpg"
     if not f.exists():
-        f.write_bytes(get(d["thumb_1024_url"], auth=False))
+        f.write_bytes(mapillary_get(d["thumb_1024_url"], auth=False))
         n += 1
     f = DET / f"{d['id']}.json"
     if not f.exists():
-        f.write_bytes(get(f"https://graph.mapillary.com/{d['id']}/detections?fields=value,geometry"))
+        f.write_bytes(mapillary_get(f"https://graph.mapillary.com/{d['id']}/detections?fields=value,geometry"))
         n += 1
     return n
 
@@ -323,7 +294,6 @@ def rays(d, off, dirs):
 CW, CH_ = 192, 96    # calibration label resolution
 SEGMENT = 10         # images per calibrated segment (~50 m at 5 m spacing): SfM drifts along long sessions
 CAL_IMAGES = 5       # images per segment used for scoring
-MIN_SCORE = 0.5      # segments agreeing less than this after calibration do not vote
 SCORE_W = {1: 2.0, 12: 1.5, 9: 1.0, 3: 0.5}
 
 
@@ -385,8 +355,7 @@ def calibrate_segment(args):
         sc = score_imgs(imgs, off)
         if sc > best[0]:
             best = (sc, off)
-    return sid, {"offset": [float(v) for v in best[1]], "score": best[0], "score_raw": s0, "n": len(ds),
-                 "images": [d["id"] for d in ds]}
+    return sid, {"offset": [float(v) for v in best[1]], "score": best[0], "score_raw": s0, "n": len(ds)}
 
 
 def calibrate():
@@ -449,9 +418,9 @@ def project_session(args):
     u, n = np.unique(lk, return_counts=True)            # (voxel, label) sample counts in this session
     vk, lb = u // 16, (u % 16).astype(np.uint8)
     o = np.lexsort((-n, vk))                            # per voxel: most frequent label first
-    vk, lb, n = vk[o], lb[o], n[o]
+    vk, lb = vk[o], lb[o]
     first = np.r_[True, vk[1:] != vk[:-1]]
-    return ck[ok], crgb[ok], cn[ok], vk[first], lb[first], n[first]
+    return ck[ok], crgb[ok], cn[ok], vk[first], lb[first]
 
 
 def median_per_key(keys, cols):
@@ -479,24 +448,19 @@ def project():
     if not cal:
         log("warning: no calibration.json, using Mapillary positions as is")
     by, skipped = {}, 0
-    glob = None
-    if "--global" in sys.argv and cal:   # one shared offset: median over well-matching segments
-        good = [c["offset"] for c in cal.values() if c["score"] >= MIN_SCORE]
-        glob = np.median(good, 0).tolist()
-        log(f"global offset {glob}")
     for sid, seq, ds in segments(data):
         c = cal.get(sid)
         if c and (c["score"] < MIN_SCORE or max(abs(c["offset"][0]), abs(c["offset"][1])) >= 5.9):  # no real optimum
             skipped += len(ds)
             continue
-        off = glob or (c["offset"] if c else [0.0, 0.0, 0.0])
+        off = c["offset"] if c else [0.0, 0.0, 0.0]
         by.setdefault(seq, []).extend((d, off) for d in ds)
     tasks = sorted(by.items(), key=lambda kv: -len(kv[1]))
     log(f"projecting {sum(len(t[1]) for t in tasks):,} images in {len(tasks)} sessions on {jobs} jobs "
         f"({skipped:,} images in badly matching or unresolved segments skipped)")
     C, L = [], []
     with ProcessPoolExecutor(jobs, mp_context=mp.get_context("fork")) as ex:
-        for i, (ck, crgb, cn, vk, lb, _) in enumerate(ex.map(project_session, tasks), 1):
+        for i, (ck, crgb, cn, vk, lb) in enumerate(ex.map(project_session, tasks), 1):
             C.append((ck, crgb, cn))
             L.append((vk, lb))
             if i % 50 == 0 or i == len(tasks):
@@ -517,8 +481,7 @@ def project():
     lv, ll, n = lv[o], ll[o], n[o]
     first = np.r_[True, lv[1:] != lv[:-1]]
     lkey, lab, lnses = lv[first], ll[first], n[first].astype(np.uint16)
-    np.savez(WORK / "layer.npz", key=key, rgb=rgb, nses=nses.astype(np.uint16),
-             lkey=lkey, label=lab, lnses=lnses, size=np.array([G["NX"], G["NY"]]), build=man.get("build", ""))
+    np.savez(WORK / "layer.npz", key=key, rgb=rgb, lkey=lkey, label=lab, lnses=lnses, size=np.array([G["NX"], G["NY"]]))
     log(f"colour layer: {len(key):,} voxels (median {np.median(nses):.0f} sessions each)")
     cnt = np.bincount(lab[lnses >= 2], minlength=16)
     log("label layer (2+ sessions agree): " + ", ".join(f"{L_NAMES[k]} {cnt[k]:,}" for k in L_NAMES if cnt[k]))

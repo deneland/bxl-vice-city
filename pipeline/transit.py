@@ -19,7 +19,7 @@ from common import ROOT, VS, pack_timetable, region, to_l72
 ROI_NAME, ROI = region()
 ZIP = ROOT / "data/raw/gtfs/stib.zip"
 OUT = ROOT / "viewer/public/transit" / f"{ROI_NAME}.json"
-MODES = {"0": 0, "3": 3}            # GTFS route_type: 0 tram, 3 bus (1 metro: underground, skipped)
+MODES = {"0", "3"}                  # GTFS route_type: 0 tram, 3 bus (1 metro: underground, skipped)
 
 
 
@@ -94,7 +94,7 @@ def main():
         if rid not in route_ix:
             r = routes[rid]
             route_ix[rid] = len(out_routes)
-            out_routes.append([r["route_short_name"], MODES[r["route_type"]], r["route_color"]])
+            out_routes.append([r["route_short_name"], int(r["route_type"]), r["route_color"]])
         entry = [route_ix[rid], tr["trip_headsign"].title(), [[s, a, b] for _, s, a, b in st]]
         for k in range(7):
             if tr["service_id"] in active[k]:
@@ -104,9 +104,8 @@ def main():
     if not all(out_days):
         raise SystemExit(f"no trips on {[days[k] for k, d in enumerate(out_days) if not d]} of the week of {ref_week[0]}")
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"routes": out_routes, "stops": out_stops, **pack_timetable(out_days),
-                               "fields": {"routes": ["name", "mode (0 tram, 3 bus)", "colour"],
-                                          "trips": "see common.pack_timetable"}}, separators=(",", ":"), ensure_ascii=False))
+    # routes: [name, mode (0 tram, 3 bus), colour]; stops: [x, y, name]; trips: common.pack_timetable
+    OUT.write_text(json.dumps({"routes": out_routes, "stops": out_stops, **pack_timetable(out_days)}, separators=(",", ":"), ensure_ascii=False))
     print(f"week of {ref_week[0]}: {len(out_stops)} stops, {len(out_routes)} lines ({', '.join(r[0] for r in out_routes)}); "
           f"trips per day {[len(d) for d in out_days]} -> {OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1e3:.0f} kB)")
 

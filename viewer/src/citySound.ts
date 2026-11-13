@@ -49,7 +49,6 @@ export class CitySound {
     }
     this.audio?.setEnabled(on);
   }
-  get soundOn() { return !!this.audio?.enabled; }
   /** traffic shown / hidden: the city falls silent while it is hidden (nothing updates the voices then) */
   setActive(on: boolean) { this.active = on; this.audio?.out.gain.setTargetAtTime(on ? 0.6 : 0, this.audio.ctx.currentTime, 0.1); }
   private active = true;

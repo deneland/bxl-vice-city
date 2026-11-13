@@ -10,14 +10,6 @@ ymax = 173290
 tiles = ["150172", "150173"]
 levels = 4
 
-[roi.core]          # 1.5 km, the first region (2026-11-03)
-xmin = 149861
-ymin = 172290
-xmax = 151361
-ymax = 173790
-tiles = ["149172", "150172", "151172", "149173", "150173", "151173"]
-levels = 5
-
 [roi.schaerbeek]    # the whole commune (OSM boundary bbox, 3.9 x 4.2 km), with bits of its neighbours
 xmin = 149180
 ymin = 170330

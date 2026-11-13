@@ -6,7 +6,7 @@ import { cumulative, pointAt } from './polyline';
 import type { Kind } from './vehicleTypes';
 import type { Agent } from './agents';
 
-export const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
+const A_LAT = 2.6;           // m/s², lateral acceleration in curves (× the driver's aggressiveness)
 const MIN_RADIUS = 5.5;             // m, car turning circle (path of the car's centre)
 
 export const GREEN = 0, AMBER = 1, RED = 2;
@@ -34,13 +34,13 @@ export interface Path {
 export interface Spot { p: Path; s: number }
 
 /** a timetabled run of a STIB line through the region */
-export interface TransitRun {
+interface TransitRun {
   line: string; headsign: string; color: string; mode: number;
   stops: { p: Path; s: number; dep: number; name: string; id: number; arrived: number; served: boolean }[];
   next: number;   // next stop to serve
 }
 
-export interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null; lightS: number }   // lightS: where its light stands
+interface Approach { junction: Junction; yields: boolean; rank: number; dir: THREE.Vector2; signal: Signal | null; lightS: number }   // lightS: where its light stands
 export interface Junction { occ: Set<Vehicle>; conflicts: Map<Path, Map<Path, boolean>>; signalled: boolean }
 export interface Signal { cycle: number; offset: number; phases: [number, number][]; state: number }   // phases: [from, to) green
 
@@ -70,7 +70,7 @@ const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
 export const sample = (p: Path, s: number, out: THREE.Vector3) => pointAt(p.pts, p.cum, s, out);
 
 /** speed limit from curvature alone (100 m/s on straights): heading change over a ±4 m window */
-export function curveLimits(pts: Float32Array, cum: Float32Array) {
+function curveLimits(pts: Float32Array, cum: Float32Array) {
   const n = cum.length, out = new Float32Array(n).fill(100);
   const dir = (i: number, j: number) => Math.atan2(pts[j * 3 + 2] - pts[i * 3 + 2], pts[j * 3] - pts[i * 3]);
   for (let i = 0; i < n; i++) {

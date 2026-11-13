@@ -1,49 +1,42 @@
-// The voxel tile records written by pipeline/voxelize.py (its constants are in pipeline/common.py):
-// 8 bytes per voxel: x+1, y+1, z, r, g, b, LiDAR class, flags (x / y tile-local with a 1-voxel apron).
-// On disk tiles are compact and gzipped (.vxt, common.encode_tile); decodeTile turns them back into records.
+// Voxel tiles as pipeline/voxelize.py writes them (format: pipeline/common.py encode_tile, pack_archives).
+// Decoded, a tile is 8 bytes per voxel: x+1, y+1, z, r, g, b, LiDAR class, flags (x / y tile-local with a
+// 1-voxel apron). On disk each tile is compact and gzipped, and tiles sit in archives of ARCHIVE x ARCHIVE,
+// read one tile at a time with an HTTP range request.
 export const FLAG_FILL = 1;      // geometry synthesised (wall / terrain fill), not measured
 export const FLAG_APRON = 2;     // belongs to the neighbouring tile (culling only)
 export const FLAG_PHOTO = 8;     // colour from street-level photos
 export const C_GROUND = 2;       // LiDAR (ASPRS) ground class
 
-const MAGIC = [0x56, 0x58, 0x54, 0x03];
+const MAGIC = [0x56, 0x58, 0x54, 0x03];   // "VXT\x03"
+const ARCHIVE = 16;                        // tiles per archive side (common.ARCHIVE)
 
-const ARCHIVE = 16;   // tiles per archive side (pipeline common.ARCHIVE)
+export interface TileEntry { file: string; off: number; len: number; tx: number; ty: number; zmin: number; zmax: number }
 
-export interface TileEntry { file: string; tx: number; ty: number; zmin: number; zmax: number; off?: number; len?: number }
-
-/** a manifest level's tile list. Version 5 (pipeline common.pack_level_tiles): columns, file names implied,
- *  tiles inside archives of ARCHIVE x ARCHIVE (each tile's offset = the lengths before it in its archive);
- *  version 4: the same without archives; older: a list of objects. */
+/** a manifest level's tile list (common.pack_level_tiles: columns, archive names implied; a tile's offset is
+ *  the sum of the lengths before it in its archive) -> one entry per tile */
 export function levelTiles(level: { level: number; size: number[]; tiles: unknown }, tileSize: number): TileEntry[] {
-  const t = level.tiles as { at: number[]; zmin: number[]; zh: number[]; len?: number[] } | TileEntry[];
-  if (Array.isArray(t)) return t;
+  const t = level.tiles as { at: number[]; zmin: number[]; zh: number[]; len: number[] };
   const W = Math.ceil(level.size[0] / tileSize), out: TileEntry[] = [], ends = new Map<string, number>();
   let at = 0;
   for (let i = 0; i < t.at.length; i++) {
     at += t.at[i];
-    const tx = at % W, ty = (at - tx) / W, e: TileEntry = { file: '', tx, ty, zmin: t.zmin[i], zmax: t.zmin[i] + t.zh[i] };
-    if (t.len) {
-      e.file = `L${level.level}/a_${Math.floor(tx / ARCHIVE)}_${Math.floor(ty / ARCHIVE)}.vxa`;
-      e.off = ends.get(e.file) ?? 0; e.len = t.len[i];
-      ends.set(e.file, e.off + e.len);
-    } else e.file = `L${level.level}/t_${tx}_${ty}.vxt`;
-    out.push(e);
+    const tx = at % W, ty = (at - tx) / W;
+    const file = `L${level.level}/a_${Math.floor(tx / ARCHIVE)}_${Math.floor(ty / ARCHIVE)}.vxa`, off = ends.get(file) ?? 0;
+    out.push({ file, off, len: t.len[i], tx, ty, zmin: t.zmin[i], zmax: t.zmin[i] + t.zh[i] });
+    ends.set(file, off + t.len[i]);
   }
   return out;
 }
 
-/** where a tile is: its file (or archive) URL, the byte range in an archive, and the Cache Storage cache
- *  that keeps fetched tiles for this build (null: no caching) */
-export interface TileRef { url: string; off?: number; len?: number; cache: string | null }   // "VXT\x03"
+/** a tile: its archive's URL, its byte range there, and the Cache Storage cache keeping this build's tiles
+ *  (null: no caching) */
+export interface TileRef { url: string; off: number; len: number; cache: string | null }
 
-/** fetch a tile and decode it: from the build's cache if it holds it, else from the network (a range request
- *  into its archive), kept in the cache for the next visit. A static host like GitHub Pages only lets the
- *  browser keep files for minutes; the cache keeps them until the build changes. A page instead of a tile
- *  (a server's fallback for a missing file) is an error. */
+/** fetch a tile and decode it: from the build's cache if it holds it, else with a range request into its
+ *  archive, then kept in the cache for the next visit (a static host like GitHub Pages lets the browser keep
+ *  files for minutes only). A page instead of a tile (a server's fallback for a missing file) is an error. */
 export async function fetchTile(ref: TileRef): Promise<Uint8Array> {
-  const ranged = ref.len !== undefined && ref.off !== undefined;
-  const key = ranged ? `${ref.url}${ref.url.includes('?') ? '&' : '?'}at=${ref.off}` : ref.url;
+  const key = `${ref.url}${ref.url.includes('?') ? '&' : '?'}at=${ref.off}`;
   let cache: Cache | null = null;
   if (ref.cache && typeof caches !== 'undefined') {
     try {
@@ -52,11 +45,11 @@ export async function fetchTile(ref: TileRef): Promise<Uint8Array> {
       if (hit) return decodeTile(await hit.arrayBuffer());
     } catch { cache = null; }   // (no Cache Storage here, e.g. not a secure context: network only)
   }
-  const r = await fetch(ref.url, ranged ? { headers: { Range: `bytes=${ref.off}-${ref.off! + ref.len! - 1}` } } : undefined);
+  const r = await fetch(ref.url, { headers: { Range: `bytes=${ref.off}-${ref.off + ref.len - 1}` } });
   if (!r.ok) throw new Error(`tile ${ref.url}: HTTP ${r.status}`);
   if (r.headers.get('content-type')?.startsWith('text/html')) throw new Error(`tile ${ref.url}: got a web page`);
   let buf = await r.arrayBuffer();
-  if (ranged && r.status === 200) buf = buf.slice(ref.off!, ref.off! + ref.len!);   // (the server ignored the range)
+  if (r.status === 200) buf = buf.slice(ref.off, ref.off + ref.len);   // (a server without range requests)
   if (cache) cache.put(key, new Response(buf.slice(0))).catch(() => {});
   return decodeTile(buf);
 }
@@ -71,13 +64,12 @@ export function tileCache(region: string, build: string | undefined): string | n
   return name;
 }
 
-/** a fetched tile file -> records (8 bytes per voxel). Accepts the compact format gzipped (or already
- *  unzipped, if a server sent it with Content-Encoding: gzip) and the raw records of version 2 builds. */
-export async function decodeTile(buf: ArrayBuffer): Promise<Uint8Array> {
+/** a tile (common.encode_tile, gzipped) -> records */
+async function decodeTile(buf: ArrayBuffer): Promise<Uint8Array> {
   let b = new Uint8Array(buf);
-  if (b[0] === 0x1f && b[1] === 0x8b)   // (gzip: a raw record never starts so, x + 1 <= 65)
+  if (b[0] === 0x1f && b[1] === 0x8b)   // (not yet unzipped by the browser: no Content-Encoding from the server)
     b = new Uint8Array(await new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
-  if (!MAGIC.every((m, i) => b[i] === m)) return b;
+  if (!MAGIC.every((m, i) => b[i] === m)) throw new Error('not a voxel tile');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const width = b[4], P = dv.getUint16(6, true), n = dv.getUint32(8, true);
   const pal = 12;

@@ -5,14 +5,14 @@ import { KIND } from './roads';
 import type { Traffic } from './traffic';
 import type { Spot } from './paths';
 
-export interface TransitData {
+interface TransitData {
   routes: [string, number, string][];               // name, mode (0 tram, 3 bus), colour
   stops: [number, number, string][];                // x, y (voxels), name
   days: [number, string, [number, number, number][]][][];   // Monday..Sunday: [route, headsign, [[stop, arr, dep]]]
 }
 
 /** the timetable as stored (pipeline common.pack_timetable): trips as a stop pattern, a timing and a start
- *  time; distinct days once, the week as indices. Older files have `days` directly. */
+ *  time; distinct days once, the week as indices */
 interface PackedTimetable {
   routes: TransitData['routes']; stops: TransitData['stops'];
   patterns: [number, string, number[]][];    // route, headsign, stops
@@ -20,8 +20,7 @@ interface PackedTimetable {
   schedules: [number, number, number][][];   // per distinct day: [pattern, timing, first arrival s]
   week: number[];                            // Monday..Sunday -> schedule
 }
-export function unpackTimetable(d: TransitData | PackedTimetable): TransitData {
-  if (!('week' in d)) return d;
+export function unpackTimetable(d: PackedTimetable): TransitData {
   const days = d.week.map((k) => d.schedules[k].map(([p, q, t0]) => {
     const [route, headsign, stops] = d.patterns[p], tm = d.timings[q];
     return [route, headsign, stops.map((s, i) => [s, t0 + tm[2 * i], t0 + tm[2 * i] + tm[2 * i + 1]])] as TransitData['days'][number][number];
@@ -30,7 +29,7 @@ export function unpackTimetable(d: TransitData | PackedTimetable): TransitData {
 }
 
 export class Transit {
-  private spots = new Map<string, Spot | null>();
+  private spots = new Map<number, Spot | null>();
   private day = -1;
   private next = 0;          // index of the next run to start today
   private last = -1;
@@ -66,19 +65,17 @@ export class Transit {
     idle(step);
   }
 
-  private spot(stop: number, mode: number) {
-    const key = `${stop}:${mode}`;
-    if (!this.spots.has(key)) {
-      this.spots.set(key, this.traffic.spotNear(this.stopX[stop], this.stopZ[stop], mode === 0 ? KIND.tram : KIND.road));
-    }
-    return this.spots.get(key)!;
+  /** a bus stop's kerb spot */
+  private spot(stop: number) {
+    if (!this.spots.has(stop)) this.spots.set(stop, this.traffic.spotNear(this.stopX[stop], this.stopZ[stop]));
+    return this.spots.get(stop)!;
   }
 
   /** candidate track / kerb positions of a stop (trams: several tracks nearby, e.g. both directions) */
   private cands(stop: number, mode: number) {
     const key = `${stop}:${mode}:c`;
     if (!this.candCache.has(key)) {
-      const c = mode === 0 ? this.traffic.spotsNear(this.stopX[stop], this.stopZ[stop], KIND.tram) : [this.spot(stop, mode)].filter(Boolean) as Spot[];
+      const c = mode === 0 ? this.traffic.spotsNear(this.stopX[stop], this.stopZ[stop], KIND.tram) : [this.spot(stop)].filter(Boolean) as Spot[];
       this.candCache.set(key, c);
     }
     return this.candCache.get(key)!;

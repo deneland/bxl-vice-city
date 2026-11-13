@@ -2,25 +2,25 @@
 // Tiles are fetched on demand (the browser cache usually has them from rendering) and kept in a
 // small LRU. Voxel space: x east, y north, z up, in L0 voxels; see toVoxel() for the scene mapping.
 import * as THREE from 'three/webgpu';
-import type { LevelInfo, TileInfo } from './lod';
+import type { LevelInfo } from './lod';
 
-import { FLAG_APRON, FLAG_PHOTO, fetchTile } from './tileFormat';
+import { FLAG_APRON, FLAG_PHOTO, fetchTile, type TileEntry } from './tileFormat';
 const MAX_TILES = 48;   // ~1 MB occupancy each
 
-export interface VoxelRecord { x: number; y: number; z: number; r: number; g: number; b: number; cls: number; flags: number }
+interface VoxelRecord { x: number; y: number; z: number; r: number; g: number; b: number; cls: number; flags: number }
 
 interface Tile { occ: Uint8Array; photo: Uint8Array; raw: Uint8Array; index: Map<number, number> | null; used: number }
 
 export class Voxels {
   readonly vs: number;
   readonly nx: number; readonly ny: number; readonly nz: number;
-  private infos = new Map<number, TileInfo>();
+  private infos = new Map<number, TileEntry>();
   private tiles = new Map<number, Tile>();
   private pending = new Map<number, Promise<Tile | null>>();
   private clock = 0;
 
-  constructor(private base: string, private ch: number, level: LevelInfo, private world: THREE.Object3D, private query = '',
-    private cache: string | null = null) {
+  constructor(private base: string, private ch: number, level: LevelInfo, private world: THREE.Object3D, private query: string,
+    private cache: string | null) {
     this.vs = level.voxelSize;
     [this.nx, this.ny, this.nz] = level.size;
     for (const t of level.tiles) this.infos.set(this.key(t.tx, t.ty), t);
@@ -119,12 +119,12 @@ export class Voxels {
     return { x, y, z, r: r[o + 3], g: r[o + 4], b: r[o + 5], cls: r[o + 6], flags: r[o + 7] };
   }
 
-  /** First solid voxel along a scene-space ray (loads tiles on the way). Returns the voxel and the face normal. */
-  async raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist = 4000, skip?: (cls: number) => boolean) {
+  /** first solid voxel along a scene-space ray, within 4 km (loads tiles on the way) */
+  async raycast(origin: THREE.Vector3, dir: THREE.Vector3) {
     const o = this.toVoxel(origin);
     const d = new THREE.Vector3(dir.x, -dir.z, dir.y).normalize();
     // clip the ray to the voxel grid
-    let t0 = 0, t1 = maxDist / this.vs;
+    let t0 = 0, t1 = 4000 / this.vs;
     const lo = [0, 0, 0], hi = [this.nx, this.ny, this.nz], oa = [o.x, o.y, o.z], da = [d.x, d.y, d.z];
     for (let i = 0; i < 3; i++) {
       if (Math.abs(da[i]) < 1e-12) { if (oa[i] < lo[i] || oa[i] >= hi[i]) return null; continue; }
@@ -137,16 +137,10 @@ export class Voxels {
     const step = da.map((v) => (v > 0 ? 1 : -1));
     const tDelta = da.map((v) => (v === 0 ? Infinity : Math.abs(1 / v)));
     const tMax = da.map((v, i) => (v === 0 ? Infinity : t0 + ((v > 0 ? p[i] + 1 : p[i]) - (oa[i] + v * t0)) / v));
-    let axis = -1;
     for (let n = 0; n < 20000; n++) {
       if (!this.has(p[0], p[1])) await this.load(Math.floor(p[0] / this.ch), Math.floor(p[1] / this.ch));
-      const c = this.cls(p[0], p[1], p[2]);
-      if (c && !skip?.(c)) {
-        const normal = [0, 0, 0];
-        if (axis >= 0) normal[axis] = -step[axis];
-        return { voxel: new THREE.Vector3(p[0], p[1], p[2]), normal: new THREE.Vector3(...normal), cls: c };
-      }
-      axis = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2);
+      if (this.cls(p[0], p[1], p[2])) return { voxel: new THREE.Vector3(p[0], p[1], p[2]) };
+      const axis = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2);
       if (tMax[axis] > t1) return null;
       p[axis] += step[axis];
       tMax[axis] += tDelta[axis];

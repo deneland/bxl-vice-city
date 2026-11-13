@@ -7,7 +7,7 @@
 // Off-screen and very distant vehicles cost nothing on the GPU. Only near vehicles cast shadows.
 import * as THREE from 'three/webgpu';
 
-export interface FleetModel { geo: THREE.BufferGeometry; far: THREE.BufferGeometry; len: number; h: number; w: number }
+interface FleetModel { geo: THREE.BufferGeometry; far: THREE.BufferGeometry; len: number; h: number; w: number }
 
 const NEAR = 150;     // m: full model closer than this, coarse model beyond
 const FAR = 1100;     // m: not drawn beyond
@@ -169,10 +169,4 @@ export class Fleet {
       }
   }
 
-  /** bodies drawn last frame (near, far) */
-  get drawn() {
-    let n = 0, f = 0;
-    for (const [a, b] of this.lods) { n += a.mesh.count; f += b.mesh.count; }
-    return { near: n, far: f };
-  }
 }

@@ -18,9 +18,8 @@ import {
 } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
-import { night, windowsLit } from './nightlights';
+import { lampLightAt, night, windowsLit } from './nightlights';
 import { BOKEH, focalLength, focusDistance } from './tiltshift';
-import { config } from './config';
 import { noiseLevelAt, noiseOverlay } from './noisemap';
 
 /** seconds, for the emergency beacons' flash pattern (main.ts sets it every frame) */
@@ -42,15 +41,15 @@ const GBUF = ['output', 'emissive', 'normal'] as const;
 
 /** layer of objects that cast shadows into the per-frame (vehicle) shadow map */
 export const DYNAMIC_SHADOW_LAYER = 1;
-const DEBUG_SHADOW = config.debug === 'shadow';
 const STATIC_SIZE = 4096, DYN_SIZE = 1024, DYN_HALF = 120;   // texels; m half-width of the vehicle shadow box
 
 interface ShadowMap { rt: THREE.RenderTarget; cam: THREE.OrthographicCamera; mat: any }
+const SLICE_QUADS = 250_000;   // quads per city-shadow slice frame (an integrated GPU draws ~0.5-1 M per ms: a slice must fit a frame's slack)
 
 export class Deferred {
-  readonly city: THREE.RenderTarget;
-  readonly fwd: THREE.RenderTarget;
-  readonly glow: THREE.RenderTarget;
+  private readonly city: THREE.RenderTarget;
+  private readonly fwd: THREE.RenderTarget;
+  private readonly glow: THREE.RenderTarget;
   private cityMRT = mrt({ output, emissive: vec4(0), normal: vec4(0.5, 1, 0.5, 0) });   // (normal stored x 0.5 + 0.5)
   private pipeline: THREE.RenderPipeline;
   private composite: any;
@@ -92,19 +91,9 @@ export class Deferred {
     this.glow.depthTexture = this.fwd.depthTexture;   // shared: glows are hidden by city and vehicles
 
     if (shadows) {
-      const mk = (size: number, half: number): ShadowMap => {
-        const rt = new THREE.RenderTarget(size, size, { type: THREE.UnsignedByteType, depthBuffer: true });
-        rt.texture.name = 'output';
-        rt.depthTexture = new THREE.DepthTexture(size, size, THREE.FloatType);   // (32-bit: copyable on WebGPU)
-        const cam = new THREE.OrthographicCamera(-half, half, half, -half, 1, 5000);
-        cam.coordinateSystem = renderer.coordinateSystem;
-        cam.updateProjectionMatrix();
-        return { rt, cam, mat: uniform(new THREE.Matrix4()) };
-      };
-      this.stat = mk(STATIC_SIZE, shadows.half);
+      this.stat = this.shadowMap(STATIC_SIZE, shadows.half, 'shadowCity');
       this.statTexel = (2 * shadows.half) / STATIC_SIZE;
-      this.dyn = mk(DYN_SIZE, DYN_HALF);
-      (this.stat.rt as any).label = 'shadowCity'; (this.dyn.rt as any).label = 'shadowDyn';
+      this.dyn = this.shadowMap(DYN_SIZE, DYN_HALF, 'shadowDyn');
       this.dyn.cam.layers.set(DYNAMIC_SHADOW_LAYER);
     }
 
@@ -115,20 +104,17 @@ export class Deferred {
     const nrm = vec4(nrmTex.xyz.mul(2).sub(1), nrmTex.w);   // (stored x 0.5 + 0.5)
     const depth = texture(this.city.depthTexture, uv()).x;
     const dist = perspectiveDepthToViewZ(depth, this.near, this.far).negate();
-    const world = this.stat ? this.camWorld.mul(vec4(getViewPosition(uv(), depth, this.projInv), 1)).xyz : null;
-    const lit = DEBUG_SHADOW ? this.light(nrm.xyz, world).mul(1 / Math.PI) : alb.rgb.mul(this.light(nrm.xyz, world));
+    const world = this.camWorld.mul(vec4(getViewPosition(uv(), depth, this.projInv), 1)).xyz;
+    const lit = alb.rgb.mul(this.light(nrm.xyz, world));
     // lit windows: emissive.a is the window cell's random code, normal.a how much the voxel looks like glass
     const code = emi.a;
     const warm = select(fract(code.mul(13.7)).lessThan(0.8), vec3(1.0, 0.62, 0.3), vec3(0.55, 0.7, 1.0));
     const win = warm.mul(select(code.lessThan(windowsLit), 1, 0)).mul(nrm.w).mul(1.4);
     const glow = emi.rgb.add(win).mul(night);
     const fogged = mix(lit.add(glow), this.fogCol, smoothstep(this.fogNear, this.fogFar, dist));
-    // (?dbg=holes: magenta where no geometry was drawn)
-    const bg: any = config.debug === 'holes' ? vec3(1, 0, 1) : vec3(this.background as any);
     // noise map (noisemap.ts): the city tinted by the averaged sound level at each point of the ground plan
-    const wpos = world ?? this.camWorld.mul(vec4(getViewPosition(uv(), depth, this.projInv), 1)).xyz;
-    const noisy = noiseOverlay(fogged, noiseLevelAt(wpos));
-    const cityCol = select(depth.greaterThanEqual(1), bg, noisy);
+    const noisy = noiseOverlay(fogged, noiseLevelAt(world));
+    const cityCol = select(depth.greaterThanEqual(1), vec3(this.background as any), noisy);
     // forward layer is premultiplied (cleared to transparent black)
     const f = texture(this.fwd.texture, uv());
     const g = texture(this.glow.texture, uv());
@@ -167,24 +153,23 @@ export class Deferred {
       const statOff = Math.max(0.35, this.statTexel * 1.0);
       const st = lookup(this.stat, STATIC_SIZE, 1e-4, statOff);
       const sh = vehicleShadows ? min(st, lookup(this.dyn, DYN_SIZE, 5e-5, 0.35)) : st;
-      if (DEBUG_SHADOW) return vec3(lookup(this.stat, STATIC_SIZE, 1e-4, statOff), lookup(this.dyn, DYN_SIZE, 5e-5, 0.35), 0).mul(Math.PI);
       sun = sun.mul(sh);
     }
-    // (× 1.1: stands in for the faint specular of the rough material we used before)
+    // (× 1.1: a faint specular share)
     return hemi.add(sun).mul(1.1 / Math.PI);
   }
 
   /** material for the voxel vehicle models (vehicleModels.ts): albedo from the model's fixed colours
-   *  (vcol) or the instance's paint (vmat 1); head / tail lights (vmat 2 / 3) glow, mostly at night */
-  vehicleMaterial(extra?: (world: any) => any) {
+   *  (vcol) or the instance's paint (vmat 1); head / tail lights (vmat 2 / 3) glow, mostly at night; lit like
+   *  the city, plus the street lamps at night */
+  vehicleMaterial() {
     const m = new THREE.MeshBasicNodeMaterial();
     const kind = attribute('vmat', 'float').add(0.5).floor();   // (interpolated: not exactly an integer)
     // paint a little muted, like the LiDAR colours of the city around it
     const paint = attribute('paint', 'vec3'), pl = dot(paint, vec3(0.299, 0.587, 0.114));
     const alb = select(kind.equal(1), mix(paint, vec3(pl), 0.25).mul(0.85), attribute('vcol', 'vec3'));
     let l = this.light(normalWorld, positionWorld, false, 1);   // (small objects: one shadow tap is enough)
-    l = l.mul(weathered(0.25, 0.9));
-    if (extra) l = l.add(extra(positionWorld));
+    l = l.mul(weathered(0.25, 0.9)).add(lampLightAt(positionWorld, 0.8).mul(night));
     const lamp = select(kind.equal(2), vec3(4, 3.6, 3), select(kind.equal(3), vec3(2.6, 0.15, 0.1), vec3(0)));
     // lights: 0 parked (off), 1 driving, 2 driving with blue beacons (emergency call)
     const lights = attribute('lights', 'float');
@@ -198,7 +183,7 @@ export class Deferred {
 
   /** material for pedestrians (pedestrians.ts): shirt / skin / trousers per instance, legs and arms
    *  swing with the walk phase (vertex shader) */
-  pedestrianMaterial(extra?: (world: any) => any) {
+  pedestrianMaterial() {
     const m = new THREE.MeshBasicNodeMaterial();
     const part = attribute('part', 'vec2'), walk = attribute('walk', 'vec2');
     const limb = part.y.add(0.5).floor(), mat = part.x.add(0.5).floor();
@@ -213,8 +198,7 @@ export class Deferred {
     const alb = select(mat.equal(1), attribute('shirt', 'vec3'), select(mat.equal(2), attribute('skin', 'vec3'),
       select(mat.equal(3), attribute('pants', 'vec3'), vec3(0.04, 0.035, 0.03))));
     let l = this.light(normalWorld, positionWorld, false);
-    l = l.mul(weathered(0.125, 0.3));
-    if (extra) l = l.add(extra(positionWorld));
+    l = l.mul(weathered(0.125, 0.3)).add(lampLightAt(positionWorld, 0.8).mul(night));
     m.colorNode = vec4(alb.mul(l), 1);
     return m;
   }
@@ -257,6 +241,18 @@ export class Deferred {
 
   get shadows() { return this.stat !== null; }
 
+  /** a shadow map: depth target (32-bit: copyable on WebGPU) and an orthographic sun camera */
+  private shadowMap(size: number, half: number, label: string): ShadowMap {
+    const rt = new THREE.RenderTarget(size, size, { type: THREE.UnsignedByteType, depthBuffer: true });
+    rt.texture.name = 'output';
+    rt.depthTexture = new THREE.DepthTexture(size, size, THREE.FloatType);
+    (rt as any).label = label;
+    const cam = new THREE.OrthographicCamera(-half, half, half, -half, 1, 5000);
+    cam.coordinateSystem = this.renderer.coordinateSystem;
+    cam.updateProjectionMatrix();
+    return { rt, cam, mat: uniform(new THREE.Matrix4()) };
+  }
+
   private aim(sm: ShadowMap, center: THREE.Vector3) {
     sm.cam.position.copy(center).addScaledVector(this.sunDir.value, 2500);
     sm.cam.lookAt(center);
@@ -267,6 +263,7 @@ export class Deferred {
   /** city shadow map over the whole region (expensive: when the sun moved or other tiles were loaded) */
   renderStaticShadow(cityScene: THREE.Scene, center: THREE.Vector3) {
     if (!this.stat) return;
+    this.job = null;   // (supersedes a sliced redraw in progress)
     this.aim(this.stat, center);
     const r = this.renderer;
     r.setRenderTarget(this.stat.rt);
@@ -282,30 +279,21 @@ export class Deferred {
   // when complete, so there is no 20-30 ms frame. (The sun moving still redraws at once: see above.)
   private statBack: ShadowMap | null = null;
   private job: { groups: THREE.Object3D[][]; k: number } | null = null;
-  /** quads per slice frame */
-  sliceQuads = 250_000;   // (an integrated GPU draws ~0.5-1 M quads per ms: a slice must fit in a frame's slack)
   get shadowBusy() { return this.job !== null; }
   private statTexel = 1;   // m per texel of the city shadow map
 
   beginStaticShadow(cityScene: THREE.Scene, center: THREE.Vector3) {
     if (!this.stat) return;
-    if (!this.statBack) {
-      const rt = new THREE.RenderTarget(STATIC_SIZE, STATIC_SIZE, { type: THREE.UnsignedByteType, depthBuffer: true });
-      rt.texture.name = 'output';
-      rt.depthTexture = new THREE.DepthTexture(STATIC_SIZE, STATIC_SIZE, THREE.FloatType);   // (copyable on WebGPU)
-      (rt as any).label = 'shadowCity';
-      const cam = this.stat.cam.clone();
-      this.statBack = { rt, cam, mat: uniform(new THREE.Matrix4()) };
-    }
+    this.statBack ??= this.shadowMap(STATIC_SIZE, 1, 'shadowCity');
     this.statBack.cam.copy(this.stat.cam);
     this.aim(this.statBack, center);
-    // the tiles drawn now, in groups of about sliceQuads
+    // the tiles drawn now, in groups of about SLICE_QUADS
     const groups: THREE.Object3D[][] = [[]];
     let n = 0;
     cityScene.traverseVisible((o) => {
       if (!(o as THREE.Mesh).isMesh) return;
       const q = ((o as THREE.Mesh).geometry as THREE.InstancedBufferGeometry).instanceCount ?? 0;
-      if (n > 0 && n + q > this.sliceQuads) { groups.push([]); n = 0; }
+      if (n > 0 && n + q > SLICE_QUADS) { groups.push([]); n = 0; }
       groups[groups.length - 1].push(o); n += q;
     });
     this.job = { groups, k: 0 };
@@ -339,8 +327,6 @@ export class Deferred {
     this.job = null;
     return true;
   }
-  /** a full redraw supersedes a sliced one in progress */
-  cancelStaticShadow() { this.job = null; }
 
   /** vehicle shadow map around `focus` (every frame while they move) */
   renderDynamicShadow(fwdScene: THREE.Scene, focus: THREE.Vector3) {

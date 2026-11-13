@@ -6,8 +6,8 @@ import { rng } from './rng';
 import { PointGrid } from './grid';
 import type { Agent } from './agents';
 
-export interface ParkingData { spots: [number, number, number, number?][] }   // x, y (voxels), heading (rad, x east / y north), kind
-export const GARAGE = 2;   // kind: 0 kerb, 1 car park, 2 garage
+interface ParkingData { spots: [number, number, number, number?][] }   // x, y (voxels), heading (rad, x east / y north), kind
+const GARAGE = 2;   // kind: 0 kerb, 1 car park, 2 garage
 
 export class Parking {
   readonly x: Float32Array; readonly z: Float32Array; readonly heading: Float32Array;

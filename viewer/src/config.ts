@@ -15,9 +15,8 @@ export const config = {
   /** ?backend=webgl: force the WebGL2 backend */
   forceWebGL: q.get('backend') === 'webgl',
   shadows: q.get('shadows') !== '0',
-  /** ?continuous=1: render every animation frame (benchmarks); =city: also redraw the cached city layer */
-  continuous: q.get('continuous') === '1' || q.get('continuous') === 'city',
-  cityAlways: q.get('continuous') === 'city',
+  /** ?continuous=1: render every animation frame (benchmarks) */
+  continuous: q.get('continuous') === '1',
   /** per-section CPU times in the HUD */
   prof: q.get('prof') === '1',
   /** GPU timer queries: ?gpu=1 on, ?gpu=0 off (default: with telemetry) */
@@ -31,7 +30,6 @@ export const config = {
   cam: q.get('cam')?.split(',').map(Number) ?? null,
   roads: q.get('roads') === '1',
   traffic: q.get('traffic') !== '0',
-  cars: num('cars', 400),
   /** emergency vehicles (siren): mean seconds between calls near where you look (?sirens=0: none) */
   sirens: num('sirens', 240),
   agents: opt('agents'), walkers: opt('walkers'), cyclists: opt('cyclists'),
@@ -39,15 +37,11 @@ export const config = {
   date: q.get('date'),
   time: q.get('time'),
   weather: q.get('weather'),
-  /** level of detail: max on-screen voxel size (px), ?lod=0 off, resident faces (millions) */
+  /** level of detail: max on-screen voxel size (px), resident faces (millions) */
   err: num('err', 8),
-  lod: q.get('lod') !== '0',
   budget: opt('budget'),   // resident faces, millions (default by device tier, tier.ts)
   labels: q.get('mode') === 'labels',
   tilt: q.get('tilt') === '1',
-  bokeh: num('bokeh', 2.5),
-  /** ?dbg=shadow: shadow maps as colours; ?dbg=holes: magenta where nothing was drawn */
-  debug: q.get('dbg'),
 } as const;
 
 /** a data file's address (path relative to the data root, e.g. `roads/schaerbeek.json`) */

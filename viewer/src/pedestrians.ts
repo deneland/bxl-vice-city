@@ -1,7 +1,7 @@
 // Pedestrians: walk along pavements (both sides of every street, where the LiDAR facades are: pipeline
-// roads.py), round corners and across streets at intersections. They wait for a gap before crossing;
-// while someone crosses, cars may not enter that arm of the intersection (traffic.ts). Drawn as small
-// voxel people (0.125 m voxels) whose legs and arms swing in the vertex shader.
+// roads.py), round corners, and cross streets at the mapped crosswalks: under lights with the walk signal,
+// else when no car is too close to stop; cars give way to people on a crosswalk (traffic.ts). Drawn as
+// small voxel people (0.125 m voxels) whose legs and arms swing in the vertex shader.
 import * as THREE from 'three/webgpu';
 import { crosswalkKey, KIND, sceneLine, type RoadNetwork } from './roads';
 import type { Traffic } from './traffic';
@@ -81,7 +81,7 @@ export class Pedestrians {
   private walk: THREE.InstancedBufferAttribute;   // (walk phase, heading) per person
   onArrive: ((agent: Agent) => void) | null = null;
 
-  constructor(net: RoadNetwork, vs: number, material: THREE.Material, private traffic: Traffic | null, capacity = 1500) {
+  constructor(net: RoadNetwork, vs: number, material: THREE.Material, private traffic: Traffic, capacity = 1500) {
     this.net = net; this.vs = vs;
     // --- mesh: instanced people with per-instance colours and walk phase ---
     const g = personGeometry();
@@ -202,7 +202,7 @@ export class Pedestrians {
       return v;
     };
     // --- crosswalks where OpenStreetMap has them (zebras, signalled, unmarked): across the street from one
-    // pavement to the other. (No crossing at every corner any more: people walk to the mapped ones.)
+    // pavement to the other.
     const nearestOn = (seg: Seg, q: THREE.Vector3) => {
       let bs = 0, bd = Infinity;
       for (let t = 0; t <= seg.len; t += 0.5) { at(seg, t, tmp); const d = (tmp.x - q.x) ** 2 + (tmp.z - q.z) ** 2; if (d < bd) { bd = d; bs = t; } }
@@ -291,7 +291,7 @@ export class Pedestrians {
         this.grid.add(tmp.x, tmp.z, { seg, s });
       }
     }
-    this.traffic?.setZebras((key) => (this.busy.get(key) ?? 0) > 0);
+    this.traffic.setZebras((key) => (this.busy.get(key) ?? 0) > 0);
 
   }
 
@@ -492,8 +492,8 @@ export class Pedestrians {
         // about to cross a street: wait for a gap (or until patience runs out; then cars wait)
         if (seg.cross !== null && w.crossing !== seg.cross) {
           // under a light: wait for the cars' red (a rare one gives up after a long wait); else for a gap
-          const walk = this.traffic?.walkSignal(seg.cross) ?? null;
-          const clear = !this.traffic || this.traffic.zebraClear(seg.cross);   // (no car that could not stop)
+          const walk = this.traffic.walkSignal(seg.cross);
+          const clear = this.traffic.zebraClear(seg.cross);   // (no car that could not stop)
           const go = walk === false ? clear && w.wait >= RED_PATIENCE : clear;
           if (!go && (walk === false || w.wait < CROSS_PATIENCE)) { w.wait += dt; step = 0; break; }
           w.wait = 0; w.crossing = seg.cross;

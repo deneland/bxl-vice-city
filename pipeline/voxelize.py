@@ -21,12 +21,8 @@ Works in 256 m blocks so memory does not grow with the region:
 
 Tile (tx,ty) at level L has children (2tx..2tx+1, 2ty..2ty+1) at L-1.
 
-Usage: uv run python voxelize.py [roi-name] [--jobs=N] [--no-photo] [--keep-vehicles] [--no-tidy]
-                                 [--no-street-tidy]   (default region from config.toml)
+Usage: uv run python voxelize.py [roi-name] [--jobs=N]   (default region from config.toml)
   merges data/cache/streetview/<roi>/layer.npz (streetview.py) when present
-  --keep-vehicles   leave 2021's parked cars in the geometry
-  --no-tidy         keep low loose clutter and floating specks; --no-street-tidy: no street zones
-  SPECK_POINTS=n    (environment) speck threshold in LiDAR points; 0: keep specks
 
 Builds into <name>.building and swaps it in at the end, so a running viewer never
 sees a half-written build; the manifest carries a build id for cache busting.
@@ -34,9 +30,7 @@ sees a half-written build; the manifest carries a build id for cache busting.
 
 import json
 import multiprocessing as mp
-import os
 import shutil
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -45,7 +39,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (CFG, MANIFEST_VERSION, encode_tile, pack_archives, pack_level_tiles, read_roads, tile_file, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+from common import (CFG, MANIFEST_VERSION, encode_tile, pack_archives, read_roads, tile_file, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
                     FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
 
 ROI_NAME, ROI = region()
@@ -60,17 +54,14 @@ DEST = OUT  # where tiles are written (a staging folder during a build)
 LAYER_F = ROOT / "data" / "cache" / "streetview" / ROI["name"] / "layer.npz"
 LAYER = {}  # street-level colour layer, loaded in main() (shared with forked workers)
 
-REMOVE_VEHICLES = "--keep-vehicles" not in sys.argv   # 2021's parked cars out of the geometry (simulated instead)
 FOOTPRINTS = ROOT / "data" / "cache" / "vehicles"
-# tidy (default; --no-tidy to keep all): unclassified voxels low above the ground are kept only when they belong to something: a
+# tidy: unclassified voxels low above the ground are kept only when they belong to something: a
 # structure rising above TIDY_H (posts, signs, shelters), a building (attached to it), or something the
 # street photos recognised (building, sign, pole, fence, street furniture). Everything higher is kept.
-TIDY = "--no-tidy" not in sys.argv
 TIDY_H = 5                 # voxels (2.5 m) above the ground
-# street tidy (default; --no-street-tidy to keep): in the carriageway (OSM roads, measured kerbs) everything
+# street tidy: in the carriageway (OSM roads, measured kerbs) everything
 # unclassified up to ROAD_H that is not part of a taller structure goes (cars of 2021 the vehicle finder missed:
 # vans, buses, moving cars smeared by the scan; fragments); on pavements also next to the facades
-STREET_TIDY = "--no-street-tidy" not in sys.argv
 ROAD_H = 8                 # voxels (4 m)
 FLOAT_VOX = 20             # small clusters floating more than FLOAT_H above the ground go
 FLOAT_H = 2
@@ -246,27 +237,8 @@ class Vox:
         return Vox(*[np.concatenate([getattr(p, a) for p in parts]) for a in ("x", "y", "z", "col", "cls", "flag")])
 
 
-def count_faces(v: Vox, x0, x1, y0, y1) -> int:
-    """Visible faces of the voxels inside [x0,x1)x[y0,y1), using all of v as neighbours."""
-    W = int(v.x.max()) + 2
-    H = int(v.y.max()) + 2
-    key = (v.z * H + v.y) * W + v.x
-    skey = np.sort(key)
-    inside = (v.x >= x0) & (v.x < x1) & (v.y >= y0) & (v.y < y1)
-    faces = 0
-    for dx, dy, dz in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]:
-        nx, ny, nz = v.x + dx, v.y + dy, v.z + dz
-        nk = (nz * H + ny) * W + nx
-        pos = np.searchsorted(skey, nk).clip(0, len(skey) - 1)
-        occ = (skey[pos] == nk) & (nx >= 0) & (ny >= 0) & (nz >= 0)
-        if dz == -1:
-            occ |= (v.flag & FLAG_FILL) > 0
-        faces += int((~occ & inside).sum())
-    return faces
-
-
 def write_tiles(L, v: Vox, tx_range, ty_range):
-    tiles, nbytes = [], 0
+    tiles = []
     for ty in ty_range:
         ym = (v.y >= ty * CH - 1) & (v.y <= ty * CH + CH)
         for tx in tx_range:
@@ -283,17 +255,14 @@ def write_tiles(L, v: Vox, tx_range, ty_range):
             buf[:, 6] = v.cls[m]
             buf[:, 7] = v.flag[m] | np.where(apron, FLAG_APRON, 0)
             name = tile_file(L, tx, ty)
-            data = encode_tile(buf, CH + 2)
-            (DEST / name).write_bytes(data)
-            nbytes += len(data)
+            (DEST / name).write_bytes(encode_tile(buf, CH + 2))
             zr = v.z[m][~apron]
-            tiles.append({"file": name, "tx": tx, "ty": ty, "count": int((~apron).sum()),
-                          "zmin": int(zr.min()), "zmax": int(zr.max())})
-    return tiles, nbytes
+            tiles.append({"tx": tx, "ty": ty, "zmin": int(zr.min()), "zmax": int(zr.max())})
+    return tiles
 
 
 # --- pass 2: one block ---------------------------------------------------------
-SPECK_POINTS = int(os.environ.get("SPECK_POINTS", 10))  # isolated clusters with fewer LiDAR points are dropped (0: off)
+SPECK_POINTS = 10   # isolated clusters with fewer LiDAR points are dropped
 
 
 def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
@@ -311,20 +280,18 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
     vl[m] = lab[vz[m] - z0, vy[m], vx[m]]
     del lab
     pts = np.bincount(vl[m], weights=np.minimum(cnt[m], 1 << 20), minlength=n + 1)
-    if not SPECK_POINTS:
-        return np.zeros(len(key), bool)
     drop = m & (pts[vl] < SPECK_POINTS)
     st["specks"] += int(drop.sum())
-    if TIDY:   # small clusters floating in the air (birds, cable bits, scanner noise)
-        nvox = np.bincount(vl[m], minlength=n + 1)
-        h = vz - ground[vy, vx]
-        hmin = np.full(n + 1, 1 << 30)
-        np.minimum.at(hmin, vl[m], h[m])
-        fl = (nvox < FLOAT_VOX) & (hmin > FLOAT_H)
-        fl[0] = False
-        fd = m & fl[vl] & ~drop & (cls != C_BUILDING)
-        st["floating"] = st.get("floating", 0) + int(fd.sum())
-        drop |= fd
+    # small clusters floating in the air (birds, cable bits, scanner noise)
+    nvox = np.bincount(vl[m], minlength=n + 1)
+    h = vz - ground[vy, vx]
+    hmin = np.full(n + 1, 1 << 30)
+    np.minimum.at(hmin, vl[m], h[m])
+    fl = (nvox < FLOAT_VOX) & (hmin > FLOAT_H)
+    fl[0] = False
+    fd = m & fl[vl] & ~drop & (cls != C_BUILDING)
+    st["floating"] = st.get("floating", 0) + int(fd.sum())
+    drop |= fd
     return drop
 
 
@@ -508,7 +475,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
         veh = low & ok[lab[vy, vx]]
         vcls[veh] = C_VEHICLE
         st["vehicle"] += int(veh.sum())
-        if REMOVE_VEHICLES and veh.any():
+        if veh.any():
             # 2021's parked cars leave the geometry (the ground under them is in the fill below); their
             # footprint columns are kept: where cars stood is where people park (simulated parking)
             fp = np.zeros((GH, GW), bool)
@@ -536,8 +503,8 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
     acnt = np.concatenate([cnt, np.full(int(new.sum()), 1 << 20)])   # fill voxels: solid by construction
 
     # f. tidy: low, loose unclassified voxels are candidates to drop (unless the photos recognise them)
-    cand = tidy_candidates(akey, acls, aflag, ground, is_bld, gx0, gy0, GW, GH, st) if TIDY else None
-    if cand is not None and cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
+    cand = tidy_candidates(akey, acls, aflag, ground, is_bld, gx0, gy0, GW, GH, st)
+    if cand.any():   # the ground under the clutter: continue the open ground (not its shadow)
         ax, ay = akey % GW, (akey // GW) % GH
         cc = np.zeros((GH, GW), bool)
         cc[ay[cand], ax[cand]] = True
@@ -607,7 +574,7 @@ def build_zones() -> bool:
 def zones_block(gx0, gy0, GW, GH):
     global _zones
     if _zones is None:
-        _zones = np.load(ZONES_F, mmap_mode="r") if ZONES_F.exists() and STREET_TIDY else False
+        _zones = np.load(ZONES_F, mmap_mode="r") if ZONES_F.exists() else False
     if _zones is False:
         return None
     return np.asarray(_zones[gy0:gy0 + GH, gx0:gx0 + GW])
@@ -616,7 +583,7 @@ def zones_block(gx0, gy0, GW, GH):
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
     st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
-    levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
+    levels = [{"tiles": [], "voxels": 0} for _ in range(LEVELS)]
     parts = sorted(CACHE.glob(f"b{by * NBX + bx}_*.bin"))
     if not parts:
         return levels, st, None, None
@@ -670,12 +637,8 @@ def process_block(bx: int, by: int, z0: float):
             v = v.coarser()
         s = 1 << L
         x0, x1, y0, y1 = cx0 // s, ceil_div(cx1, s), cy0 // s, ceil_div(cy1, s)
-        tiles, nb = write_tiles(L, v, range(x0 // CH, ceil_div(x1, CH)), range(y0 // CH, ceil_div(y1, CH)))
-        lv = levels[L]
-        lv["tiles"] += tiles
-        lv["bytes"] += nb
-        lv["voxels"] += int(((v.x >= x0) & (v.x < x1) & (v.y >= y0) & (v.y < y1)).sum())
-        lv["faces"] += count_faces(v, x0, x1, y0, y1)
+        levels[L]["tiles"] += write_tiles(L, v, range(x0 // CH, ceil_div(x1, CH)), range(y0 // CH, ceil_div(y1, CH)))
+        levels[L]["voxels"] += int(((v.x >= x0) & (v.x < x1) & (v.y >= y0) & (v.y < y1)).sum())
         if L == BL - 1:
             carry = v.select(x0, x1, y0, y1)
     return levels, st, carry, foot
@@ -687,7 +650,7 @@ def main() -> None:
     log(f"region '{ROI['name']}': {NX}x{NY} columns @ {VS} m, {NBX}x{NBY} blocks of {BLOCK * VS:.0f} m, "
         f"{LEVELS} levels, {jobs} parallel jobs")
     z0 = bucket_points(jobs)
-    if LAYER_F.exists() and "--no-photo" not in sys.argv:
+    if LAYER_F.exists():
         lf = np.load(LAYER_F)
         if tuple(lf["size"]) == (NX, NY):
             ok = lf["lnses"] >= LABEL_MIN_SESSIONS
@@ -696,8 +659,7 @@ def main() -> None:
         else:
             log("street-level layer is for another region size; ignored")
     log(f"z0 = {z0} m (height range {z0}–{z0 + NZ * VS} m)")
-    if STREET_TIDY:
-        log("street zones from the road network: " + ("built" if build_zones() else "no roads.json yet (run roads.py; then build again)"))
+    log("street zones from the road network: " + ("built" if build_zones() else "no roads.json yet (run roads.py; then build again)"))
 
     # build into a staging folder; the viewer keeps serving the old build until the swap
     DEST = OUT.with_name(OUT.name + ".building")
@@ -705,7 +667,7 @@ def main() -> None:
     for L in range(LEVELS):
         (DEST / f"L{L}").mkdir(parents=True)
 
-    levels = [{"tiles": [], "voxels": 0, "faces": 0, "bytes": 0} for _ in range(LEVELS)]
+    levels = [{"tiles": [], "voxels": 0} for _ in range(LEVELS)]
     st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
     carry, feet, paint = [], [], []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
@@ -718,8 +680,7 @@ def main() -> None:
             if "vehicle_rgb" in bst:
                 paint.append(bst.pop("vehicle_rgb"))
             for L, lv in enumerate(lvs):
-                for k in ("voxels", "faces", "bytes"):
-                    levels[L][k] += lv[k]
+                levels[L]["voxels"] += lv["voxels"]
                 levels[L]["tiles"] += lv["tiles"]
             for k, v in bst.items():
                 if isinstance(v, (int, float)):
@@ -741,8 +702,7 @@ def main() -> None:
     for L in range(BL, LEVELS):
         v = v.coarser()
         s = 1 << L
-        tiles, nb = write_tiles(L, v, range(ceil_div(ceil_div(NX, s), CH)), range(ceil_div(ceil_div(NY, s), CH)))
-        levels[L].update(tiles=tiles, bytes=nb, voxels=len(v), faces=count_faces(v, 0, 1 << 30, 0, 1 << 30))
+        levels[L].update(tiles=write_tiles(L, v, range(ceil_div(ceil_div(NX, s), CH)), range(ceil_div(ceil_div(NY, s), CH))), voxels=len(v))
 
     log(f"walls: {st['wall_coloured']:,}/{st['wall']:,} voxels coloured from facade points "
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
@@ -750,15 +710,11 @@ def main() -> None:
         f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
         f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied ({st.get('street_road', 0):,} candidates in the carriageway, {st.get('street_pave', 0):,} on pavements); {st.get('floating', 0):,} floating voxels dropped; "
         f"{st['dropped_z']:,} points outside height range")
-    out_levels = []
+    out_levels = [{"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
+                   "tiles": lv["tiles"]} for L, lv in enumerate(levels)]
+    sizes = pack_archives(DEST, out_levels, CH)   # (the single tile files -> archives read by range requests)
     for L, lv in enumerate(levels):
-        lv["tiles"].sort(key=lambda t: (t["ty"], t["tx"]))
-        log(f"L{L}: {VS * (1 << L)} m, {lv['voxels']:,} voxels, ~{lv['faces']:,} faces, "
-            f"{len(lv['tiles'])} tiles, {lv['bytes'] / 1e6:.1f} MB")
-        out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
-                           "voxels": lv["voxels"], "faces": lv["faces"]})
-        out_levels[-1]["tiles"] = pack_level_tiles(lv["tiles"], out_levels[-1], CH)
-    pack_archives(DEST, out_levels, CH)   # (the single tile files -> archives read by range requests)
+        log(f"L{L}: {VS * (1 << L)} m, {lv['voxels']:,} voxels, {len(lv['tiles'])} tiles, {sizes[L] / 1e6:.1f} MB")
     manifest = {
         "version": MANIFEST_VERSION, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
         "origin": [ROI["xmin"], ROI["ymin"], z0], "tileSize": CH,

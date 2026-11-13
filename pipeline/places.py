@@ -229,10 +229,9 @@ def build():
                 continue
             lv = t.get("building:levels", "")
             homes.append([round(p[0], 1), round(p[1], 1), int(lv) if lv.isdigit() else floors(*p), sid(street)])
-    out = {"build": m.man["build"], "cats": CATS, "streets": list(streets), "names": list(names),
-           "homes": homes, "pois": pois, "weeks": weeks,
-           "fields": {"homes": ["x", "y", "floors", "street"], "pois": ["x", "y", "cat", "name", "opening week"],
-                      "weeks": "7 day masks, Monday first: bit h = open in hour h"}}
+    # homes: [x, y, floors, street]; pois: [x, y, cat, name, opening week]; weeks: 7 day masks, Monday first
+    # (bit h: open in hour h)
+    out = {"cats": CATS, "streets": list(streets), "names": list(names), "homes": homes, "pois": pois, "weeks": weeks}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, separators=(",", ":"), ensure_ascii=False))
     cnt = {c: sum(1 for q in pois if q[2] == i) for i, c in enumerate(CATS)}

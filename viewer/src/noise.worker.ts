@@ -19,7 +19,6 @@
 //      { type: 'compute', prior: Float64Array | null }  ->  { type: 'map', data: Uint8Array (w × h; 0: no level, else dB) }
 //            prior: W per cell by kind × class from a calibration run (bench/noisecal.mjs), NaN where unknown
 //      { type: 'rates' }  ->  { type: 'rates', e, t }   energy and observed time per kind × class (calibration)
-//      { type: 'reset' }
 
 let DB_MIN = 40, DB_MAX = 85;   // byte 1..255 covers this range (set by noisemap.ts)
 const OBS = 32;          // m: cells of the observation-time grid
@@ -158,9 +157,6 @@ self.onmessage = (e: MessageEvent) => {
   } else if (m.type === 'rates') {
     const { e, t } = classSums();
     (self as unknown as Worker).postMessage({ type: 'rates', e, t, kinds: KINDS, ranks: RANKS, cell: CELL });
-  } else if (m.type === 'reset') {
-    for (const s of src) s.fill(0);
-    obs.fill(0);
   } else if (m.type === 'add') {
     const a: Float32Array = m.src;
     for (let k = 0; k + 3 < a.length; k += 4) {
@@ -191,14 +187,12 @@ self.onmessage = (e: MessageEvent) => {
       }
     const r = spread(P, W, H, CELL), out = new Uint8Array(W * H);
     const k = calib / 1e-12;   // intensity re 1 pW/m²
-    let any = false;
     for (let x = 0; x < W * H; x++) {
       const v = r[x] * k;
       if (v <= 0) continue;
-      any = true;
       const db = 10 * Math.log10(v);
       out[x] = Math.max(1, Math.min(255, Math.round(1 + ((db - DB_MIN) / (DB_MAX - DB_MIN)) * 254)));
     }
-    (self as unknown as Worker).postMessage({ type: 'map', data: out, any }, [out.buffer]);
+    (self as unknown as Worker).postMessage({ type: 'map', data: out }, [out.buffer]);
   }
 };

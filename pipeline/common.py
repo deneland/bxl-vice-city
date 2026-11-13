@@ -1,5 +1,6 @@
 """Shared by the pipeline scripts: paths and config, the region named on the command line, coordinate
 transforms, the voxel tile format, OpenStreetMap (Overpass) and Mapillary access, logging, CPU count."""
+import functools
 import gzip
 import json
 import os
@@ -83,11 +84,10 @@ def encode_tile(rec: np.ndarray, width: int) -> bytes:
 
 
 def decode_tile(data: bytes) -> np.ndarray:
-    """A tile file (compact .vxt, or a version 2 .bin of raw records) -> records (n x 8, uint8)."""
-    if data[:2] == b"\x1f\x8b":
-        data = gzip.decompress(data)
+    """a tile (encode_tile) -> records (n x 8, uint8)"""
+    data = gzip.decompress(data)
     if data[:4] != TILE_MAGIC:
-        return np.frombuffer(data, np.uint8).reshape(-1, 8)
+        raise ValueError("not a voxel tile")
     width, P, n = data[4], int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:12], "little")
     o = 12
     pal = np.frombuffer(data, np.uint8, 3 * P, o).reshape(-1, 3)
@@ -109,10 +109,6 @@ def decode_tile(data: bytes) -> np.ndarray:
     rec[:, 3:6] = pal[rest[0]]
     rec[:, 6], rec[:, 7] = rest[1], rest[2]
     return rec
-
-
-def read_tile(path: Path) -> np.ndarray:
-    return decode_tile(path.read_bytes())
 
 
 # --- manifest (version 5) and tile archives ---
@@ -140,48 +136,36 @@ def pack_level_tiles(tiles: list, level: dict, tile_size: int) -> dict:
     W = -(-level["size"][0] // tile_size)
     ts = sorted(tiles, key=lambda t: (t["ty"], t["tx"]))
     at = [t["ty"] * W + t["tx"] for t in ts]
-    out = {"at": [a - b for a, b in zip(at, [0] + at[:-1])], "zmin": [t["zmin"] for t in ts],
-           "zh": [t["zmax"] - t["zmin"] for t in ts]}
-    if all("len" in t for t in ts):
-        out["len"] = [t["len"] for t in ts]
-    return out
+    return {"at": [a - b for a, b in zip(at, [0] + at[:-1])], "zmin": [t["zmin"] for t in ts],
+            "zh": [t["zmax"] - t["zmin"] for t in ts], "len": [t["len"] for t in ts]}
 
 
 def level_tiles(level: dict, tile_size: int) -> list:
-    """a manifest level's tiles as [{file, tx, ty, zmin, zmax, (off, len: in an archive)}] (any manifest version)"""
+    """a manifest level's tiles as [{file (its archive), off, len, tx, ty, zmin, zmax}]"""
     t = level["tiles"]
-    if isinstance(t, list):
-        return t
     W, at, out, ends = -(-level["size"][0] // tile_size), 0, [], {}
-    lens = t.get("len")
-    for i, (d, z0, zh) in enumerate(zip(t["at"], t["zmin"], t["zh"])):
+    for d, z0, zh, n in zip(t["at"], t["zmin"], t["zh"], t["len"]):
         at += d
         tx, ty = at % W, at // W
-        e = {"tx": tx, "ty": ty, "zmin": z0, "zmax": z0 + zh}
-        if lens:
-            f = archive_file(level["level"], tx, ty)
-            e.update(file=f, off=ends.get(f, 0), len=lens[i])
-            ends[f] = e["off"] + lens[i]
-        else:
-            e["file"] = tile_file(level["level"], tx, ty)
-        out.append(e)
+        f = archive_file(level["level"], tx, ty)
+        out.append({"file": f, "off": ends.get(f, 0), "len": n, "tx": tx, "ty": ty, "zmin": z0, "zmax": z0 + zh})
+        ends[f] = ends.get(f, 0) + n
     return out
 
 
 def read_tile_at(base: Path, t: dict) -> np.ndarray:
-    """records of a manifest tile (level_tiles entry): from its archive or its own file"""
-    if "len" not in t:
-        return read_tile(base / t["file"])
+    """records of a manifest tile (level_tiles entry), read from its archive"""
     with open(base / t["file"], "rb") as f:
         f.seek(t["off"])
         return decode_tile(f.read(t["len"]))
 
 
 def pack_archives(base: Path, levels: list, tile_size: int):
-    """single tile files (tile_file) of the manifest levels -> archives; sets each level's "tiles" (with
-    lengths) and "bytes", deletes the single files"""
+    """the single tile files (tile_file) of each level (its "tiles": [{tx, ty, zmin, zmax}]) -> archives;
+    replaces "tiles" with the packed list (pack_level_tiles); deletes the single files. Returns bytes per level."""
+    sizes = []
     for lv in levels:
-        ts = sorted(level_tiles(lv, tile_size), key=lambda t: (t["ty"], t["tx"]))
+        ts = sorted(lv["tiles"], key=lambda t: (t["ty"], t["tx"]))
         groups = {}
         for t in ts:
             groups.setdefault(archive_file(lv["level"], t["tx"], t["ty"]), []).append(t)
@@ -196,10 +180,16 @@ def pack_archives(base: Path, levels: list, tile_size: int):
         for t in ts:
             (base / tile_file(lv["level"], t["tx"], t["ty"])).unlink()
         lv["tiles"] = pack_level_tiles(ts, lv, tile_size)
-        lv["bytes"] = total
+        sizes.append(total)
+    return sizes
 
 
 # --- road network (roads.py -> viewer/public/roads/<roi>.json): each edge is a list in this order ---
+#   from, to (nodes), kind (0 road, 1 tram, 2 rail), oneway, km/h, lanes, xyz (polyline, voxels), rank (road class),
+#   controls [[m, 1 stop line of the signalled junction ahead | 2 give way | 3 stop | 4 crossing light | 5 speed bump, dir]],
+#   contraflow (one-way street open to cycling against the traffic), pavement [left, right] (m from the centreline,
+#   0: none found), crosswalks [[m, 1 signals | 2 marked | 3 unmarked]], roundabout,
+#   OSM parking [left, right] (0 unknown, 1 none, 2 parallel, 3 diagonal, 4 perpendicular)
 (E_FROM, E_TO, E_KIND, E_ONEWAY, E_KMH, E_LANES, E_XYZ, E_RANK, E_CONTROLS, E_CONTRA, E_PAVEMENT, E_CROSSWALKS,
  E_RING, E_PARKING) = range(14)
 KIND_ROAD, KIND_TRAM, KIND_RAIL = 0, 1, 2
@@ -235,7 +225,7 @@ def write_roads(path: Path, net: dict):
 
 def read_roads(path: Path) -> dict:
     net = json.loads(path.read_text())
-    return _map_lines(net, unpack_line) if net.get("xyz") == ROADS_XYZ else net
+    return _map_lines(net, unpack_line)
 
 
 # --- timetable (transit.py -> viewer/public/transit/<roi>.json) ---
@@ -258,19 +248,6 @@ def pack_timetable(days: list) -> dict:
         week.append(seen[key])
     return {"patterns": [[r, h, list(st)] for r, h, st in patterns], "timings": [list(t) for t in timings],
             "schedules": schedules, "week": week}
-
-
-def unpack_timetable(tt: dict) -> list:
-    """-> days: Monday .. Sunday, [[route, headsign, [[stop, arrival s, departure s], ...]], ...]"""
-    days = []
-    for k in tt["week"]:
-        day = []
-        for p, q, t0 in tt["schedules"][k]:
-            route, headsign, stops = tt["patterns"][p]
-            tm = tt["timings"][q]
-            day.append([route, headsign, [[s, t0 + tm[2 * i], t0 + tm[2 * i] + tm[2 * i + 1]] for i, s in enumerate(stops)]])
-        days.append(day)
-    return days
 
 
 def log_clock():
@@ -332,6 +309,10 @@ def overpass(query: str, dest: Path):
 
 
 # --- Mapillary ---
+MAPILLARY_MIN_SCORE = 0.5   # calibrated segments (streetview.py calibrate) matching the voxels less than this are not used
+
+
+@functools.cache
 def mapillary_token() -> str:
     """MAPILLARY_TOKEN from the repository's .env (gitignored; the only place it is kept)"""
     env = ROOT / ".env"
@@ -339,3 +320,40 @@ def mapillary_token() -> str:
         if line.startswith("MAPILLARY_TOKEN"):
             return line.split("=", 1)[1].strip().strip("'\"")
     raise SystemExit("MAPILLARY_TOKEN missing in .env")
+
+
+def mapillary_get(url: str, auth: bool = True) -> bytes:
+    """a Mapillary API request (auth: with the token; image files do not need it), retried a few times"""
+    for i in range(4):
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"OAuth {mapillary_token()}"} if auth else {})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
+        except Exception:
+            if i == 3:
+                raise
+            time.sleep(2 ** i)
+
+
+def mapillary_grid(x0: float, y0: float, x1: float, y1: float, url, cell: float = 250.0) -> list:
+    """the "data" of one API query per cell x cell m of the L72 box (each query stays below the 2000-result
+    cap); url(bbox) gives the query for a "lon0,lat0,lon1,lat1" bbox"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def query(c):
+        a = to_wgs.transform(c[0], c[1])
+        b = to_wgs.transform(min(c[0] + cell, x1), min(c[1] + cell, y1))
+        return json.loads(mapillary_get(url(f"{a[0]:.6f},{a[1]:.6f},{b[0]:.6f},{b[1]:.6f}")))["data"]
+
+    with ThreadPoolExecutor(8) as ex:
+        res = list(ex.map(query, [(x, y) for x in np.arange(x0, x1, cell) for y in np.arange(y0, y1, cell)]))
+    if any(len(r) >= 2000 for r in res):
+        print("warning: a Mapillary query hit the 2000-result cap: use smaller cells")
+    return [d for r in res for d in r]
+
+
+def mapillary_offset(cal: dict) -> np.ndarray:
+    """the systematic Mapillary -> Lambert 72 offset (east, north, up): the median over the well-matching
+    segments of a streetview.py calibration"""
+    good = [c["offset"] for c in cal.values() if c["score"] >= MAPILLARY_MIN_SCORE]
+    return np.median(good, 0) if good else np.zeros(3)

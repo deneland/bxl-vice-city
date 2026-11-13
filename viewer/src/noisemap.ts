@@ -28,7 +28,7 @@ export function noiseLevelAt(world: any) {
 /** colour scale of noise maps (END-style): green below 50, yellow, orange, red, purple, dark blue above 75 */
 const STOPS: [number, number][] = [[45, 0x2e9e45], [52, 0xb9d63a], [58, 0xf2d62a], [64, 0xf0901f], [69, 0xd9261c], [74, 0x9a1b6e], [80, 0x3a2a8c]];
 const lin = (h: number) => { const c = new THREE.Color(h); return vec3(c.r, c.g, c.b); };
-export function noiseRamp(db: any) {
+function noiseRamp(db: any) {
   let c: any = lin(STOPS[0][1]);
   for (let i = 1; i < STOPS.length; i++) c = mix(c, lin(STOPS[i][1]), smoothstep(STOPS[i - 1][0], STOPS[i][0], db));
   return c;
@@ -59,7 +59,7 @@ export function vehicleLw(kind: string, v: number, siren: boolean): number {
   }
   return siren ? sum(lw, 118) : lw;
 }
-export const dbToWatt = (db: number) => 10 ** (db / 10) * 1e-12;
+const dbToWatt = (db: number) => 10 ** (db / 10) * 1e-12;
 
 export class NoiseMap {
   private worker: Worker;
@@ -172,16 +172,6 @@ export class NoiseMap {
       this.worker.postMessage({ type: 'compute', prior }, prior ? [prior.buffer] : []);
     }
   }
-
-  /** (tests) the last map: share of cells observed, and the level histogram of those (dB) */
-  stats() {
-    const d = this.tex.image.data as Uint8Array;
-    let seen = 0, sum = 0, max = 0;
-    for (const v of d) if (v) { seen++; const db = DB[0] + ((v - 1) / 254) * (DB[1] - DB[0]); sum += db; max = Math.max(max, db); }
-    return { seen: seen / d.length, mean: seen ? sum / seen : 0, max };
-  }
-
-  reset() { this.worker.postMessage({ type: 'reset' }); }
 
   /** legend: the colour scale as HTML */
   static legend() {

@@ -23,6 +23,12 @@ class Ring {
   }
 }
 
+const summary = (rings: Map<string, Ring>) => {
+  const out: Record<string, { avg: number; p95: number; max: number }> = {};
+  for (const [k, r] of rings) out[k] = r.stats();
+  return out;
+};
+
 class Prof {
   private start = new Map<string, number>();
   private acc = new Map<string, number>();       // this frame
@@ -47,9 +53,9 @@ class Prof {
     this.acc.set(name, (this.acc.get(name) ?? 0) + performance.now() - t);
     this.start.delete(name);
   }
-  /** close the frame: every known section gets a sample (0 if it did not run) */
   /** the slowest frames (> SPIKE ms of loop work) with their sections: what causes a hitch */
   spikes: { t: number; total: number; parts: Record<string, number> }[] = [];
+  /** close the frame: every known section gets a sample (0 if it did not run) */
   endFrame() {
     let total = 0;
     for (const v of this.acc.values()) total += v;
@@ -63,11 +69,7 @@ class Prof {
     for (const [k, r] of this.rings) r.push(this.acc.get(k) ?? 0);
     this.acc.clear();
   }
-  report() {
-    const out: Record<string, { avg: number; p95: number; max: number }> = {};
-    for (const [k, r] of this.rings) out[k] = r.stats();
-    return out;
-  }
+  report() { return summary(this.rings); }
   // GPU time per render pass (from the renderer's timestamp queries, arrives a few frames late)
   private gpu = new Map<string, Ring>();
   gpuSample(pass: string, ms: number) {
@@ -75,11 +77,7 @@ class Prof {
     if (!r) this.gpu.set(pass, (r = new Ring()));
     r.push(ms);
   }
-  gpuReport() {
-    const out: Record<string, { avg: number; p95: number; max: number }> = {};
-    for (const [k, r] of this.gpu) out[k] = r.stats();
-    return out;
-  }
+  gpuReport() { return summary(this.gpu); }
   reset() { this.rings.clear(); this.gpu.clear(); this.longTasks = []; this.spikes = []; }
   /** one line for the HUD: the sections with the largest average */
   line(top = 6) {

@@ -6,7 +6,7 @@ import type { WalkSpot } from './pedestrians';
 import { H } from './clock';
 
 /** places.json */
-export interface PlacesData {
+interface PlacesData {
   cats: string[]; streets: string[]; names: string[];
   homes: [number, number, number, number][];   // x, y (voxels), floors, street
   pois: [number, number, number, number, number?][];    // x, y (voxels), category, name, opening week

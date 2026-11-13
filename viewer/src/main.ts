@@ -7,8 +7,8 @@ import { PlaceIndex } from './places';
 import * as THREE from 'three/webgpu';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { TileManager, type LevelInfo } from './lod';
-import { TELEMETRY, telemetry } from './telemetry';
-import { LABELS, viewMode } from './voxelMaterial';
+import { TELEMETRY, telemetry, type FrameInfo } from './telemetry';
+import { ATLAS_W, LABELS, viewMode } from './voxelMaterial';
 import { buildLanes, loadRoads, roadOverlay } from './roads';
 import { Traffic } from './traffic';
 import { Agents } from './agents';
@@ -16,7 +16,7 @@ import { AgentView } from './agentView';
 import { Pedestrians } from './pedestrians';
 import { Transit, unpackTimetable } from './transit';
 import { Parking } from './parking';
-import { baseVoxel, gridOrigin, lampLightAt, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
+import { baseVoxel, gridOrigin, litShare, loadLamps, night, nightFor, windowsLit } from './nightlights';
 import { Voxels } from './voxels';
 import { Walk } from './walk';
 import { Inspector } from './inspect';
@@ -31,18 +31,16 @@ import { prof } from './prof';
 telemetry.start();
 
 interface Manifest {
-  version: number; build?: string; name: string; origin: [number, number, number]; tileSize: number;
+  build?: string; origin: [number, number, number]; tileSize: number;
   home: [number, number]; levels: LevelInfo[]; attribution: string;
 }
 type Vec3 = [number, number, number];
-export interface View { pos: Vec3; target: Vec3 }
+interface View { pos: Vec3; target: Vec3 }
 
 const ROI = config.roi;
 const SHADOWS = config.shadows;
 // render every animation frame (benchmarks); default: only when something changed
-// (continuous=city: also redraw the cached city layer every frame, the cost of a moving camera)
 const CONTINUOUS = config.continuous;
-const CITY_ALWAYS = config.cityAlways;
 const PROF = config.prof;   // per-section CPU times in the HUD
 const GPU_TIMING = config.gpu !== '0' && (TELEMETRY || config.gpu === '1');
 const SKY = new THREE.Color(0xbcd3e6);
@@ -109,7 +107,6 @@ async function main() {
   renderer.setPixelRatio(res.ratio);
   renderer.setSize(innerWidth, innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
   const backend = (renderer.backend as any).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
@@ -158,7 +155,6 @@ async function main() {
   controls.zoomToCursor = true;   // the orbit point follows what you zoom into
   controls.listenToKeyEvents(window);
   controls.keyPanSpeed = 25;
-  controls.target.set(0, 0, 0);
   const home: View = { pos: camera.position.toArray() as Vec3, target: [0, 0, 0] };
 
   const setView = (v: View) => {
@@ -197,7 +193,6 @@ async function main() {
   glowFx.position.copy(world.position);
   glowScene.add(glowFx);
   // region centre in the scene: sun target, so the shadow box covers everything
-  world.updateMatrixWorld();
   sun.target.position.set((L0.size[0] / 2) * VS + world.position.x, 0, -(L0.size[1] / 2) * VS + world.position.z);
   gridOrigin.value.copy(world.position);
   baseVoxel.value = VS;
@@ -243,7 +238,7 @@ async function main() {
     if (on && !traffic && !buildingTraffic) {
       buildingTraffic = true;
       try {
-        // all data files at once (they used to be fetched one after another)
+        // all data files at once
         const json = (u: string) => fetch(dataUrl(u)).then((r) => (r.ok ? r.json() : null)).catch(() => null);
         const [n, palette, tt, places, pk] = await Promise.all([network,
           json(`vehicles/${ROI}.json`),    // car paint colours measured on the parked cars in the LiDAR (vehicles.py)
@@ -253,8 +248,7 @@ async function main() {
         if (!n) { trafficOn = false; return; }
         // (a frame between the big set-up steps: none of them blocks for long on a slow CPU)
         await nextFrame();
-        traffic = new Traffic(n.lanes, { car: config.cars, tram: tt ? 0 : 12, train: 3 },
-          deferred.vehicleMaterial((w) => lampLightAt(w, 0.8).mul(night)),   // lit like the city, lamps at night
+        traffic = new Traffic(n.lanes, deferred.vehicleMaterial(),
           (node) => n.net.nodes[node]?.[4] === 1,                             // region edge: through traffic
           palette?.palette ?? []);
         if (tt) transit = new Transit(unpackTimetable(tt), traffic, VS);
@@ -262,12 +256,12 @@ async function main() {
         fx.add(traffic.group, traffic.lights);
         await nextFrame();
         // pedestrians on the pavements (both sides of every street), crossing at intersections
-        peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial((w) => lampLightAt(w, 0.8).mul(night)), traffic);
+        peds = new Pedestrians(n.net, VS, deferred.pedestrianMaterial(), traffic);
         peds.mesh.layers.enable(DYNAMIC_SHADOW_LAYER);
         await peds.build(nextFrame);
         fx.add(peds.mesh);
         if (roads) roads.add(peds.overlay());
-        // population in proportion to the homes (the first 1.5 km region: 5224 homes, 8000 drivers)
+        // population in proportion to the homes (calibrated on a 1.5 km area: 5224 homes, 8000 drivers)
         const k = places ? places.homes.length / 5224 : 1;
         await nextFrame();
         const parking = pk ? new Parking(pk, VS) : null;
@@ -377,12 +371,11 @@ async function main() {
   if (!wPreset) setInterval(updateWeather, 10 * 60e3);
 
   // --- level-of-detail tiles ------------------------------------------------
-  const ERR = config.err;           // max on-screen size of one voxel, px
-  const lod = new TileManager(dataUrl(`tiles/${ROI}`), CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer,
+  const lod = new TileManager(dataUrl(`tiles/${ROI}`), CH, manifest.levels, world, config.err, renderer,
     tier.inflight, tier.workers, tier.atlasRows);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
   lod.cache = config.tileCache ? tileCache(ROI, manifest.build) : null;
-  lod.budgetFaces = Math.min(tier.budgetFaces, (tier.atlasRows * 4096) / 2);  // resident faces (the atlas holds twice that: slack)
+  lod.budgetFaces = Math.min(tier.budgetFaces, (tier.atlasRows * ATLAS_W) / 2);  // resident faces (the atlas holds twice that: slack)
   const t0 = performance.now();
   let loadMs = 0;
   const ready = new Promise<void>((resolve) => {
@@ -506,18 +499,20 @@ async function main() {
   const toggleHelp = () => document.body.classList.toggle('help');
   document.getElementById('help-btn')!.addEventListener('click', toggleHelp);
   window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if ((e.key === 'd' || e.key === 'D') && !walk.active) document.body.classList.toggle('debug');   // (in walk mode D steps right)
-    if (e.key === '?') toggleHelp();
-    if ((e.key === 'h' || e.key === 'H') && !walk.active) setView(home);
-    if (e.key === 'l' || e.key === 'L') setMode(viewMode.value === 0);
-    if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
-    if (e.key === 'v' || e.key === 'V') toggleWalk();
-    if (e.key === 'm' || e.key === 'M') setTilt(!tiltOn);
-    if (e.key === 'r' || e.key === 'R') setRoads(!roads?.visible);
-    if (e.key === 't' || e.key === 'T') setTraffic(!trafficOn);
-    if ((e.key === 'n' || e.key === 'N') && !walk.active) setNoise(!noiseWanted);
-    if (e.key === 'Escape') { inspector.clear(); agentView.clear(); }
-    if (e.key === 'f' || e.key === 'F') agentView.setFollow(!agentView.isFollowing);
+    switch (e.key.toLowerCase()) {
+      case 'd': if (!walk.active) document.body.classList.toggle('debug'); break;   // (in walk mode D steps right)
+      case '?': toggleHelp(); break;
+      case 'h': if (!walk.active) setView(home); break;
+      case 'l': setMode(viewMode.value === 0); break;
+      case 'p': if (TELEMETRY) snapshotRequested = true; break;
+      case 'v': toggleWalk(); break;
+      case 'm': setTilt(!tiltOn); break;
+      case 'r': setRoads(!roads?.visible); break;
+      case 't': setTraffic(!trafficOn); break;
+      case 'n': if (!walk.active) setNoise(!noiseWanted); break;
+      case 'escape': inspector.clear(); agentView.clear(); break;
+      case 'f': agentView.setFollow(!agentView.isFollowing); break;
+    }
     dirty = true;
   });
   setTime(Number(timeInput.value));
@@ -541,7 +536,7 @@ async function main() {
 
   // --- loop + HUD ----------------------------------------------------------
   const frameTimes: number[] = [];
-  const frameHooks = new Set<(f: { interval: number; cpu: number; moving: boolean; drawCalls: number; triangles: number }) => void>();
+  const frameHooks = new Set<(f: FrameInfo) => void>();
   const gpuHooks = new Set<(ms: number) => void>();
   const lastCam = new THREE.Matrix4();
   let last = performance.now(), hudAt = 0, gpuMs = 0, gpuInFlight = false;
@@ -611,7 +606,7 @@ async function main() {
     const tilesChanged = moving || dirty || lod.needsUpdate ? lod.update(camera, renderer.domElement.height) : false;
     prof.end('lod');
     if (lastTickRendered) res.frame(interval, moving, now, lastCpu, lod.stats.loading > 0 || (agents?.replanning ?? 0) > 0);
-    const cityChanged = CITY_ALWAYS || moving || tilesChanged || cityDirty;
+    const cityChanged = moving || tilesChanged || cityDirty;
     // (a city shadow rebuild in slices needs frames to finish, also when nothing else changes)
     if (!(CONTINUOUS || cityChanged || precipOn || trafficOn || dirty || snapshotRequested || deferred.shadowBusy)) {
       // nothing changed: draw nothing, the GPU stays idle
@@ -640,7 +635,6 @@ async function main() {
       const sunMoved = deferred.sunDir.value.angleTo(shadowSun) > 0.005;
       if (sunMoved) {   // (time slider: redraw at once, it has to follow the sun)
         prof.begin('shadowCity');
-        deferred.cancelStaticShadow();
         deferred.renderStaticShadow(cityScene, sun.target.position);
         prof.end('shadowCity');
         shadowSun.copy(deferred.sunDir.value);

@@ -13,7 +13,6 @@ export const REF_DIST = 5;   // ... at this distance (m)
 
 export const lwGain = (lw: number) => 10 ** ((lw - REF) / 20);
 
-type Buf = AudioBuffer;
 
 /** sounds generated once (mono) */
 function synth(ctx: BaseAudioContext) {
@@ -23,7 +22,7 @@ function synth(ctx: BaseAudioContext) {
     for (let i = 0; i < n; i++) d[i] = f(i / sr, i);
     return b;
   };
-  const norm = (b: Buf, peak = 0.9) => {
+  const norm = (b: AudioBuffer, peak = 0.9) => {
     const d = b.getChannelData(0);
     let m = 0;
     for (let i = 0; i < d.length; i++) m = Math.max(m, Math.abs(d[i]));
@@ -31,7 +30,7 @@ function synth(ctx: BaseAudioContext) {
     return b;
   };
   // a loop with no seam: the last 50 ms crossfaded into the start
-  const seamless = (b: Buf) => {
+  const seamless = (b: AudioBuffer) => {
     const d = b.getChannelData(0), n = Math.round(0.05 * sr), L = d.length - n;
     for (let i = 0; i < n; i++) { const k = i / n; d[i] = d[i] * k + d[L + i] * (1 - k); }
     const out = ctx.createBuffer(1, L, sr);
@@ -102,7 +101,7 @@ function synth(ctx: BaseAudioContext) {
     hiss: hiss(1.1),
   };
 }
-export type Sounds = ReturnType<typeof synth>;
+type Sounds = ReturnType<typeof synth>;
 
 /** a continuous source following something: base loop (and optional extra loop, e.g. a siren) → panner */
 export class Voice {

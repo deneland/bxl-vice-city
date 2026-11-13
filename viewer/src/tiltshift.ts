@@ -1,7 +1,6 @@
 // Miniature look: very shallow depth of field focused on what you look at, plus a little extra
 // saturation (applied in deferred.ts). A real city photographed with the depth of field of a macro lens reads as a scale model.
 import { uniform } from 'three/tsl';
-import { config } from './config';
 
 /** distance from the camera to the sharp plane, metres (set every frame) */
 export const focusDistance = uniform(100);
@@ -9,7 +8,7 @@ export const focusDistance = uniform(100);
 export const focalLength = uniform(30);
 /** depth of the sharp zone relative to the focus distance: smaller = stronger miniature effect */
 export const DEPTH_RATIO = 0.3;
-export const BOKEH = config.bokeh;
+export const BOKEH = 2.5;
 
 /** Diameter (px) of the blur at depths [dmin, dmax]: detail smaller than this is invisible, so the LOD
  *  may use coarser voxels there. DoF node: CoC = smoothstep(0, focalLength, |depth - focus|); bokeh disc

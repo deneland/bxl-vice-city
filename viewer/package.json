@@ -9,8 +9,6 @@
     "check": "tsc --noEmit",
     "bench": "node bench/bench.mjs",
     "sessions": "node scripts/sessions.mjs",
-    "lodsweep": "node bench/lodsweep.mjs",
-    "junctions": "node bench/junctions.mjs",
     "noisecal": "node bench/noisecal.mjs"
   },
   "dependencies": {

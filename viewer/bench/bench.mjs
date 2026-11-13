@@ -263,7 +263,7 @@ const delta = (now, old) => {
 };
 const fmt = (x) => (x == null ? '–' : x.toFixed(2));
 console.log(`GPU busy before/after run: ${idleBefore ?? '?'}% / ${idleAfter ?? '?'}%${(idleBefore > 10 || idleAfter > 10) ? '  ⚠ not idle, compare with care' : ''}`);
-console.log(`${env.backend} · ${env.gpu}\n${W}x${H} · query "${query}" · first view ${load.readyMs} ms (${load.ready ?? load.chunks}/${load.total ?? load.chunks} tiles loaded) · heap ${env.mem} MB`);
+console.log(`${env.backend} · ${env.gpu}\n${W}x${H} · query "${query}" · first view ${load.readyMs} ms (${load.ready}/${load.total} tiles loaded) · heap ${env.mem} MB`);
 console.log('\nscenario     gpu avg ms      gpu p95 ms      frame p50  frame p99 ms     cpu p99  draws  tris(M)  tiles L0/L1/L2/L3 (end of run)');
 for (const r of results) {
   const b = base?.results.find((x) => x.name === r.name);

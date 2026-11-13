@@ -13,7 +13,7 @@ const FLUSH_MS = 5000;
 const KEEP_RECENT = 600; // frames kept for snapshots
 
 /** what a frame did (to find what the slow ones have in common) */
-export type FrameTags = Record<string, boolean>;
+type FrameTags = Record<string, boolean>;
 
 export interface FrameInfo {
   interval: number;   // ms since previous frame (what the user feels)
@@ -146,13 +146,11 @@ class Telemetry {
     this.idle = 0;
   }
 
-  snapshot(canvas: HTMLCanvasElement, note = '') {
+  snapshot(canvas: HTMLCanvasElement) {
     if (!TELEMETRY) return;
     const id = `${this.session}-snap${this.seq++}`;
-    const image = canvas.toDataURL('image/png');
-    post({ type: 'snapshot', session: this.session, id, t: this.now(), note, recent: this.recent.slice(),
-      ...this.state(), image });
-    return id;
+    post({ type: 'snapshot', session: this.session, id, t: this.now(), recent: this.recent.slice(),
+      ...this.state(), image: canvas.toDataURL('image/png') });
   }
 
   private now() { return Math.round(performance.now() - this.t0); }

@@ -14,10 +14,10 @@ export const windowsLit = uniform(0.3);
 /** scene position of voxel (0,0,0) (the world group's offset) */
 export const gridOrigin = uniform(new THREE.Vector3());
 /** region size in metres (east, north) */
-export const gridSize = uniform(new THREE.Vector2(1, 1));
+const gridSize = uniform(new THREE.Vector2(1, 1));
 /** light map: r = lamp light on the ground (0..1), g = ground height of the nearest lamps (voxels / 255) */
-export const lampMap = texture(new THREE.DataTexture(new Uint8Array(4), 1, 1));
-export const LAMP_COLOR = new THREE.Color(1.0, 0.72, 0.42);   // warm white (linear)
+const lampMap = texture(new THREE.DataTexture(new Uint8Array(4), 1, 1));
+const LAMP_COLOR = new THREE.Color(1.0, 0.72, 0.42);   // warm white (linear)
 /** L0 voxel size (m), for the ground heights in the light map */
 export const baseVoxel = uniform(0.5);
 

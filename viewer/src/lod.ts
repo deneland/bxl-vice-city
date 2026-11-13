@@ -10,17 +10,19 @@ import { ATLAS_W, createVoxelMaterial, voxelGeometryBase } from './voxelMaterial
 import type { MeshRequest, MeshResult } from './mesher.worker';
 import type { TileEntry } from './tileFormat';
 
-export type TileInfo = TileEntry;
-export interface LevelInfo { level: number; voxelSize: number; size: [number, number, number]; voxels: number; faces: number; tiles: TileInfo[] }
+export interface LevelInfo { level: number; voxelSize: number; size: [number, number, number]; tiles: TileEntry[] }
+
+const ARRIVE_MS = 3;            // ms per frame for integrating new tiles
+const ARRIVE_QUADS = 300_000;   // and at most this many new quads (their first render uploads them)
 
 /** Face data (colour, class) of all resident tiles in one texture: each tile owns a range of rows. Merged
  *  quads (mesher.worker.ts) index it by face; new tiles are copied in on the GPU. */
-export class FaceAtlas {
+class FaceAtlas {
   static readonly W = ATLAS_W;   // x 8192 rows (4096 on low-tier devices, tier.ts) = 33.5M faces: twice the face budget, it never runs full
   readonly tex: THREE.Texture;
   private target: THREE.RenderTarget | null = null;
   private free: [number, number][];
-  constructor(webgpu: boolean, readonly rows = 8192) {
+  constructor(webgpu: boolean, readonly rows: number) {
     // allocated on the GPU without CPU data. WebGPU: a render target's texture (a DataTexture without
     // data makes its upload throw); WebGL: a DataTexture (copies into render-target textures do not
     // arrive there; three warns once about the empty upload, harmless)
@@ -104,7 +106,7 @@ export class FaceAtlas {
 }
 
 interface Node {
-  id: number; L: number; info: TileInfo; vs: number;
+  id: number; L: number; info: TileEntry; vs: number;
   children: Node[];
   state: 'idle' | 'queued' | 'loading' | 'ready';
   mesh: THREE.Mesh | null; faces: number; quads: number; start: number;   // start: first atlas texel (-1: none)
@@ -114,7 +116,7 @@ interface Node {
   used: number;         // frame number when last visited
 }
 
-export interface LodStats { perLevel: number[]; faces: number; quads: number; loading: number; ready: number; total: number; residentFaces: number; evicted: number }
+interface LodStats { perLevel: number[]; faces: number; quads: number; loading: number; ready: number; total: number; residentFaces: number; evicted: number }
 
 export class TileManager {
   private nodes: Node[] = [];
@@ -123,9 +125,6 @@ export class TileManager {
   private inflight = 0;
   private shown = new Set<Node>();
   private arrived: MeshResult[] = [];
-  /** ms per frame for integrating new tiles */
-  arriveMs = 3;
-  arriveQuads = 300_000;
   /** tiles integrated in the last update (telemetry) */
   lastArrived = 0;
   private showB = new Set<Node>();
@@ -156,13 +155,11 @@ export class TileManager {
 
   constructor(
     private base: string, private tileSize: number, private levels: LevelInfo[],
-    private group: THREE.Group, private shadows: boolean, errPx: number, private renderer: THREE.WebGPURenderer,
-    maxInflight = 16, workers = 0, atlasRows = 8192,
+    private group: THREE.Group, errPx: number, private renderer: THREE.WebGPURenderer,
+    private maxInflight: number, workers: number, atlasRows: number,
   ) {
     this.atlas = new FaceAtlas(!!(renderer.backend as any).isWebGPUBackend, atlasRows);
     this.errPx = errPx;
-    this.maxInflight = maxInflight;
-    group.updateMatrixWorld(true);
     this.materials = levels.map((l) => createVoxelMaterial(l.voxelSize, levels[0].voxelSize, this.atlas.tex));
     const byKey = new Map<string, Node>();
     for (const lv of levels) {
@@ -183,8 +180,7 @@ export class TileManager {
       if (n.L === top) { this.roots.push(n); continue; }
       byKey.get(`${n.L + 1}/${n.info.tx >> 1}/${n.info.ty >> 1}`)?.children.push(n);
     }
-    const nWorkers = workers || Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
-    this.workers = Array.from({ length: nWorkers }, () => {
+    this.workers = Array.from({ length: workers }, () => {
       const w = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' });
       w.onmessage = (ev: MessageEvent<MeshResult>) => { this.arrived.push(ev.data); };   // (integrated in update, within a budget)
       return w;
@@ -192,15 +188,14 @@ export class TileManager {
     for (const r of this.roots) this.request(r, 1e9);
     this.stats.total = this.nodes.length;
   }
-  private maxInflight: number;
 
-  /** Resolves once nothing is queued or loading (after the next update). */
   /** tiles still queued or loading */
   get busy() { return this.inflight > 0 || this.queue.length > 0 || this.arrived.length > 0 || this.roots.some((r) => r.state !== 'ready'); }
   private meshArrived = false;
   /** true while tiles load, or when a mesh arrived since the last update (it must be shown) */
   get needsUpdate() { return this.busy || this.meshArrived || this.idleWaiters.length > 0; }
 
+  /** resolves once nothing is queued or loading (after the next update) */
   whenIdle(): Promise<void> {
     if (!this.busy && !this.meshArrived) return Promise.resolve();
     return new Promise((r) => this.idleWaiters.push(r));
@@ -217,10 +212,10 @@ export class TileManager {
     this.meshArrived = false;
     const frame = ++this.frame;
     // new tiles from the workers: as many as fit in a few ms (each one is an upload and a new mesh)
-    const until = performance.now() + this.arriveMs;
+    const until = performance.now() + ARRIVE_MS;
     let k = 0;
-    let q = 0;   // (and at most arriveQuads new quads: their first render uploads them)
-    while (k < this.arrived.length && (k === 0 || (performance.now() < until && q < this.arriveQuads))) {
+    let q = 0;
+    while (k < this.arrived.length && (k === 0 || (performance.now() < until && q < ARRIVE_QUADS))) {
       q += this.arrived[k].quads;
       this.onMesh(this.arrived[k++]);
     }
@@ -280,11 +275,15 @@ export class TileManager {
     this.evicted++;
   }
 
+  /** tiles that may be dropped: loaded, not the coarsest level (always kept), not wanted this frame */
+  private evictable() {
+    return this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame);
+  }
+
   private evict() {
     const target = this.budgetFaces;
     if (this.resident <= target) return;
-    const cand = this.nodes.filter((n) => n.state === 'ready' && n.L < this.levels.length - 1 && !this.shown.has(n) && n.used < this.frame)
-      .sort((a, b) => a.used - b.used);
+    const cand = this.evictable().sort((a, b) => a.used - b.used);
     for (const n of cand) {
       if (this.resident <= target * 0.85) break;
       this.drop(n);
@@ -295,8 +294,7 @@ export class TileManager {
   private lru: Node[] = []; private lruFrame = -1;
   private freeFor(n: number) {
     if (this.lruFrame !== this.frame) {   // (eviction candidates, least recently used first: once per frame)
-      this.lru = this.nodes.filter((x) => x.state === 'ready' && x.start >= 0 && x.L < this.levels.length - 1 && !this.shown.has(x) && x.used < this.frame)
-        .sort((a, b) => b.used - a.used);
+      this.lru = this.evictable().filter((x) => x.start >= 0).sort((a, b) => b.used - a.used);
       this.lruFrame = this.frame;
     }
     while (this.lru.length) {
@@ -339,8 +337,7 @@ export class TileManager {
       if (start < 0) { n.state = 'idle'; return; }   // (still full: asked for again later)
       this.atlas.upload(this.renderer, start, t);
       n.start = start;
-      const base = start;
-      for (let i = 2; i < q.length; i += 3) q[i] += base;
+      for (let i = 2; i < q.length; i += 3) q[i] += start;
     }
     n.state = 'ready';
     this.readyCount++;
@@ -361,7 +358,6 @@ export class TileManager {
     g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
     const mesh = new THREE.Mesh(g, this.materials[n.L]);
     mesh.position.set(n.info.tx * s, 0, -n.info.ty * s);
-    mesh.castShadow = mesh.receiveShadow = this.shadows;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
     mesh.matrixWorld.multiplyMatrices(this.group.matrixWorld, mesh.matrix);   // (the city scene does not update matrices)

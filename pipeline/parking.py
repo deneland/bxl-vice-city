@@ -281,8 +281,8 @@ def main():
         fetch_lots()
     spots += lot_places(grid, x0, y0, np.array(Model(ROI_NAME).man["origin"][:2]), spots)
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"spots": spots, "fields": ["x", "y", "heading (rad, x east / y north)", "kind (0 kerb, 1 car park, 2 garage)"]},
-                              separators=(",", ":")))
+    # spots: [x, y, heading (rad, x east / y north), kind (0 kerb, 1 car park, 2 garage)]
+    OUT.write_text(json.dumps({"spots": spots}, separators=(",", ":")))
     print(f"{len(f):,} footprint columns -> {rows:,} kerbside rows, {used * VS / 1000:.1f} km of kerb, "
           f"{len(spots):,} parking places -> {OUT.relative_to(ROOT)}")
 
