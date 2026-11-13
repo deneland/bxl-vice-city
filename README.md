@@ -105,9 +105,11 @@ npm run deploy                    # build, and make the gh-pages branch that bui
 git push -f origin gh-pages       # publish it
 ```
 
-`npm run deploy` replaces the `gh-pages` branch with a single new commit each time, also locally (the
-previous copy is pruned), so the data never piles up in the history; hence the `-f`. Once, on GitHub:
-Settings > Pages > Deploy from a branch > `gh-pages`, `/ (root)`. Pushing `main` (the code) is separate.
+When only the app changed, the new site commit builds on the previous one and the push uploads just the
+changed files (a few hundred kB). When the data changed (a new pipeline build), `gh-pages` starts afresh
+with a single commit (the push uploads the whole site, ~0.4 GB; hence the `-f`) and the old version is
+pruned locally, so old data never piles up in the history. Once, on GitHub: Settings > Pages > Deploy from
+a branch > `gh-pages`, `/ (root)`. Pushing `main` (the code) is separate.
 
 Any static host that supports HTTP range requests works. The data can also live on another host than the
 app: build with `VITE_DATA_URL=https://.../` or open the page with `?data=https://.../` (that host must
