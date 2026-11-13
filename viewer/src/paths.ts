@@ -61,8 +61,9 @@ export interface Vehicle {
   transit?: TransitRun;        // STIB trams and buses: line and stops (transit.ts)
   stuck: number;               // s without moving
   siren?: boolean;             // emergency vehicle on a call: beacons and siren
-  block?: string | null; blockBy?: Vehicle | null;   // debugging: what it brakes for
-  why?: string;                // debugging: why it may not enter its next junction
+  /** what it brakes for (a car queueing for a red light is not stuck: traffic.ts atLight), and the vehicle ahead */
+  block?: 'leader' | 'light' | 'junction' | 'crossing' | 'crosswalk' | null; blockBy?: Vehicle | null;
+  why?: '' | 'light' | 'busy';   // why it may not enter its next junction yet (a red light, or traffic in the way)
 }
 
 const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();

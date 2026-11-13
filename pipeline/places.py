@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 
-from common import C_BUILDING, ROOT, bbox, overpass, region, to_l72
+from common import C_BUILDING, ROOT, bbox, osm_nodes, overpass, region, to_l72
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -143,8 +143,8 @@ def excluded_street_lines():
     if not raw.exists():
         raise SystemExit(f"{raw.relative_to(ROOT)} missing: run roads.py first (needed to keep homes off EXCLUDE_STREETS)")
     els = json.loads(raw.read_text())["elements"]
-    nodes = {e["id"]: (e["lon"], e["lat"]) for e in els if e["type"] == "node"}
-    return [np.array([to_l72.transform(*nodes[n]) for n in e["nodes"] if n in nodes]) for e in els
+    nodes = osm_nodes(els)
+    return [np.array([nodes[n] for n in e["nodes"] if n in nodes]) for e in els
             if e["type"] == "way" and any(x in e.get("tags", {}).get("name", "") for x in EXCLUDE_STREETS)]
 
 

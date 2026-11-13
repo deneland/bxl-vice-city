@@ -58,14 +58,6 @@ function waitingAtJunction(v: Vehicle) {
   for (let k = 1; k < v.route.length; k++) if (v.route[k].junction && v.grant !== v.route[k]) return true;
   return false;
 }
-const BLOCK = new Map<string, string>();
-/** 'junction:<reason>' (cached: built per vehicle per step otherwise) */
-function junctionBlock(why: string | undefined) {
-  const k = why || '?';
-  let b = BLOCK.get(k);
-  if (!b) { b = 'junction:' + k; BLOCK.set(k, b); }
-  return b;
-}
 /** distance a vehicle needs to stop, braking firmly (1.5 x its comfortable deceleration) */
 const stopDistance = (v: Vehicle) => (v.v * v.v) / (2 * v.t.b * 1.5);
 const STEP = 1 / 20;   // s: simulation step (drawing interpolates in between)
@@ -282,7 +274,7 @@ export class Traffic {
   private atLight(v: Vehicle) {
     let h = v;
     for (let n = 0; n < 40 && h.block === 'leader' && h.blockBy; n++) h = h.blockBy;
-    return h.block === 'junction:light' || h.block === 'crossing';
+    return h.block === 'light' || h.block === 'crossing';
   }
 
   /** for the shadow pass: let every vehicle mesh render in another layer too */
@@ -793,9 +785,9 @@ export class Traffic {
       const canStop = x.d > stopDistance(x.v);
       x.v.why = '';
       if (sig && !x.v.siren && !(sig.state === GREEN || (sig.state === AMBER && !canStop))) x.v.why = 'light';
-      else if (this.occupied(j, x.v, x.c)) x.v.why = 'occupied';
-      else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'committed';
-      else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'no room';   // don't block the box
+      else if (this.occupied(j, x.v, x.c)) x.v.why = 'busy';
+      else if (committed.some((y) => y.v !== x.v && y.c.junction === j && this.conflicts(j, x.c, y.c))) x.v.why = 'busy';
+      else if (x.v.wait < NO_ROOM_PATIENCE && !this.room(x.v, x.c)) x.v.why = 'busy';   // (no room after it: don't block the box)
       x.free = !x.v.why;
     }
     // pass 2: among the vehicles that could go, precedence (in order of arrival)
@@ -811,9 +803,9 @@ export class Traffic {
         if (y === x || !y.free || y.c.junction !== j || !this.conflicts(j, x.c, y.c)) continue;
         // only vehicles that will actually be there soon matter (not one far back or standing still)
         if (y.d / Math.max(y.v.v, 1.5) > ETA) continue;
-        if (y.v.grant === y.c) { ok = false; x.v.why = 'granted other'; break; }   // allowed in before x
+        if (y.v.grant === y.c) { ok = false; x.v.why = 'busy'; break; }   // (allowed in before x)
         const patient = !signalled && x.v.wait > PATIENCE && x.v.wait >= y.v.wait;   // breaks priority cycles
-        if (!patient && this.before(y.v, y.c, x.v, x.c)) { ok = false; x.v.why = 'yield'; break; }
+        if (!patient && this.before(y.v, y.c, x.v, x.c)) { ok = false; x.v.why = 'busy'; break; }   // (gives way)
       }
       if (ok) x.v.grant = x.c;
     }
@@ -859,7 +851,7 @@ export class Traffic {
         // a siren at a red light: down to RED_RUN at the stop line, braking comfortably (then on through)
         if (v.siren && i > 0 && p.junction && p.from!.approach!.signal && p.from!.approach!.signal.state !== GREEN && d + p.start > 0)
           v0 = Math.min(v0, Math.sqrt(RED_RUN * RED_RUN + 2 * t.b * 0.6 * (d + p.start)));
-        if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = junctionBlock(v.why); v.blockBy = null; }
+        if (i > 0 && p.junction && v.grant !== p && d + p.start < gap) { gap = d + p.start; vLead = 0; v.block = v.why === 'light' ? 'light' : 'junction'; v.blockBy = null; }
         if (v.kind === KIND.road)
           for (const x of p.crossings) {
             if (x.s <= from - t.total || x.sig.state === GREEN) continue;

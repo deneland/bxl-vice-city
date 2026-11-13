@@ -29,6 +29,7 @@ sees a half-written build; the manifest carries a build id for cache busting.
 """
 
 import json
+from collections import defaultdict
 import multiprocessing as mp
 import shutil
 import time
@@ -290,7 +291,7 @@ def specks(key, cls, cnt, ground, GW, GH, st) -> np.ndarray:
     fl = (nvox < FLOAT_VOX) & (hmin > FLOAT_H)
     fl[0] = False
     fd = m & fl[vl] & ~drop & (cls != C_BUILDING)
-    st["floating"] = st.get("floating", 0) + int(fd.sum())
+    st["floating"] += int(fd.sum())
     drop |= fd
     return drop
 
@@ -334,11 +335,11 @@ def tidy_candidates(akey, acls, aflag, ground, is_bld, gx0, gy0, GW, GH, st):
         if rz.any():
             road_c = np.zeros(len(akey), bool)
             road_c[np.flatnonzero(rz)[~reaching_above(rz, ROAD_H + 1)]] = True
-            st["street_road"] = st.get("street_road", 0) + int(road_c.sum())
+            st["street_road"] += int(road_c.sum())
             cand = cand | road_c
         if low.any():
             pv = low & ~part_of_tall & (zone == Z_PAVE) & ~cand
-            st["street_pave"] = st.get("street_pave", 0) + int(pv.sum())
+            st["street_pave"] += int(pv.sum())
             cand = cand | pv
     return cand
 
@@ -494,7 +495,7 @@ def voxelize_block(p: np.ndarray, gx0: int, gy0: int, GW: int, GH: int, z0: floa
                 vy2, vx2 = (vkey // GW) % GH, vkey % GW
                 gsel = (vcls == C_GROUND) & fpd[vy2, vx2]
                 col[gsel] = road[vy2[gsel], vx2[gsel]]
-                st["under_car"] = st.get("under_car", 0) + int(fsel.sum() + gsel.sum())
+                st["under_car"] += int(fsel.sum() + gsel.sum())
     new = ~np.isin(fkey, vkey, assume_unique=True)
     akey = np.concatenate([vkey, fkey[new]])
     acol = np.concatenate([col, fcol[new]])
@@ -582,7 +583,7 @@ def zones_block(gx0, gy0, GW, GH):
 
 def process_block(bx: int, by: int, z0: float):
     """Pass 2 for one block (runs in a worker process). Writes L0..L3 tiles into DEST."""
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
+    st = defaultdict(int)   # (counts for the build log)
     levels = [{"tiles": [], "voxels": 0} for _ in range(LEVELS)]
     parts = sorted(CACHE.glob(f"b{by * NBX + bx}_*.bin"))
     if not parts:
@@ -668,7 +669,7 @@ def main() -> None:
         (DEST / f"L{L}").mkdir(parents=True)
 
     levels = [{"tiles": [], "voxels": 0} for _ in range(LEVELS)]
-    st = {"dropped_z": 0, "wall": 0, "wall_coloured": 0, "absorbed": 0, "under_canopy": 0, "photo": 0, "labelled": 0, "vehicle": 0, "specks": 0, "tidy": 0}
+    st = defaultdict(int)   # (counts for the build log)
     carry, feet, paint = [], [], []
     blocks = [(bx, by) for by in range(NBY) for bx in range(NBX)]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context("fork")) as ex:
@@ -684,7 +685,7 @@ def main() -> None:
                 levels[L]["tiles"] += lv["tiles"]
             for k, v in bst.items():
                 if isinstance(v, (int, float)):
-                    st[k] = st.get(k, 0) + v
+                    st[k] += v
             if c is not None:
                 carry.append(c)
             if i % max(1, len(blocks) // 6) == 0 or i == len(blocks):
@@ -708,7 +709,7 @@ def main() -> None:
         f"({st['wall_coloured'] / max(st['wall'], 1):.1%}); absorbed {st['absorbed']:,} loose facade voxels; "
         f"{st['under_canopy']:,} ground voxels under tree crowns recoloured from open ground; "
         f"{st['photo']:,} voxels coloured and {st['labelled']:,} classified from street-level photos; "
-        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied ({st.get('street_road', 0):,} candidates in the carriageway, {st.get('street_pave', 0):,} on pavements); {st.get('floating', 0):,} floating voxels dropped; "
+        f"{st['vehicle']:,} vehicle voxels found in unclassified geometry; {st['specks']:,} voxels in isolated specks dropped; {st['tidy']:,} loose low voxels tidied ({st['street_road']:,} candidates in the carriageway, {st['street_pave']:,} on pavements); {st['floating']:,} floating voxels dropped; "
         f"{st['dropped_z']:,} points outside height range")
     out_levels = [{"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
                    "tiles": lv["tiles"]} for L, lv in enumerate(levels)]

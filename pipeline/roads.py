@@ -17,7 +17,8 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from common import KIND_RAIL, KIND_ROAD, KIND_TRAM, C_BUILDING as BUILDING, C_GROUND, ROOT, bbox, overpass, region, to_l72, write_roads
+from common import (KIND_RAIL, KIND_ROAD, KIND_TRAM, C_BUILDING as BUILDING, C_GROUND, ROOT, bbox, node_use, osm_nodes, overpass,
+                    region, split_shared, write_roads)
 from model import Model
 
 ROI_NAME, ROI = region()
@@ -27,7 +28,7 @@ OUT = ROOT / "viewer/public/roads" / f"{ROI_NAME}.json"
 
 ROADS = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
          "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]
-KIND = {"road": KIND_ROAD, "tram": KIND_TRAM, "rail": KIND_RAIL}
+KIND_OF = {"road": KIND_ROAD, "tram": KIND_TRAM, "rail": KIND_RAIL}   # (OSM way kind -> roads.json kind)
 # road class -> rank: who has priority at an unsigned intersection (Belgium: otherwise from the right)
 RANK = {"motorway": 6, "trunk": 6, "primary": 5, "secondary": 4, "tertiary": 3, "unclassified": 2,
         "residential": 2, "living_street": 1}
@@ -112,19 +113,13 @@ def profile(m, xy, v, patch, bridge=False):
 def walk_paths(m, X0, Y0, vs):
     """Footpaths as polylines with ground heights, split at shared nodes: [[node a, node b], xyz...]."""
     els = json.loads(RAW_PATHS.read_text())["elements"]
-    nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    nodes = osm_nodes(els)
     ways = [e for e in els if e["type"] == "way" and e["tags"].get("footway") not in ("sidewalk", "crossing")
             and e["tags"].get("access") not in ("no", "private")]
-    use = {}
-    for w in ways:
-        for n in w["nodes"]:
-            use[n] = use.get(n, 0) + 1
+    use = node_use(ways)
     ids, out = {}, []
     for w in ways:
-        seq = w["nodes"]
-        cuts = [0] + [i for i in range(1, len(seq) - 1) if use[seq[i]] > 1] + [len(seq) - 1]
-        for a, b in zip(cuts, cuts[1:]):
-            seg = seq[a:b + 1]
+        for seg in split_shared(w["nodes"], use):
             xy = np.array([nodes[n] for n in seg])
             v = (xy - [X0, Y0]) / vs
             if not ((v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])).all():
@@ -173,10 +168,10 @@ def consolidate(edges, node_xy, node_sig, vs):
 
     # tracks get their own copy of nodes shared with roads (cars and trams do not interact yet), so road
     # intersections can be merged without bending the tracks
-    roadn = {n for e in edges if e.kind == KIND["road"] for n in (e.a, e.b)}
+    roadn = {n for e in edges if e.kind == KIND_ROAD for n in (e.a, e.b)}
     copy = {}
     for e in edges:
-        if e.kind == KIND["road"]:
+        if e.kind == KIND_ROAD:
             continue
         for k in (0, 1):
             n = e.end(k)
@@ -190,7 +185,7 @@ def consolidate(edges, node_xy, node_sig, vs):
     # (never at a roundabout: its pieces between entries are often < MERGE, and merging them collapsed every
     # small roundabout into one point where all its roads met; a short approach piece merged into a ring
     # node pulled the ring into a spike)
-    ring_nodes = {n for e in edges if e.kind == KIND["road"] and e.ring for n in (e.a, e.b)}
+    ring_nodes = {n for e in edges if e.kind == KIND_ROAD and e.ring for n in (e.a, e.b)}
     # shortest connections first, and never into a cluster wider than CLUSTER: chains of short edges used to
     # merge whole squares into one junction with curves between every pair of its roads
     members = {i: [i] for i in range(len(node_xy))}
@@ -199,7 +194,7 @@ def consolidate(edges, node_xy, node_sig, vs):
         pb = np.array([node_xy[i][:2] for i in members[rb]]) * vs
         return float(np.max(np.hypot(*(pa[:, None, :] - pb[None, :, :]).transpose(2, 0, 1)))) <= CLUSTER
     short = sorted((length(e), k) for k, e in enumerate(edges)
-                   if e.kind == KIND["road"] and e.a != e.b and not e.ring and e.a not in ring_nodes and e.b not in ring_nodes)
+                   if e.kind == KIND_ROAD and e.a != e.b and not e.ring and e.a not in ring_nodes and e.b not in ring_nodes)
     for L, k in short:
         if L >= MERGE:
             break
@@ -220,7 +215,7 @@ def consolidate(edges, node_xy, node_sig, vs):
     out, pieces = [], []
     for e in edges:
         a, b = new_ix[e.a], new_ix[e.b]
-        if a == b and e.kind == KIND["road"]:
+        if a == b and e.kind == KIND_ROAD:
             # inside a merged intersection (or a loop back into it): not driven as an edge (the junction's
             # curves join the roads around it), but kept as a junction piece: it is still road surface
             # (drawn, a street zone; it used to vanish, e.g. a side street across a boulevard's median)
@@ -280,7 +275,7 @@ def clip(edges, node_xy, node_sig, size, vs):
 def tram_directions(edges, vs):
     """OSM maps both tracks of a tram line but not their direction: on double track, trams keep right
     (the other track is on their left). Single track stays two-way."""
-    trams = [e for e in edges if e.kind == KIND["tram"] and not e.oneway]
+    trams = [e for e in edges if e.kind == KIND_TRAM and not e.oneway]
     pts = {id(e): np.array(e.xyz).reshape(-1, 3)[:, :2] for e in trams}
     n = 0
     for e in trams:
@@ -321,7 +316,7 @@ def tram_directions(edges, vs):
         e.oneway = 1
         n += 1
     # chains: a track continuing a one-way track through a node (and nothing else there) continues its direction
-    tram_all = [e for e in edges if e.kind == KIND["tram"]]
+    tram_all = [e for e in edges if e.kind == KIND_TRAM]
     changed = True
     while changed:
         changed = False
@@ -354,7 +349,7 @@ def pavements(edges, m, vs):
     pavement runs 1.5 m in front of it (median over the edge). Appended to the edge as
     [left, right] in metres (left / right of the edge direction); 0: no facade found."""
     for e in edges:
-        if e.kind != KIND["road"]:
+        if e.kind != KIND_ROAD:
             continue
         p = np.array(e.xyz).reshape(-1, 3)
         found = [[], []]
@@ -394,7 +389,7 @@ def assign_signals(edges, node_sig, pieces, vs):
         reach them.
     Rewrites the controls of road edges: signals become [m, SIGNALS, dir towards the junction] (stop lines,
     always for the junction the edge leads to in that direction) or [m, CROSSING_LIGHT, dir]."""
-    roads = [e for e in edges if e.kind == KIND["road"]]
+    roads = [e for e in edges if e.kind == KIND_ROAD]
     deg, at = {}, {}
     for e in roads:
         for n in (e.a, e.b):
@@ -505,7 +500,7 @@ def road_along(e, edges, vs):
         D = D / (np.linalg.norm(D) or 1)
         best = None
         for o in edges:
-            if o.kind != KIND["road"] or not o.oneway:
+            if o.kind != KIND_ROAD or not o.oneway:
                 continue
             q = np.array(o.xyz).reshape(-1, 3)[:, :2]
             d = np.hypot(*(q - P).T)
@@ -553,7 +548,7 @@ def parking_sides(t, reversed_way):
 
 def build():
     els = json.loads(RAW.read_text())["elements"]
-    nodes = {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in els if e["type"] == "node"}
+    nodes = osm_nodes(els)
     ntags = {e["id"]: e.get("tags", {}) for e in els if e["type"] == "node"}
 
     def control(nid):
@@ -564,10 +559,7 @@ def build():
         return c or (CALMING if t.get("traffic_calming") in CALM_KINDS else 0)
     ways = [e for e in els if e["type"] == "way" and e["tags"].get("tunnel") not in ("yes", "building_passage")
             and e["tags"].get("access") not in ("no", "private") and e["tags"].get("service") is None]
-    use = {}
-    for w in ways:
-        for n in w["nodes"]:
-            use[n] = use.get(n, 0) + 1
+    use = node_use(ways)
 
     m = Model(ROI_NAME)
     X0, Y0 = m.man["origin"][:2]
@@ -585,10 +577,7 @@ def build():
         ids = w["nodes"][::-1] if ow == "-1" else w["nodes"]
         bridge = t.get("bridge") not in (None, "no") or t.get("layer", "0") not in ("0", "-1", "-2")
         lanes = int(t["lanes"]) if t.get("lanes", "").isdigit() else (1 if oneway else 2)
-        # split at shared nodes
-        cuts = [0] + [i for i in range(1, len(ids) - 1) if use[ids[i]] > 1] + [len(ids) - 1]
-        for a, b in zip(cuts, cuts[1:]):
-            seg = ids[a:b + 1]
+        for seg in split_shared(ids, use):
             xy = np.array([nodes[n] for n in seg])
             v = (xy - [X0, Y0]) / vs                       # voxel coordinates
             inside = (v[:, 0] >= 0) & (v[:, 1] >= 0) & (v[:, 0] < m.size[0]) & (v[:, 1] < m.size[1])
@@ -632,7 +621,7 @@ def build():
                         xw.append([round(float(d[i]), 1), typ])
             ring = 1 if t.get("junction") in ("roundabout", "circular") else 0
             pk = parking_sides(t, ow == "-1") if kind == "road" else [0, 0]
-            edges.append(Edge(node_ix[seg[0]], node_ix[seg[-1]], KIND[kind], oneway, speed(t), lanes,
+            edges.append(Edge(node_ix[seg[0]], node_ix[seg[-1]], KIND_OF[kind], oneway, speed(t), lanes,
                               [round(float(c), 1) for c in np.c_[p, z].ravel()], rank, ctl, contra, xw, ring, pk))
             stats[kind] += d[-1]
     edges, node_xy, node_sig, pieces = consolidate(edges, node_xy, node_sig, vs)

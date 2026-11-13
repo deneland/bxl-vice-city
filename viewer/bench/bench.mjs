@@ -107,9 +107,10 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
-// (not ?backend=webgl: forcing WebGL loses the device headless; the bench reloads until it has the backend)
-const query = ['telemetry=0', 'gpu=1', 'continuous=1', 'dynres=0', `time=${TIME}`, 'date=2026-11-04', 'weather=clear', EXTRA_QUERY]
-  .filter(Boolean).join('&');
+// (WebGL2 is asked for with ?backend=webgl; headless Chromium hands out WebGPU only some of the time, so the
+// bench reloads until it has WebGPU when that is wanted)
+const query = ['telemetry=0', 'gpu=1', 'continuous=1', 'dynres=0', `time=${TIME}`, 'date=2026-11-04', 'weather=clear',
+  BACKEND === 'webgl' ? 'backend=webgl' : '', EXTRA_QUERY].filter(Boolean).join('&');
 if (!/^telemetry=0&gpu=1&continuous=1&dynres=0&time=/.test(query)) throw new Error(`bench query malformed: ${query}`);
 // headless Chromium hands out WebGPU only some of the time: reload until we have the backend asked for
 let load, tNav;

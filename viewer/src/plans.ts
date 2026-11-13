@@ -72,15 +72,25 @@ function around(a: Agent, r: () => number, ctx: PlanContext): Where {
   return i >= 0 ? { kind: 'house', i } : { kind: 'home' };
 }
 
+/** what every plan is built with: the seeded draws, the day, home, the activities so far and how to add one */
+interface Day {
+  r: () => number;
+  u: (a: number, b: number) => number;   // a time (or anything) uniformly between a and b
+  wd: number; weekday: boolean; wed: boolean;   // wd: 0 Sunday … 6 Saturday
+  home: Where;
+  p: Activity[];
+  act: (where: Where, purpose: string, until: number) => void;
+}
+
+/** the times increasing (short stays are fine) */
+function settle(p: Activity[]) {
+  for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
+  return p;
+}
+
 /** a walker's day */
-function walkPlan(a: Agent, r: () => number, wd: number, ctx: PlanContext): Activity[] {
-  const P = ctx.places;
-  const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
-  const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
-  const home: Where = { kind: 'home' };
-  const p: Activity[] = [];
-  const act = (where: Where, purpose: string, until: number) =>
-    p.push({ where: openFor(ctx, where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
+function walkPlan(a: Agent, D: Day, ctx: PlanContext): Activity[] {
+  const P = ctx.places, { r, u, wd, weekday, wed, home, p, act } = D;
   const outAndBack = (where: Where | null, purpose: string, t: number, stay: number) => {
     if (!where) return;
     act(home, 'home', t); act(where, purpose, t + stay);
@@ -119,8 +129,7 @@ function walkPlan(a: Agent, r: () => number, wd: number, ctx: PlanContext): Acti
       break;
   }
   act(home, 'home', 24 * H);
-  for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
-  return p;
+  return settle(p);
 }
 
 /** the day's plan for an agent (seeded by agent and date: the same every time for that day) */
@@ -128,14 +137,12 @@ export function dayPlan(a: Agent, date: string, ctx: PlanContext): Activity[] {
   const P = ctx.places;
   const [y, m, d] = date.split('-').map(Number);
   const wd = (weekdayOf(date) + 1) % 7;   // (the plans count from Sunday: 0 Sunday … 3 Wednesday … 6 Saturday)
-  const weekday = wd >= 1 && wd <= 5, wed = wd === 3;
-  const r = rng(a.id * 7919 + y * 372 + m * 31 + d);
-  if (a.mode === 'walk') return walkPlan(a, r, wd, ctx);
-  const u = (a0: number, b0: number) => a0 + r() * (b0 - a0);
-  const home: Where = a.home >= 0 ? { kind: 'home' } : { kind: 'edge' };
-  const p: Activity[] = [];
-  const act = (where: Where, purpose: string, until: number) =>
-    p.push({ where: openFor(ctx, where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until });
+  const r = rng(a.id * 7919 + y * 372 + m * 31 + d), p: Activity[] = [];
+  const D: Day = { r, u: (a0, b0) => a0 + r() * (b0 - a0), wd, weekday: wd >= 1 && wd <= 5, wed: wd === 3,
+    home: a.home >= 0 ? { kind: 'home' } : { kind: 'edge' }, p,
+    act: (where, purpose, until) => p.push({ where: openFor(ctx, where, purpose, wd, p.length ? p[p.length - 1].until : 0), purpose, until }) };
+  if (a.mode === 'walk') return walkPlan(a, D, ctx);
+  const { u, weekday, wed, home, act } = D;
   const shopping = () => {
     if (weekday || wd === 6 || r() < 0.3) {   // Sundays: most shops closed
       act(home, 'home', u(9 * H, 19 * H));
@@ -290,7 +297,5 @@ export function dayPlan(a: Agent, date: string, ctx: PlanContext): Activity[] {
       break;
     }
   }
-  // make the times increasing (short stays are fine)
-  for (let k = 1; k < p.length; k++) p[k].until = Math.max(p[k].until, p[k - 1].until + 2 * M);
-  return p;
+  return settle(p);
 }

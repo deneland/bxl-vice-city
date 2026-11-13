@@ -4,6 +4,7 @@
 // in the traffic group's frame (x east, z south), like everything the simulation works with.
 import type { WalkSpot } from './pedestrians';
 import { H } from './clock';
+import { PointGrid } from './grid';
 
 /** places.json */
 interface PlacesData {
@@ -27,7 +28,7 @@ export class PlaceIndex {
   private homeCum: Float64Array;
   private byCat: number[][];
   private pools = new Map<string, number[]>();
-  private grids = new Map<string, Map<number, number[]>>();
+  private grids = new Map<string, PointGrid<number>>();
   private nearCache = new Map<string, number[]>();
   private stopCache = new Map<number, number>();
 
@@ -71,24 +72,8 @@ export class PlaceIndex {
     const key = `${hx},${hz}|${max}|${cats.join(',')}`;
     let pool = this.nearCache.get(key);
     if (!pool) {
-      const x = hx * 25 + 12.5, z = hz * 25 + 12.5;
-      // rings of grid cells outward; stop once the 6 nearest are closer than anything further out can be
-      const grid = this.gridOf(cats), R = Math.ceil(max / CELL);
-      const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL), found: { i: number; d: number }[] = [];
-      for (let ring = 0; ring <= R; ring++) {
-        for (let gx = cx - ring; gx <= cx + ring; gx++)
-          for (let gz = cz - ring; gz <= cz + ring; gz++) {
-            if (Math.max(Math.abs(gx - cx), Math.abs(gz - cz)) !== ring) continue;
-            for (const i of grid.get(gx * 65536 + gz) ?? []) {
-              const d = Math.hypot(this.poiX[i] - x, this.poiZ[i] - z);
-              if (d < max) found.push({ i, d });
-            }
-          }
-        if (found.length >= 6) {
-          found.sort((a, b) => a.d - b.d);
-          if (found[5].d <= ring * CELL) break;   // ring + 1 is at least `ring` cells away
-        }
-      }
+      const x = hx * 25 + 12.5, z = hz * 25 + 12.5, found: { i: number; d: number }[] = [];
+      this.gridOf(cats).forEachWithin(x, z, max, (i) => found.push({ i, d: Math.hypot(this.poiX[i] - x, this.poiZ[i] - z) }));
       pool = found.sort((a, b) => a.d - b.d).slice(0, 6).map((f) => f.i);
       this.nearCache.set(key, pool);
     }
@@ -105,16 +90,7 @@ export class PlaceIndex {
 
   /** the nearest destination of the same kind as i, within reach m, open at t (-1: none) */
   openNear(i: number, wd: number, t: number, reach: number) {
-    const grid = this.gridOf([this.data.cats[this.data.pois[i][2]]]), R = Math.ceil(reach / CELL);
-    const x = this.poiX[i], z = this.poiZ[i], cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
-    let best = -1, bd = Infinity;
-    for (let gx = cx - R; gx <= cx + R; gx++)
-      for (let gz = cz - R; gz <= cz + R; gz++)
-        for (const j of grid.get(gx * 65536 + gz) ?? []) {
-          const d = Math.hypot(this.poiX[j] - x, this.poiZ[j] - z);
-          if (d < bd && d < reach && this.isOpen(j, wd, t)) { bd = d; best = j; }
-        }
-    return best;
+    return this.gridOf([this.data.cats[this.data.pois[i][2]]]).nearest(this.poiX[i], this.poiZ[i], reach, (j) => this.isOpen(j, wd, t)) ?? -1;
   }
 
   /** another home 200-500 m from this one (a walk around the block), or -1 */
@@ -160,18 +136,13 @@ export class PlaceIndex {
     if (!p) { p = cats.flatMap((c) => this.byCat[this.data.cats.indexOf(c)] ?? []); this.pools.set(key, p); }
     return p;
   }
-  /** destinations of these categories by grid cell (key gx * 65536 + gz) */
+  /** destinations of these categories in a grid (cached per category set) */
   private gridOf(cats: string[]) {
     const key = cats.join(',');
     let g = this.grids.get(key);
     if (!g) {
-      g = new Map();
-      for (const i of this.poolOf(cats)) {
-        const k = Math.floor(this.poiX[i] / CELL) * 65536 + Math.floor(this.poiZ[i] / CELL);
-        let l = g.get(k);
-        if (!l) g.set(k, (l = []));
-        l.push(i);
-      }
+      g = new PointGrid<number>(CELL);
+      for (const i of this.poolOf(cats)) g.add(this.poiX[i], this.poiZ[i], i);
       this.grids.set(key, g);
     }
     return g;

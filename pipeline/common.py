@@ -279,6 +279,26 @@ def bbox(roi, margin: float = 0.0) -> str:
             f"{max(c[1] for c in corners):.6f},{max(c[0] for c in corners):.6f}")
 
 
+def osm_nodes(elements: list) -> dict:
+    """an Overpass result's nodes: id -> (x, y) in Lambert 72 m"""
+    return {e["id"]: to_l72.transform(e["lon"], e["lat"]) for e in elements if e["type"] == "node"}
+
+
+def node_use(ways: list) -> dict:
+    """how many of these ways each node is on"""
+    use = {}
+    for w in ways:
+        for n in w["nodes"]:
+            use[n] = use.get(n, 0) + 1
+    return use
+
+
+def split_shared(ids: list, use: dict) -> list:
+    """a way's node ids cut into pieces at the nodes it shares with other ways (node_use)"""
+    cuts = [0] + [i for i in range(1, len(ids) - 1) if use[ids[i]] > 1] + [len(ids) - 1]
+    return [ids[a:b + 1] for a, b in zip(cuts, cuts[1:])]
+
+
 def overpass(query: str, dest: Path):
     """run an Overpass query and save the answer to dest. The public server is often briefly overloaded
     (429 / 5xx: retried); an answer cut short by a timeout or memory limit still comes as HTTP 200 with a
