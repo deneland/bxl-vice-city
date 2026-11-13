@@ -5,6 +5,8 @@ Mapillary street-level imagery and the STIB timetable. The browser viewer draws 
 and simulates traffic, trams, buses, parked cars and people walking. It should feel real; it is not an
 accurate simulator.
 
+[![Schaerbeek in voxels on a June evening](docs/screenshot.jpg)](https://deneland.github.io/bxl-vice-city/)
+
 **Live:** https://deneland.github.io/bxl-vice-city/ (any recent browser; phones get a lighter version).
 Press `?` for the controls.
 
