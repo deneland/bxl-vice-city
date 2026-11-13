@@ -1,5 +1,6 @@
 // The built site (dist/: the app and the data in public/) as the gh-pages branch, one commit that replaces
-// the previous one, so the data never piles up in the history. Then publish it:
+// the previous one (also in the local repository: the old site is pruned), so the data never piles up in
+// the history. Then publish it:
 //   npm run deploy
 //   git push -f origin gh-pages      (GitHub: Settings > Pages > deploy from branch gh-pages, / (root))
 import { execFileSync } from 'node:child_process';
@@ -24,6 +25,10 @@ try {
   const commit = git(['commit-tree', tree, '-m', `site built from ${source}`]);
   git(['update-ref', 'refs/heads/gh-pages', commit]);
   const files = git(['ls-tree', '-r', '--name-only', commit]).split('\n').length;
+  // the previous site is no longer referenced: drop it from the local repository (the branch's reflog
+  // would otherwise keep it alive, a full copy of the data per deploy)
+  git(['reflog', 'expire', '--expire=now', 'refs/heads/gh-pages']);
+  git(['gc', '--prune=now', '--quiet']);
   console.log(`gh-pages -> ${commit.slice(0, 7)} (built from ${source}, ${files} files). Publish with: git push -f origin gh-pages`);
 } finally {
   rmSync(tmp, { recursive: true, force: true });

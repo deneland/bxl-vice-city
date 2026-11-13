@@ -5,78 +5,113 @@ Mapillary street-level imagery and the STIB timetable. The browser viewer draws 
 and simulates traffic, trams, buses, parked cars and people walking. It should feel real; it is not an
 accurate simulator.
 
+**Live:** https://deneland.github.io/bxl-vice-city/ (any recent browser; phones get a lighter version).
+Press `?` for the controls.
+
 ```
-pipeline/   Python: raw data -> voxel tiles + JSON for the viewer (viewer/public/, gitignored)
-viewer/     TypeScript + three.js (WebGPU renderer, WebGL2 fallback), Vite
+pipeline/   Python: source data -> voxel tiles + JSON files for the viewer (written to viewer/public/)
+viewer/     the browser app: TypeScript + three.js (WebGPU, WebGL2 fallback), Vite
 config.toml regions (Lambert 72 boxes), voxel size, the start view
-data/       raw downloads, caches and metrics (gitignored)
+data/       downloads and caches (not in git)
 ```
 
-## Setup
+## Getting the code
 
-- Python 3.12+ with [uv](https://docs.astral.sh/uv/): `cd pipeline && uv sync`
-- Node 22+: `cd viewer && npm install`
-- `.env` in the repository root with `MAPILLARY_TOKEN=...` (needed by `streetview.py` and `lights.py`
-  only). Never commit it.
-- Manual downloads into `data/raw/`:
-  - `lidar/`: the Brussels 2021 LiDAR LAS tiles listed for the region in `config.toml`
-    (datastore.brussels, CC-BY Paradigm / UrbIS)
-  - `gtfs/stib.zip`: the STIB-MIVB GTFS feed (STIB open data)
-  - OpenStreetMap and Mapillary data are fetched by the scripts themselves and cached in `data/raw/`
-    (`--refetch` to fetch again)
+```
+git clone --single-branch https://github.com/deneland/bxl-vice-city.git
+```
 
-## Building a region
+`--single-branch` fetches only the code (a few MB). Without it, git also downloads the `gh-pages` branch:
+the published site with all its data (~0.4 GB).
 
-Run from `pipeline/`, with the region name from `config.toml` (default `schaerbeek`). Order matters:
-later steps read earlier outputs.
+The repository holds the code, not the built city (`viewer/public/` is generated). Either use the data of
+the live site (next section) or build it yourself (see "Building the data").
 
-| step | script | reads | writes |
-|---|---|---|---|
-| 1 | `voxelize.py` | LiDAR | voxel tiles (`viewer/public/tiles/`), parked-car footprints and colours |
-| 2 | `streetview.py fetch / calibrate / project` | Mapillary, tiles | photo colours and labels layer |
-| 3 | `roads.py` | OSM, tiles (ground heights) | road / tram / footpath network |
-| 4 | `voxelize.py` again | LiDAR, photo layer, road network | final tiles: photo colours, streets tidied |
-| 5 | `places.py`, `transit.py`, `lights.py`, `vehicles.py` | OSM, GTFS, Mapillary, tiles, car colours | homes and destinations, timetable, street lamps, car paint palette |
-| 6 | `parking.py` | footprints, roads, transit, OSM | kerbside, car-park and garage places |
+## Running the viewer
 
-`voxelize.py` streams the LAS files once into `data/cache/points/` and reuses that cache; a full
-Schaerbeek build takes ~7 minutes. The viewer serves the newest build (`manifest.json`). Shared code
-(config, region argument, coordinate transforms, OSM / Mapillary access, the tile and road formats) is in
-`pipeline/common.py`. Lint: `uv run ruff check`.
-
-Everything the viewer downloads is kept small (`pipeline/common.py`), since it is streamed to every visitor:
-tiles are compact (positions delta-coded, a 256-colour palette per tile, gzipped; ~0.4 GB for Schaerbeek)
-and packed into archives of 16 x 16 tiles (~100 files, read with HTTP range requests); the manifest lists
-tiles as columns, road polylines are delta-coded, and the timetable stores each trip as a stop pattern, a
-timing and a start time. A first visit loads about 13 MB, mostly the tiles in view.
-
-## Viewer
+Node 22+:
 
 ```
 cd viewer
-npm run dev          # http://127.0.0.1:5173
+npm install
+npm run dev
+```
+
+Then open http://127.0.0.1:5173/?data=https://deneland.github.io/bxl-vice-city/ to run your local code on
+the published data, or http://127.0.0.1:5173/ once you have built the data yourself.
+
+```
 npm run check        # type check
-npm run build        # production build
+npm run build        # production build (dist/)
 ```
 
 Keys: `?` shows the controls, `D` frame and tile statistics. URL parameters (tests, screenshots, tuning)
 are all listed in `viewer/src/config.ts`, e.g. `time=8.5`, `date=2026-11-04`, `weather=clear`, `roads=1`
 (draw the road network), `telemetry=0`, `tier=low` (phone budgets), `cache=0`.
 
-Built to hold up on any device: fetched tiles are kept per build in the browser's Cache Storage (a repeat
-visit downloads no tiles); phones and weak machines get smaller GPU memory budgets (`src/tier.ts`) and the
-level of detail coarsens when a view needs more than the budget; a lost GPU context reloads at the same view.
+Built to hold up on any device: tiles stream in for what is in view and are kept per build in the
+browser's Cache Storage (a repeat visit downloads no tiles); phones and weak machines get smaller GPU
+memory budgets (`src/tier.ts`) and the level of detail coarsens when a view needs more than the budget; a
+lost GPU context reloads at the same view.
 
-The data files (`viewer/public/`: tiles, roads, timetable, ...) can live on another host than the app:
-build with `VITE_DATA_URL=https://.../` or open the page with `?data=https://.../` (the host must allow
-cross-origin requests).
+## Building the data
+
+Needs Python 3.12+ with [uv](https://docs.astral.sh/uv/) (`cd pipeline && uv sync`) and:
+
+- `.env` in the repository root with `MAPILLARY_TOKEN=...` (a free Mapillary API token; used by
+  `streetview.py` and `lights.py`). It is gitignored: never commit it.
+- Manual downloads into `data/raw/`:
+  - `lidar/`: the Brussels 2021 LiDAR tiles listed for the region in `config.toml`
+    (datastore.brussels, `PointCloud_31370_LAS_<tile>_*.zip`, unzipped: the `.las` files)
+  - `gtfs/stib.zip`: the STIB-MIVB GTFS feed (STIB open data)
+- OpenStreetMap and Mapillary data are fetched by the scripts and cached in `data/raw/` (`--refetch` to
+  fetch again).
+
+Then, in `pipeline/`, for a region of `config.toml` (default `schaerbeek`; `small` is a 500 m test area).
+The order matters: later steps read earlier outputs.
+
+```
+uv run python voxelize.py                 # 1. LiDAR -> voxel tiles, parked-car footprints and colours (~7 min)
+uv run python streetview.py fetch         # 2. Mapillary 360° images, calibrated against the voxels,
+uv run python streetview.py calibrate     #    projected onto them: a layer of photo colours and labels
+uv run python streetview.py project
+uv run python roads.py                    # 3. road, tram and footpath network (OSM; heights from the tiles)
+uv run python voxelize.py                 # 4. again: the final tiles, with photo colours and tidied streets
+uv run python places.py                   # 5. homes and destinations (OSM)
+uv run python transit.py                  #    STIB lines and timetable (GTFS)
+uv run python lights.py                   #    street lamps (Mapillary map features)
+uv run python vehicles.py                 #    car paint palette (the parked cars' colours)
+uv run python parking.py                  # 6. kerbside, car-park and garage places
+```
+
+Every script takes the region name as an argument (`uv run python voxelize.py small`; `streetview.py`
+after the stage: `streetview.py fetch small`); `--jobs=N` limits
+the parallel workers. `voxelize.py` streams the LAS files once into `data/cache/points/` and reuses that
+cache. The viewer serves the newest build. Shared code (config, region argument, coordinate transforms,
+OSM / Mapillary access, the file formats) is in `pipeline/common.py`. Lint: `uv run ruff check`.
+
+Everything the viewer downloads is kept small, since it is streamed to every visitor: tiles are compact
+(positions delta-coded, a 256-colour palette per tile, gzipped; ~0.4 GB for Schaerbeek) and packed into
+archives of 16 x 16 tiles (~100 files, read with HTTP range requests); the manifest lists tiles as
+columns, road polylines are delta-coded, and the timetable stores each trip as a stop pattern, a timing
+and a start time. A first visit loads about 13 MB, mostly the tiles in view.
 
 ## Publishing
 
-The site is static: the app and the data files, no server code. `npm run deploy` (in `viewer/`) builds it and
-puts it on the `gh-pages` branch as a single commit replacing the previous one; `git push -f origin gh-pages`
-publishes it (GitHub Pages: deploy from the `gh-pages` branch). The tiles are read with HTTP range requests,
-so any static host that supports them works; the data can also live on another host (`VITE_DATA_URL`).
+The site is static: the app and the data files, no server code. In `viewer/`:
+
+```
+npm run deploy                    # build, and make the gh-pages branch that build (one commit)
+git push -f origin gh-pages       # publish it
+```
+
+`npm run deploy` replaces the `gh-pages` branch with a single new commit each time, also locally (the
+previous copy is pruned), so the data never piles up in the history; hence the `-f`. Once, on GitHub:
+Settings > Pages > Deploy from a branch > `gh-pages`, `/ (root)`. Pushing `main` (the code) is separate.
+
+Any static host that supports HTTP range requests works. The data can also live on another host than the
+app: build with `VITE_DATA_URL=https://.../` or open the page with `?data=https://.../` (that host must
+allow cross-origin requests).
 
 ## Measuring
 
