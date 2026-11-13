@@ -9,12 +9,13 @@
     html, body { margin: 0; height: 100%; overflow: hidden; background: #bcd3e6; font: 12px/1.4 ui-monospace, monospace; }
     canvas { display: block; }
     #hud { position: fixed; top: 8px; left: 8px; padding: 6px 8px; background: #0008; color: #fff; border-radius: 4px; white-space: pre; pointer-events: none; }
-    #help { position: fixed; bottom: 8px; left: 8px; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
+    #bottom-left { position: fixed; bottom: 8px; left: 8px; max-width: calc(100vw - 510px); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+    #help { padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
     #legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
     #noise-legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
     #noise-legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
     #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
-    #tools { position: fixed; bottom: 36px; left: 8px; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; display: flex; gap: 8px; align-items: center; }
+    #tools { padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; display: flex; gap: 8px; align-items: center; }
     #tools input { width: 220px; }
     #tools button { font: inherit; padding: 0 6px; cursor: pointer; }
     #inspect { position: fixed; top: 64px; left: 8px; padding: 6px 8px; background: #000b; color: #fff; border-radius: 4px; display: none; }
@@ -35,12 +36,16 @@
     #crosshair { position: fixed; left: 50%; top: 50%; width: 10px; height: 10px; margin: -6px 0 0 -6px; border: 1px solid #fffc; border-radius: 50%; pointer-events: none; display: none; }
     #walk-hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 10px 14px; background: #000b; color: #fff; border-radius: 6px; pointer-events: none; display: none; text-align: center; }
     #attr { position: fixed; bottom: 8px; right: 8px; padding: 4px 8px; background: #fffa; color: #222; border-radius: 4px; }
+    #attr { font-size: 11px; }
+    #attr a { color: inherit; }
   </style>
 </head>
 <body>
   <div id="hud">starting…</div>
-  <div id="help">drag/right-drag/wheel: map · click: inspect (vehicles too) · F: follow · double-click: orbit here · V: walk · M: miniature · T: traffic · N: noise map · R: roads · L: classes · H: home · P: snapshot</div>
-  <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span><button id="live">live</button><button id="sound">🔇 sound off</button></div>
+  <div id="bottom-left">
+    <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span><button id="live">live</button><button id="sound">🔇 sound off</button></div>
+    <div id="help">drag/right-drag/wheel: map · click: inspect (vehicles too) · F: follow · double-click: orbit here · V: walk · M: miniature · T: traffic · N: noise map · R: roads · L: classes · H: home · P: snapshot</div>
+  </div>
   <div id="inspect"></div>
   <div id="agent"></div>
   <div id="crosshair"></div>

@@ -69,7 +69,34 @@ Performance comes first: an average laptop (Intel iGPU, Firefox) must run it smo
 
 Measure on finished builds only.
 
-## Data licences
+## Licence
 
-LiDAR © Paradigm / UrbIS (CC-BY 4.0) · Map data © OpenStreetMap contributors (ODbL) · Street-level
-imagery © Mapillary contributors (CC-BY-SA) · Timetable STIB-MIVB open data.
+The code in this repository (pipeline and viewer) is released under the [MIT licence](LICENSE).
+
+The data the pipeline downloads is **not** part of this repository and is not covered by that licence: it
+stays under its own terms, listed below. If you build a region and publish the result (tiles, road and
+place files, screenshots, a hosted viewer), keep these credits with it. The viewer shows them in its
+bottom-right corner.
+
+## Data sources and licences
+
+| source | used for | licence | credit |
+|---|---|---|---|
+| [Brussels airborne LiDAR point cloud 2021](https://geobru-geonetwork.irisnet.be/geonetwork/srv/api/records/ff1124e1-424e-11ee-b156-00090ffe0001) (Paradigm / urban.brussels, via [datastore.brussels](https://datastore.brussels)) | the voxel city, ground heights, parked cars | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | LiDAR © Paradigm / UrbIS, datastore.brussels, CC BY 4.0 (voxelised and modified) |
+| [OpenStreetMap](https://www.openstreetmap.org) (via the [Overpass API](https://overpass-api.de)) | roads, tram tracks, footpaths, traffic lights, crossings, speed bumps, buildings with addresses, shops and other places, car parks, the Schaerbeek boundary | [ODbL 1.0](https://opendatacommons.org/licenses/odbl/) | © OpenStreetMap contributors, [openstreetmap.org/copyright](https://www.openstreetmap.org/copyright) |
+| [Mapillary](https://www.mapillary.com) (API) | 360° street-level images (façade colours, semantic labels), street-lamp map features | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) ([terms](https://www.mapillary.com/terms)) | imagery © Mapillary contributors, CC BY-SA |
+| [STIB-MIVB open data](https://data.stib-mivb.brussels) (GTFS) | tram and bus lines, stops and timetable | STIB-MIVB open data licence ([terms](https://data.stib-mivb.brussels/terms/terms-and-conditions/)) | timetable: STIB-MIVB open data (used in modified form: lines clipped to the region, trips simulated) |
+| [Open-Meteo](https://open-meteo.com) (API, fetched by the viewer) | live weather (clouds, rain) | data [CC BY 4.0](https://open-meteo.com/en/licence); the free API is for non-commercial use | weather data by Open-Meteo.com |
+| [Panoramax Belgium](https://panoramax.osm.be) | prototype scripts only (`pipeline/poc/`, street-level image alignment); not used by the pipeline | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) | imagery © Panoramax contributors, CC BY-SA |
+
+What follows from these licences when publishing a built city (not the code):
+
+- **Share-alike.** Tiles coloured from Mapillary imagery are an adaptation of CC BY-SA material, and the
+  road, place and parking files are derived from OpenStreetMap (ODbL). Publish those under CC BY-SA 4.0 /
+  ODbL respectively, with the credits above.
+- **Changes.** CC BY 4.0 (LiDAR, Open-Meteo) and the STIB licence ask you to say that the data was
+  modified: the LiDAR is voxelised, filtered and recoloured; the timetable is clipped and simulated.
+- **Weather.** A commercial deployment needs an Open-Meteo API subscription; otherwise switch live
+  weather off (`weather=clear`).
+- `viewer/public/noise/schaerbeek.json` (the only data file in the repository) is the simulation's own
+  output: traffic noise per street class, derived from the OpenStreetMap road network (ODbL).

@@ -70,7 +70,21 @@ async function main() {
   const manifest: Manifest = await (await fetch(`tiles/${ROI}/manifest.json`, { cache: 'no-store' })).json();
   const L0 = manifest.levels[0];
   const VS = L0.voxelSize, CH = manifest.tileSize;
-  document.getElementById('attr')!.textContent = manifest.attribution;
+  // data credits, short as on web maps (the full wording in each tooltip and in the README, Data sources and licences)
+  const attr = document.getElementById('attr')!;
+  attr.textContent = '© ';
+  for (const [i, [text, href, title]] of ([
+    ['Paradigm / UrbIS', 'https://datastore.brussels', manifest.attribution + ', voxelised'],
+    ['OpenStreetMap', 'https://www.openstreetmap.org/copyright', '© OpenStreetMap contributors, ODbL'],
+    ['Mapillary', 'https://www.mapillary.com', 'street-level imagery © Mapillary contributors, CC BY-SA 4.0'],
+    ['STIB-MIVB', 'https://data.stib-mivb.brussels', 'timetable: STIB-MIVB open data, modified (clipped, simulated)'],
+    ['Open-Meteo', 'https://open-meteo.com', 'weather data by Open-Meteo.com, CC BY 4.0'],
+  ] as const).entries()) {
+    if (i) attr.append(' · ');
+    const el = document.createElement('a');
+    el.href = href; el.target = '_blank'; el.rel = 'noopener'; el.textContent = text; el.title = title;
+    attr.append(el);
+  }
 
   // scene frame: origin at the home point, ground ≈ y 0
   const homeVX = (manifest.home[0] - manifest.origin[0]) / VS;
