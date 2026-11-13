@@ -1,4 +1,4 @@
-# bxl vice voxel
+# bxl vice city
 
 A voxel city of Schaerbeek (Brussels) built from real data: the 2021 Brussels LiDAR, OpenStreetMap,
 Mapillary street-level imagery and the STIB timetable. The browser viewer draws the city in 0.5 m voxels

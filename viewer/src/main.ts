@@ -87,7 +87,7 @@ async function main() {
     attr.append(el);
   }
   const repo = document.createElement('a');
-  repo.href = 'https://github.com/deneland/bxl-vice-voxel'; repo.target = '_blank'; repo.rel = 'noopener';
+  repo.href = 'https://github.com/deneland/bxl-vice-city'; repo.target = '_blank'; repo.rel = 'noopener';
   repo.textContent = 'source on GitHub'; repo.title = 'code (MIT) and how the city is built';
   attr.prepend(repo, ' · ');
 

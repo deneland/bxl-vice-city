@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CFG = tomllib.loads((ROOT / "config.toml").read_text())
 VS = CFG["voxel"]["size"]                 # m per voxel (L0)
 ARGS = [a for a in sys.argv[1:] if not a.startswith("-")]
-USER_AGENT = "bxl-vice-voxel/0.1"
+USER_AGENT = "bxl-vice-city/0.1"
 
 
 def region(pos: int = 0):
