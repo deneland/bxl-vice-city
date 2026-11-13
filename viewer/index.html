@@ -12,11 +12,12 @@
     body.debug #hud, #hud.error { display: block; }
     #bottom-left { position: fixed; bottom: 8px; left: 8px; max-width: calc(100vw - 640px); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
     #help { display: none; padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; }
-    #legend, #noise-legend { position: fixed; top: 8px; right: 8px; padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
+    #legends { position: fixed; top: 8px; right: 8px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; pointer-events: none; }
+    #legend, #noise-legend { padding: 6px 8px; background: #000a; color: #fff; border-radius: 4px; display: none; }
     #legend span, #noise-legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
     #tools { padding: 4px 8px; background: #0006; color: #fff; border-radius: 4px; display: flex; gap: 8px; align-items: center; }
     #tools input { width: 220px; }
-    #tools button { font: inherit; padding: 0 6px; cursor: pointer; }
+    #tools button { font: inherit; padding: 0 6px; cursor: pointer; white-space: nowrap; }
     #inspect { position: fixed; top: 64px; left: 8px; padding: 6px 8px; background: #000b; color: #fff; border-radius: 4px; display: none; }
     #inspect .sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; border: 1px solid #fff6; }
     #inspect b { display: inline-block; width: 86px; color: #aaa; font-weight: normal; }
@@ -45,7 +46,7 @@
 <body>
   <div id="hud">starting…</div>
   <div id="bottom-left">
-    <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span><button id="live">live</button><button id="sound">🔇 sound off</button><button id="help-btn" title="controls and keys">?</button></div>
+    <div id="tools"><span>☀</span><input id="time" type="range" min="0" max="24" step="0.25" /><span id="time-label"></span><button id="live">live</button><button id="sound">🔇 sound off</button><button id="share" title="copy a link to this view">🔗</button><button id="help-btn" title="controls and keys">?</button></div>
     <div id="help">drag/right-drag/wheel: map · click: inspect (vehicles too) · F: follow · double-click: orbit here · V: walk · M: miniature · T: traffic · N: noise map · R: roads · L: classes · H: home · D: debug info · ?: this help</div>
   </div>
   <div id="inspect"></div>
@@ -53,8 +54,7 @@
   <div id="crosshair"></div>
   <div id="lost"></div>
   <div id="walk-hint">walking: WASD / arrows · shift: run · mouse: look · click: inspect<br>click to continue · V: back to the map</div>
-  <div id="legend"></div>
-  <div id="noise-legend"></div>
+  <div id="legends"><div id="legend"></div><div id="noise-legend"></div></div>
   <div id="attr"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>

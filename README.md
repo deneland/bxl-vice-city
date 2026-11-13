@@ -51,6 +51,10 @@ Keys: `?` shows the controls, `D` frame and tile statistics. URL parameters (tes
 are all listed in `viewer/src/config.ts`, e.g. `time=8.5`, `date=2026-11-04`, `weather=clear`, `roads=1`
 (draw the road network), `telemetry=0`, `tier=low` (phone budgets), `cache=0`.
 
+Links can be shared: the address bar follows what you look at (`at=`: camera and orbit point in Lambert 72
+metres, height above sea level, so a link survives a data rebuild), a chosen time and date, and the open
+overlays (`mode=labels`, `tilt=1`, `roads=1`, `noise=1`, `traffic=0`).
+
 Built to hold up on any device: tiles stream in for what is in view and are kept per build in the
 browser's Cache Storage (a repeat visit downloads no tiles); phones and weak machines get smaller GPU
 memory budgets (`src/tier.ts`) and the level of detail coarsens when a view needs more than the budget; a

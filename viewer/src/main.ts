@@ -166,9 +166,33 @@ async function main() {
     pos: camera.position.toArray().map(round) as Vec3,
     target: controls.target.toArray().map(round) as Vec3,
   });
-  const cam = config.cam;
-  if (cam?.length === 6 && cam.every(Number.isFinite)) setView({ pos: cam.slice(0, 3) as Vec3, target: cam.slice(3) as Vec3 });
-
+  // the address bar follows the view, the chosen time and the open overlays (a link to share; see config.ts, at):
+  // written half a second after things settle (browsers limit how often a page may rewrite its URL)
+  let shareTimer = 0;
+  function shareSoon() {
+    clearTimeout(shareTimer);
+    shareTimer = setTimeout(() => {
+      try { history.replaceState(history.state, '', shareUrl()); } catch { /* (rate-limited: the next change writes it) */ }
+    }, 500);
+  }
+  function shareUrl() {
+    const u = new URL(location.href), q = u.searchParams;
+    const set = (k: string, v: string | null) => (v === null ? q.delete(k) : q.set(k, v));
+    if (!walk.active) {   // (walking: the link keeps the last map view)
+      const v = getView(), atHome = [...v.pos, ...v.target].every((n, i) => Math.abs(n - [...home.pos, ...home.target][i]) < 0.05);
+      set('at', atHome ? null : [...toL72(v.pos), ...toL72(v.target)].map((n) => n.toFixed(1)).join(','));
+      q.delete('cam');
+    }
+    set('time', live ? null : timeInput.value);
+    set('date', live ? null : day);
+    set('mode', viewMode.value ? 'labels' : null);
+    set('tilt', tiltOn ? '1' : null);
+    set('roads', roadsOn ? '1' : null);
+    set('noise', noiseWanted ? '1' : null);
+    set('traffic', trafficWanted ? null : '0');
+    u.search = q.toString().replace(/%2C/g, ',');   // (readable: commas are fine in a query)
+    return u;
+  }
   const hemi = new THREE.HemisphereLight(0xdfeeff, 0x5a5040, 1.6);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff1dc, 3.2);
@@ -179,6 +203,18 @@ async function main() {
   const homeTile = L0.tiles.find((t) => t.tx === Math.floor(homeVX / CH) && t.ty === Math.floor(homeVY / CH));
   world.position.set(-homeVX * VS, -(homeTile?.zmin ?? groundGuess) * VS, homeVY * VS);
   cityScene.add(world);
+  // shareable links give the view in Lambert 72 and metres above sea level, not scene metres: a link stays
+  // valid when the data is rebuilt or the home point moves
+  const zBase = manifest.origin[2] + (homeTile?.zmin ?? groundGuess) * VS;
+  const toL72 = ([x, y, z]: Vec3): Vec3 => [x + manifest.home[0], manifest.home[1] - z, y + zBase];
+  const fromL72 = ([X, Y, Z]: number[]): Vec3 => [X - manifest.home[0], Z - zBase, manifest.home[1] - Y];
+  const inRegion = ([x, , z]: Vec3) => x >= world.position.x && x <= world.position.x + L0.size[0] * VS &&
+    z <= world.position.z && z >= world.position.z - L0.size[1] * VS;
+  const valid = (v: number[] | null): v is number[] => v?.length === 6 && v.every(Number.isFinite);
+  if (valid(config.cam)) setView({ pos: config.cam.slice(0, 3) as Vec3, target: config.cam.slice(3) as Vec3 });
+  else if (valid(config.at) && inRegion(fromL72(config.at.slice(3)))) {
+    setView({ pos: fromL72(config.at.slice(0, 3)), target: fromL72(config.at.slice(3)) });
+  }
   // the city never moves: no per-render matrix update of every resident tile (lod.ts updates a tile's
   // world matrix once, when it is added)
   world.updateMatrixWorld(true);
@@ -206,6 +242,7 @@ async function main() {
   const network = loadRoads(dataUrl(`roads/${ROI}.json`)).then((net) => net && { net, lanes: buildLanes(net, VS) })
     .catch((e) => { console.warn('road network unavailable', e); return null; });
   let roads: THREE.Object3D | null = null;
+  let roadsOn = config.roads;
   const setRoads = async (on: boolean) => {
     if (on && !roads) {
       const n = await network;
@@ -215,6 +252,8 @@ async function main() {
       fx.add(roads);
     }
     if (roads) roads.visible = on;
+    roadsOn = on;
+    shareSoon();
     dirty = true;
   };
   if (config.roads) setRoads(true);
@@ -225,16 +264,18 @@ async function main() {
   // sound and the noise map (both need traffic: built with it)
   let city: CitySound | null = null;
   let noise: NoiseMap | null = null;
-  let soundWanted = false, noiseWanted = false;
+  let soundWanted = false, noiseWanted = config.noise;
   let nextCall = performance.now() + config.sirens * (0.2 + 0.5 * Math.random()) * 1000;   // the first emergency call
   // agent clock: seconds of the day; runs on from the chosen time (live: the Brussels clock)
   let clockBase = 0, clockAt = performance.now();
   const agentTime = () => Math.min(24 * H - 1, clockBase + (performance.now() - clockAt) / 1000);
   let trafficOn = false;
+  let trafficWanted = config.traffic || config.noise;   // (the noise map comes from the traffic)
   const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   let buildingTraffic = false;   // (set-up awaits frames: a second T press must not start another)
   const setTraffic = async (on: boolean) => {
-    trafficOn = on;
+    trafficOn = trafficWanted = on;
+    shareSoon();
     if (on && !traffic && !buildingTraffic) {
       buildingTraffic = true;
       try {
@@ -325,6 +366,7 @@ async function main() {
     timeLabel.textContent = `${live ? 'live · ' : ''}${day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` +
       ` · ${weather ? `${describe(weather)}, ${Math.round(weather.temp)}°C` : 'weather unavailable'} · sun ${(alt * 180 / Math.PI).toFixed(0)}°`;
     liveBtn.style.display = live ? 'none' : '';
+    shareSoon();
     dirty = true;
   };
   const tick = () => { // live: follow the clock
@@ -353,9 +395,7 @@ async function main() {
       return;
     }
     try { sessionStorage.setItem(KEY, String(Date.now())); } catch { /* (private mode: no loop guard) */ }
-    const v = getView(), u = new URL(location.href);
-    u.searchParams.set('cam', [...v.pos, ...v.target].join(','));
-    if (!live) { u.searchParams.set('time', timeInput.value); u.searchParams.set('date', day); }
+    const u = shareUrl();
     msg.textContent = 'The graphics card stopped drawing this page; reloading…';
     setTimeout(() => location.replace(u.href), 800);
   };
@@ -389,7 +429,7 @@ async function main() {
   });
   // traffic, people and their day plans after the first full view of the city: the city comes first
   // (they competed for the main thread), people and cars appear a moment later
-  if (config.traffic) ready.then(() => setTraffic(true));
+  if (trafficWanted) ready.then(() => setTraffic(true));
 
   // --- CPU voxel access, walking, picking ---------------------------------
   const vox = new Voxels(dataUrl(`tiles/${ROI}`), CH, L0, world, lod.query, lod.cache);
@@ -458,6 +498,7 @@ async function main() {
     tiltOn = on;
     deferred.setTilt(on);
     lod.errAt = on ? blurPx : null;   // blurred areas need less detail
+    shareSoon();
     dirty = true;
   };
 
@@ -469,6 +510,7 @@ async function main() {
     viewMode.value = labels ? 1 : 0;
     legend.style.display = labels ? 'block' : 'none';
     cityDirty = true;
+    shareSoon();
     telemetry.event('view-mode', { mode: labels ? 'classes' : 'colour' });
   };
   setMode(config.labels);
@@ -484,11 +526,37 @@ async function main() {
     telemetry.event('sound', { on });
   };
   soundBtn.addEventListener('click', () => setSound(!soundWanted));
+
+  // --- share: a link to this view (phones: the share sheet; else copied). Only the view's own parameters,
+  // not this browser's tuning (tier, data, telemetry, ...)
+  const shareBtn = document.getElementById('share') as HTMLButtonElement;
+  let shareReset = 0;
+  shareBtn.addEventListener('click', async () => {
+    const all = shareUrl(), u = new URL(all.origin + all.pathname);
+    for (const k of ['roi', 'at', 'time', 'date', 'mode', 'tilt', 'roads', 'noise', 'traffic']) {
+      const v = all.searchParams.get(k);
+      if (v !== null) u.searchParams.set(k, v);
+    }
+    const url = u.href.replace(/%2C/g, ',');
+    const done = (text: string) => {
+      shareBtn.textContent = text;
+      clearTimeout(shareReset);
+      shareReset = setTimeout(() => { shareBtn.textContent = '🔗'; }, 1500);
+    };
+    try {
+      if (navigator.share && matchMedia('(pointer: coarse)').matches) await navigator.share({ title: document.title, url });
+      else { await navigator.clipboard.writeText(url); done('copied ✓'); }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') prompt('link to this view', url);   // (no clipboard access: copy it by hand)
+    }
+    telemetry.event('share', {});
+  });
   const setNoise = (on: boolean) => {
     noiseWanted = on;
     if (noise) noise.visible = on;
     noiseLegend.style.display = on ? 'block' : 'none';
     if (on && !trafficOn) setTraffic(true);   // (the map comes from the traffic)
+    shareSoon();
     dirty = true;
     telemetry.event('noise-map', { on });
   };
@@ -518,6 +586,7 @@ async function main() {
   setTime(Number(timeInput.value));
   updateWeather();
   setTilt(config.tilt);
+  noiseLegend.style.display = noiseWanted ? 'block' : 'none';   // (?noise=1: the map itself comes with the traffic)
   const resize = () => {
     dirty = true;
     cityDirty = true;
@@ -595,7 +664,7 @@ async function main() {
     // damping keeps nudging the camera by invisible amounts forever; ignore changes below 1e-4
     const moving = !matricesClose(lastCam, camera.matrixWorld, 1e-4);
     wasMoving = moving;
-    if (moving) lastCam.copy(camera.matrixWorld);
+    if (moving) { lastCam.copy(camera.matrixWorld); shareSoon(); }
     if (tiltOn) {
       // focus on the orbit target (map) or 20 m ahead (walking), measured along the view direction
       const d = walk.active ? 20 : Math.max(5, controls.target.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3())));

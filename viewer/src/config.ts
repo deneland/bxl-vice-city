@@ -26,8 +26,13 @@ export const config = {
   /** render resolution budget, megapixels, and dynamic resolution (?dynres=0: off) */
   megapixels: opt('mp'),   // (default by device tier, tier.ts)
   dynres: q.get('dynres') !== '0',
-  /** ?cam=px,py,pz,tx,ty,tz: start view */
+  /** ?cam=px,py,pz,tx,ty,tz: start view in scene metres (tests); takes precedence over ?at */
   cam: q.get('cam')?.split(',').map(Number) ?? null,
+  /** ?at=X,Y,Z,tX,tY,tZ: start view, camera and orbit point in Lambert 72 metres, Z above sea level. The viewer
+   *  keeps it (and time, date, mode, tilt, roads, noise, traffic) up to date in the address bar: a shareable link */
+  at: q.get('at')?.split(',').map(Number) ?? null,
+  /** ?noise=1: the noise map (N) */
+  noise: q.get('noise') === '1',
   roads: q.get('roads') === '1',
   traffic: q.get('traffic') !== '0',
   /** emergency vehicles (siren): mean seconds between calls near where you look (?sirens=0: none) */
