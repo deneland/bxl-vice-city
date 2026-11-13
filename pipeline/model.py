@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from common import FLAG_APRON, ROOT, level_tiles, read_tile
+from common import FLAG_APRON, ROOT, level_tiles, read_tile_at
 
 
 
@@ -17,7 +17,7 @@ class Model:
         self.man = json.loads((self.dir / "manifest.json").read_text())
         L0 = self.man["levels"][0]
         self.vs, self.size = L0["voxelSize"], L0["size"]
-        self.files = {(t["tx"], t["ty"]): t["file"] for t in level_tiles(L0, self.man["tileSize"])}
+        self.files = {(t["tx"], t["ty"]): t for t in level_tiles(L0, self.man["tileSize"])}
         self.cache = OrderedDict()
 
     def tile(self, tx, ty):
@@ -25,9 +25,9 @@ class Model:
             self.cache.move_to_end((tx, ty))
         else:
             occ = np.zeros((64, 64, self.size[2]), np.uint8)
-            f = self.files.get((tx, ty))
-            if f:
-                v = read_tile(self.dir / f)
+            t = self.files.get((tx, ty))
+            if t:
+                v = read_tile_at(self.dir, t)
                 v = v[(v[:, 7] & FLAG_APRON) == 0]
                 occ[v[:, 0] - 1, v[:, 1] - 1, v[:, 2]] = np.maximum(v[:, 6], 1)
             self.cache[(tx, ty)] = occ

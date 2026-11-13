@@ -28,7 +28,7 @@ import numpy as np
 from numba import njit
 from PIL import Image, ImageDraw
 
-from common import ARGS, ROOT, VS, jobs as njobs, log_clock, level_tiles, mapillary_token, read_tile, region, to_l72, to_wgs
+from common import ARGS, ROOT, VS, jobs as njobs, log_clock, level_tiles, mapillary_token, read_tile_at, region, to_l72, to_wgs
 
 ROI_NAME, ROI = region(1)   # (the first argument is the stage)
 RAW = ROOT / "data/raw/mapillary"
@@ -240,7 +240,7 @@ def load_model():
         tmp = f.with_suffix(".tmp")
         occ = np.memmap(tmp, np.uint8, "w+", shape=(nx, ny, 256))
         for t in level_tiles(L0, man["tileSize"]):
-            v = read_tile(TILES / t["file"])
+            v = read_tile_at(TILES, t)
             v = v[(v[:, 7] & 2) == 0]
             occ[v[:, 0].astype(np.int64) - 1 + t["tx"] * 64 + PAD, v[:, 1].astype(np.int64) - 1 + t["ty"] * 64 + PAD,
                 v[:, 2]] = np.maximum(v[:, 6], 1)

@@ -42,7 +42,7 @@ async function capture(query) {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   await page.bringToFront();
   await page.goto(`${URL_BASE}?telemetry=0&gpu=0&continuous=1&${query}`);
-  await page.addStyleTag({ content: '#hud,#help,#attr{display:none!important}' });
+  await page.addStyleTag({ content: '#hud,#help,#attr,#bottom-left{display:none!important}' });
   await page.waitForFunction(() => window.__viewer, null, { timeout: 30000 });
   await page.evaluate(() => window.__viewer.ready);
   const out = {};

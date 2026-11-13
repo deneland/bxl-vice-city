@@ -8,27 +8,67 @@ export const C_GROUND = 2;       // LiDAR (ASPRS) ground class
 
 const MAGIC = [0x56, 0x58, 0x54, 0x03];
 
-/** a manifest level's tile list: version 4 stores it as columns with the file names implied
- *  (pipeline common.pack_level_tiles); older manifests as a list of objects. Returns the objects. */
-export function levelTiles(level: { level: number; size: number[]; tiles: unknown }, tileSize: number) {
-  const t = level.tiles as { at: number[]; zmin: number[]; zh: number[] } | { file: string; tx: number; ty: number; zmin: number; zmax: number }[];
+const ARCHIVE = 16;   // tiles per archive side (pipeline common.ARCHIVE)
+
+export interface TileEntry { file: string; tx: number; ty: number; zmin: number; zmax: number; off?: number; len?: number }
+
+/** a manifest level's tile list. Version 5 (pipeline common.pack_level_tiles): columns, file names implied,
+ *  tiles inside archives of ARCHIVE x ARCHIVE (each tile's offset = the lengths before it in its archive);
+ *  version 4: the same without archives; older: a list of objects. */
+export function levelTiles(level: { level: number; size: number[]; tiles: unknown }, tileSize: number): TileEntry[] {
+  const t = level.tiles as { at: number[]; zmin: number[]; zh: number[]; len?: number[] } | TileEntry[];
   if (Array.isArray(t)) return t;
-  const W = Math.ceil(level.size[0] / tileSize), out = [];
+  const W = Math.ceil(level.size[0] / tileSize), out: TileEntry[] = [], ends = new Map<string, number>();
   let at = 0;
   for (let i = 0; i < t.at.length; i++) {
     at += t.at[i];
-    const tx = at % W, ty = (at - tx) / W;
-    out.push({ file: `L${level.level}/t_${tx}_${ty}.vxt`, tx, ty, zmin: t.zmin[i], zmax: t.zmin[i] + t.zh[i] });
+    const tx = at % W, ty = (at - tx) / W, e: TileEntry = { file: '', tx, ty, zmin: t.zmin[i], zmax: t.zmin[i] + t.zh[i] };
+    if (t.len) {
+      e.file = `L${level.level}/a_${Math.floor(tx / ARCHIVE)}_${Math.floor(ty / ARCHIVE)}.vxa`;
+      e.off = ends.get(e.file) ?? 0; e.len = t.len[i];
+      ends.set(e.file, e.off + e.len);
+    } else e.file = `L${level.level}/t_${tx}_${ty}.vxt`;
+    out.push(e);
   }
   return out;
-}   // "VXT\x03"
+}
 
-/** fetch a tile and decode it (a page instead of a tile, e.g. a server's fallback for a missing file, is an error) */
-export async function fetchTile(url: string): Promise<Uint8Array> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`tile ${url}: HTTP ${r.status}`);
-  if (r.headers.get('content-type')?.startsWith('text/html')) throw new Error(`tile ${url}: got a web page`);
-  return decodeTile(await r.arrayBuffer());
+/** where a tile is: its file (or archive) URL, the byte range in an archive, and the Cache Storage cache
+ *  that keeps fetched tiles for this build (null: no caching) */
+export interface TileRef { url: string; off?: number; len?: number; cache: string | null }   // "VXT\x03"
+
+/** fetch a tile and decode it: from the build's cache if it holds it, else from the network (a range request
+ *  into its archive), kept in the cache for the next visit. A static host like GitHub Pages only lets the
+ *  browser keep files for minutes; the cache keeps them until the build changes. A page instead of a tile
+ *  (a server's fallback for a missing file) is an error. */
+export async function fetchTile(ref: TileRef): Promise<Uint8Array> {
+  const ranged = ref.len !== undefined && ref.off !== undefined;
+  const key = ranged ? `${ref.url}${ref.url.includes('?') ? '&' : '?'}at=${ref.off}` : ref.url;
+  let cache: Cache | null = null;
+  if (ref.cache && typeof caches !== 'undefined') {
+    try {
+      cache = await caches.open(ref.cache);
+      const hit = await cache.match(key);
+      if (hit) return decodeTile(await hit.arrayBuffer());
+    } catch { cache = null; }   // (no Cache Storage here, e.g. not a secure context: network only)
+  }
+  const r = await fetch(ref.url, ranged ? { headers: { Range: `bytes=${ref.off}-${ref.off! + ref.len! - 1}` } } : undefined);
+  if (!r.ok) throw new Error(`tile ${ref.url}: HTTP ${r.status}`);
+  if (r.headers.get('content-type')?.startsWith('text/html')) throw new Error(`tile ${ref.url}: got a web page`);
+  let buf = await r.arrayBuffer();
+  if (ranged && r.status === 200) buf = buf.slice(ref.off!, ref.off! + ref.len!);   // (the server ignored the range)
+  if (cache) cache.put(key, new Response(buf.slice(0))).catch(() => {});
+  return decodeTile(buf);
+}
+
+/** the Cache Storage cache for a build's tiles; caches of other builds of the region are deleted */
+export function tileCache(region: string, build: string | undefined): string | null {
+  if (!build || typeof caches === 'undefined') return null;
+  const name = `bxl-tiles-${region}-${build}`;
+  caches.keys().then((keys) => {
+    for (const k of keys) if (k.startsWith(`bxl-tiles-${region}-`) && k !== name) caches.delete(k);
+  }).catch(() => {});
+  return name;
 }
 
 /** a fetched tile file -> records (8 bytes per voxel). Accepts the compact format gzipped (or already

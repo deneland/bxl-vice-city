@@ -8,14 +8,15 @@
 import * as THREE from 'three/webgpu';
 import { ATLAS_W, createVoxelMaterial, voxelGeometryBase } from './voxelMaterial';
 import type { MeshRequest, MeshResult } from './mesher.worker';
+import type { TileEntry } from './tileFormat';
 
-export interface TileInfo { file: string; tx: number; ty: number; zmin: number; zmax: number }
+export type TileInfo = TileEntry;
 export interface LevelInfo { level: number; voxelSize: number; size: [number, number, number]; voxels: number; faces: number; tiles: TileInfo[] }
 
 /** Face data (colour, class) of all resident tiles in one texture: each tile owns a range of rows. Merged
  *  quads (mesher.worker.ts) index it by face; new tiles are copied in on the GPU. */
 export class FaceAtlas {
-  static readonly W = ATLAS_W;   // x 8192 rows = 33.5M faces (twice the face budget: it never runs full)
+  static readonly W = ATLAS_W;   // x 8192 rows (4096 on low-tier devices, tier.ts) = 33.5M faces: twice the face budget, it never runs full
   readonly tex: THREE.Texture;
   private target: THREE.RenderTarget | null = null;
   private free: [number, number][];
@@ -141,18 +142,24 @@ export class TileManager {
   private evicted = 0;
   /** keep at most this many faces meshed (4 bytes each in the atlas + 12 per merged quad); least recently used go first */
   budgetFaces = 16_000_000;
+  /** detail scale (>= 1): when the view needs more faces than the budget (everything resident is in use), the
+   *  allowed on-screen voxel size grows until it fits; it eases back when there is room. Without this a view
+   *  larger than the budget (a phone, tier.ts) loads and evicts the same tiles forever. */
+  errScale = 1;
   errPx: number;
   /** optional per-tile error limit (px) from its distance range, e.g. larger where depth of field blurs */
   errAt: ((dmin: number, dmax: number) => number) | null = null;
   /** appended to tile URLs (build id), so a browser never mixes tiles from two builds */
   query = '';
+  /** Cache Storage cache for this build's tiles (tileFormat.ts fetchTile; null: none) */
+  cache: string | null = null;
 
   constructor(
     private base: string, private tileSize: number, private levels: LevelInfo[],
     private group: THREE.Group, private shadows: boolean, errPx: number, private renderer: THREE.WebGPURenderer,
-    maxInflight = 16,
+    maxInflight = 16, workers = 0, atlasRows = 8192,
   ) {
-    this.atlas = new FaceAtlas(!!(renderer.backend as any).isWebGPUBackend);
+    this.atlas = new FaceAtlas(!!(renderer.backend as any).isWebGPUBackend, atlasRows);
     this.errPx = errPx;
     this.maxInflight = maxInflight;
     group.updateMatrixWorld(true);
@@ -176,7 +183,7 @@ export class TileManager {
       if (n.L === top) { this.roots.push(n); continue; }
       byKey.get(`${n.L + 1}/${n.info.tx >> 1}/${n.info.ty >> 1}`)?.children.push(n);
     }
-    const nWorkers = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
+    const nWorkers = workers || Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
     this.workers = Array.from({ length: nWorkers }, () => {
       const w = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' });
       w.onmessage = (ev: MessageEvent<MeshResult>) => { this.arrived.push(ev.data); };   // (integrated in update, within a budget)
@@ -223,7 +230,7 @@ export class TileManager {
       n.used = frame;
       const d = n.box.distanceToPoint(cam);
       const px = d > 0 ? (n.vs * focal) / d : Infinity;
-      const err = this.errAt ? Math.max(this.errPx, this.errAt(d, d + n.diag)) : this.errPx;
+      const err = (this.errAt ? Math.max(this.errPx, this.errAt(d, d + n.diag)) : this.errPx) * this.errScale;
       if (n.L > 0 && px > err && n.children.length) {
         let allReady = true;
         for (const k of n.children) {
@@ -247,6 +254,9 @@ export class TileManager {
     this.showB = this.shown;
     this.shown = show;
     this.evict();
+    // over budget after eviction: all of it is in use (shown or wanted) -> coarser; on screen well under -> finer
+    if (this.resident > this.budgetFaces) this.errScale = Math.min(8, this.errScale * 1.02);
+    else if (faces < this.budgetFaces * 0.5 && this.errScale > 1) this.errScale = Math.max(1, this.errScale / 1.005);
     this.pump();
 
     this.stats = { perLevel, faces, quads, loading: this.inflight + this.queue.length,
@@ -313,7 +323,7 @@ export class TileManager {
       this.inflight++;
       // the mesher worker fetches the tile itself (keeps network callbacks and copies off the main thread)
       const url = new URL(`${this.base}/${n.info.file}${this.query}`, location.href).href;
-      const req: MeshRequest = { id: n.id, url, ch: this.tileSize, nz: this.levels[n.L].size[2] };
+      const req: MeshRequest = { id: n.id, tile: { url, off: n.info.off, len: n.info.len, cache: this.cache }, ch: this.tileSize, nz: this.levels[n.L].size[2] };
       this.workers[this.nextWorker++ % this.workers.length].postMessage(req);
     }
   }

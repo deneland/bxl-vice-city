@@ -18,10 +18,10 @@
 // dir: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z (up), 5 -z (down)   (voxel space, z up)
 // u (run axis): z for side faces, x for dir 4/5; v: y for dir 0/1, x for dir 2/3, y for dir 4/5.
 
-export interface MeshRequest { id: number; url: string; ch: number; nz: number }   // (the worker fetches the tile itself)
+export interface MeshRequest { id: number; tile: TileRef; ch: number; nz: number }   // (the worker fetches the tile itself)
 export interface MeshResult { id: number; q: Float32Array; t: Uint8Array; quads: number; faces: number; failed?: boolean }
 
-import { FLAG_APRON, FLAG_FILL, fetchTile } from './tileFormat';
+import { FLAG_APRON, FLAG_FILL, fetchTile, type TileRef } from './tileFormat';
 
 const SKIRT = 8;   // voxels below a column's top that get side faces along the tile edge
 const MAXRUN = 255;
@@ -30,10 +30,10 @@ const MAXRUN = 255;
 const E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
 self.onmessage = async (ev: MessageEvent<MeshRequest>) => {
-  const { id, url, ch, nz } = ev.data;
+  const { id, tile, ch, nz } = ev.data;
   let v: Uint8Array;
   try {
-    v = await fetchTile(url);
+    v = await fetchTile(tile);
   }
   catch { (self as unknown as Worker).postMessage({ id, q: new Float32Array(0), t: new Uint8Array(0), quads: 0, faces: 0, failed: true }); return; }
   const n = v.length / 8;

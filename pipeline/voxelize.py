@@ -45,7 +45,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from common import (CFG, MANIFEST_VERSION, encode_tile, pack_level_tiles, read_roads, tile_file, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
+from common import (CFG, MANIFEST_VERSION, encode_tile, pack_archives, pack_level_tiles, read_roads, tile_file, C_BUILDING, E_KIND, E_LANES, E_ONEWAY, E_PAVEMENT, E_XYZ, KIND_ROAD, C_GROUND, C_HIGHVEG, C_LOWVEG, C_UNCLASSIFIED, C_VEHICLE, FLAG_APRON, FLAG_FILL,
                     FLAG_PHOTO, FLAG_PTCOLOR, LABEL_SHIFT, ROOT, VS, jobs as cpu_jobs, log_clock, region)
 
 ROI_NAME, ROI = region()
@@ -758,6 +758,7 @@ def main() -> None:
         out_levels.append({"level": L, "voxelSize": VS * (1 << L), "size": [ceil_div(NX, 1 << L), ceil_div(NY, 1 << L), NZ >> L],
                            "voxels": lv["voxels"], "faces": lv["faces"]})
         out_levels[-1]["tiles"] = pack_level_tiles(lv["tiles"], out_levels[-1], CH)
+    pack_archives(DEST, out_levels, CH)   # (the single tile files -> archives read by range requests)
     manifest = {
         "version": MANIFEST_VERSION, "build": time.strftime("%Y%m%d-%H%M%S"), "name": ROI["name"], "crs": "EPSG:31370",
         "origin": [ROI["xmin"], ROI["ymin"], z0], "tileSize": CH,

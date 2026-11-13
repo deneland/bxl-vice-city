@@ -115,35 +115,88 @@ def read_tile(path: Path) -> np.ndarray:
     return decode_tile(path.read_bytes())
 
 
-# --- manifest (version 4): each level's tile list as columns, file names implied ---
+# --- manifest (version 5) and tile archives ---
+# Each level's tiles are listed as columns, file names implied:
 #   tiles: {"at": [ty * W + tx of each tile, ascending, as differences (first: from 0)],
-#           "zmin": [...], "zh": [zmax - zmin]}     W = tiles across the level
-MANIFEST_VERSION = 4
+#           "zmin": [...], "zh": [zmax - zmin], "len": [bytes of the tile in its archive]}   W = tiles across
+# The tiles are stored in archives of ARCHIVE x ARCHIVE tiles (L{level}/a_{tx // ARCHIVE}_{ty // ARCHIVE}.vxa):
+# the tile files concatenated in list order, so a tile's offset is the sum of the lengths before it in the
+# same archive. The viewer reads one tile with an HTTP range request: a few hundred files instead of tens of
+# thousands (faster uploads, fewer requests to object storage).
+MANIFEST_VERSION = 5
+ARCHIVE = 16
 
 
 def tile_file(level: int, tx: int, ty: int) -> str:
+    """a single tile (voxelize.py writes these first; pack_archives puts them into archives)"""
     return f"L{level}/t_{tx}_{ty}.vxt"
+
+
+def archive_file(level: int, tx: int, ty: int) -> str:
+    return f"L{level}/a_{tx // ARCHIVE}_{ty // ARCHIVE}.vxa"
 
 
 def pack_level_tiles(tiles: list, level: dict, tile_size: int) -> dict:
     W = -(-level["size"][0] // tile_size)
     ts = sorted(tiles, key=lambda t: (t["ty"], t["tx"]))
     at = [t["ty"] * W + t["tx"] for t in ts]
-    return {"at": [a - b for a, b in zip(at, [0] + at[:-1])], "zmin": [t["zmin"] for t in ts],
-            "zh": [t["zmax"] - t["zmin"] for t in ts]}
+    out = {"at": [a - b for a, b in zip(at, [0] + at[:-1])], "zmin": [t["zmin"] for t in ts],
+           "zh": [t["zmax"] - t["zmin"] for t in ts]}
+    if all("len" in t for t in ts):
+        out["len"] = [t["len"] for t in ts]
+    return out
 
 
 def level_tiles(level: dict, tile_size: int) -> list:
-    """a manifest level's tiles as [{file, tx, ty, zmin, zmax}] (any manifest version)"""
+    """a manifest level's tiles as [{file, tx, ty, zmin, zmax, (off, len: in an archive)}] (any manifest version)"""
     t = level["tiles"]
     if isinstance(t, list):
         return t
-    W, at, out = -(-level["size"][0] // tile_size), 0, []
-    for d, z0, zh in zip(t["at"], t["zmin"], t["zh"]):
+    W, at, out, ends = -(-level["size"][0] // tile_size), 0, [], {}
+    lens = t.get("len")
+    for i, (d, z0, zh) in enumerate(zip(t["at"], t["zmin"], t["zh"])):
         at += d
         tx, ty = at % W, at // W
-        out.append({"file": tile_file(level["level"], tx, ty), "tx": tx, "ty": ty, "zmin": z0, "zmax": z0 + zh})
+        e = {"tx": tx, "ty": ty, "zmin": z0, "zmax": z0 + zh}
+        if lens:
+            f = archive_file(level["level"], tx, ty)
+            e.update(file=f, off=ends.get(f, 0), len=lens[i])
+            ends[f] = e["off"] + lens[i]
+        else:
+            e["file"] = tile_file(level["level"], tx, ty)
+        out.append(e)
     return out
+
+
+def read_tile_at(base: Path, t: dict) -> np.ndarray:
+    """records of a manifest tile (level_tiles entry): from its archive or its own file"""
+    if "len" not in t:
+        return read_tile(base / t["file"])
+    with open(base / t["file"], "rb") as f:
+        f.seek(t["off"])
+        return decode_tile(f.read(t["len"]))
+
+
+def pack_archives(base: Path, levels: list, tile_size: int):
+    """single tile files (tile_file) of the manifest levels -> archives; sets each level's "tiles" (with
+    lengths) and "bytes", deletes the single files"""
+    for lv in levels:
+        ts = sorted(level_tiles(lv, tile_size), key=lambda t: (t["ty"], t["tx"]))
+        groups = {}
+        for t in ts:
+            groups.setdefault(archive_file(lv["level"], t["tx"], t["ty"]), []).append(t)
+        total = 0
+        for name, group in groups.items():
+            with open(base / name, "wb") as out:
+                for t in group:
+                    data = (base / tile_file(lv["level"], t["tx"], t["ty"])).read_bytes()
+                    out.write(data)
+                    t["len"] = len(data)
+                    total += len(data)
+        for t in ts:
+            (base / tile_file(lv["level"], t["tx"], t["ty"])).unlink()
+        lv["tiles"] = pack_level_tiles(ts, lv, tile_size)
+        lv["bytes"] = total
 
 
 # --- road network (roads.py -> viewer/public/roads/<roi>.json): each edge is a list in this order ---

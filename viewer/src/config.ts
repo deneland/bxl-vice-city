@@ -5,6 +5,10 @@ const opt = (k: string) => (q.has(k) ? Number(q.get(k)) : null);
 
 export const config = {
   roi: q.get('roi') ?? 'schaerbeek',
+  /** keep fetched tiles in Cache Storage for the next visit (?cache=0: off, e.g. to measure downloads) */
+  tileCache: q.get('cache') !== '0',
+  /** ?tier=low|high: force the device tier (tier.ts; default: detected) */
+  tier: q.get('tier'),
   /** where the data files are (tiles, roads, timetable, ...): ?data=<url>, else VITE_DATA_URL set at build
    *  time, else next to the page. Lets the data live on another host than the app (a bigger region). */
   data: (q.get('data') ?? import.meta.env.VITE_DATA_URL ?? '').replace(/([^/])$/, '$1/'),
@@ -21,7 +25,7 @@ export const config = {
   /** telemetry to the dev server (?telemetry=0: off) */
   telemetry: q.get('telemetry') !== '0',
   /** render resolution budget, megapixels, and dynamic resolution (?dynres=0: off) */
-  megapixels: num('mp', 3.5),
+  megapixels: opt('mp'),   // (default by device tier, tier.ts)
   dynres: q.get('dynres') !== '0',
   /** ?cam=px,py,pz,tx,ty,tz: start view */
   cam: q.get('cam')?.split(',').map(Number) ?? null,
@@ -38,7 +42,7 @@ export const config = {
   /** level of detail: max on-screen voxel size (px), ?lod=0 off, resident faces (millions) */
   err: num('err', 8),
   lod: q.get('lod') !== '0',
-  budget: num('budget', 16),
+  budget: opt('budget'),   // resident faces, millions (default by device tier, tier.ts)
   labels: q.get('mode') === 'labels',
   tilt: q.get('tilt') === '1',
   bokeh: num('bokeh', 2.5),

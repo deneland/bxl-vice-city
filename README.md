@@ -45,10 +45,11 @@ Schaerbeek build takes ~7 minutes. The viewer serves the newest build (`manifest
 `pipeline/common.py`. Lint: `uv run ruff check`.
 
 Everything the viewer downloads is kept small (`pipeline/common.py`), since it is streamed to every visitor:
-tiles are compact (`.vxt`: positions delta-coded, a 256-colour palette per tile, gzipped; ~0.4 GB for
-Schaerbeek), the manifest lists tiles as columns, road polylines are delta-coded, and the timetable stores
-each trip as a stop pattern, a timing and a start time. A first visit loads about 13 MB, mostly the tiles in view. Older builds still
-load; `uv run python repack.py [name]` converts one in place without rebuilding.
+tiles are compact (positions delta-coded, a 256-colour palette per tile, gzipped; ~0.4 GB for Schaerbeek)
+and packed into archives of 16 x 16 tiles (~100 files, read with HTTP range requests); the manifest lists
+tiles as columns, road polylines are delta-coded, and the timetable stores each trip as a stop pattern, a
+timing and a start time. A first visit loads about 13 MB, mostly the tiles in view. Older builds still load;
+`uv run python repack.py [name]` converts one in place without rebuilding.
 
 ## Viewer
 
@@ -59,8 +60,13 @@ npm run check        # type check
 npm run build        # production build
 ```
 
-URL parameters (tests, screenshots, tuning) are all listed in `viewer/src/config.ts`, e.g. `time=8.5`,
-`date=2026-11-04`, `weather=clear`, `roads=1` (draw the road network), `telemetry=0`.
+Keys: `?` shows the controls, `D` frame and tile statistics. URL parameters (tests, screenshots, tuning)
+are all listed in `viewer/src/config.ts`, e.g. `time=8.5`, `date=2026-11-04`, `weather=clear`, `roads=1`
+(draw the road network), `telemetry=0`, `tier=low` (phone budgets), `cache=0`.
+
+Built to hold up on any device: fetched tiles are kept per build in the browser's Cache Storage (a repeat
+visit downloads no tiles); phones and weak machines get smaller GPU memory budgets (`src/tier.ts`) and the
+level of detail coarsens when a view needs more than the budget; a lost GPU context reloads at the same view.
 
 The data files (`viewer/public/`: tiles, roads, timetable, ...) can live on another host than the app:
 build with `VITE_DATA_URL=https://.../` or open the page with `?data=https://.../` (the host must allow

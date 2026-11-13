@@ -1,6 +1,6 @@
 """Bring a built region up to the compact formats in place, without rebuilding from the source data:
-  tiles     raw records (.bin) -> compact .vxt (common.encode_tile)
-  manifest  tile lists -> columns (version 4, common.pack_level_tiles)
+  tiles     raw records (.bin) -> compact tiles (common.encode_tile) -> archives (common.pack_archives)
+  manifest  tile lists -> columns with each tile's length (version 5, common.pack_level_tiles)
   roads     polylines -> delta-coded tenths of a voxel (common.write_roads)
   transit   trips -> patterns, timings and distinct days (common.pack_timetable)
 Each step is skipped when already done. New runs of voxelize.py, roads.py and transit.py write these directly.
@@ -12,7 +12,7 @@ import multiprocessing as mp
 import time
 
 from common import (ARGS, CFG, MANIFEST_VERSION, ROADS_XYZ, ROOT, decode_tile, encode_tile, jobs, level_tiles,
-                    pack_level_tiles, pack_timetable, read_roads, tile_file, write_roads)
+                    pack_archives, pack_level_tiles, pack_timetable, read_roads, tile_file, write_roads)
 
 NAME = ARGS[0] if ARGS else CFG["default"]   # (the built folder's name: also regions no longer in config.toml)
 PUBLIC = ROOT / "viewer/public"
@@ -33,6 +33,7 @@ def tiles():
         print(f"{NAME}: tiles already compact (manifest version {man['version']})")
         return
     ch = man["tileSize"]
+    # raw records (.bin) -> single compact tiles (.vxt)
     todo, old = [], []
     for lv in man["levels"]:
         for t in level_tiles(lv, ch):
@@ -48,21 +49,20 @@ def tiles():
                 after += b
                 if (i + 1) % 4000 == 0:
                     print(f"  {i + 1}/{len(todo)} tiles", flush=True)
+        print(f"{NAME}: {len(todo)} tiles, {before / 1e9:.2f} GB -> {after / 1e9:.2f} GB ({after / before:.1%}) in {time.time() - t0:.0f} s")
     for lv in man["levels"]:
-        ts = [{**t, "file": tile_file(lv["level"], t["tx"], t["ty"])} for t in level_tiles(lv, ch)]
-        lv["bytes"] = sum((DIR / t["file"]).stat().st_size for t in ts)
-        lv["tiles"] = pack_level_tiles(ts, lv, ch)
+        lv["tiles"] = pack_level_tiles([{**t, "file": tile_file(lv["level"], t["tx"], t["ty"])} for t in level_tiles(lv, ch)], lv, ch)
+    # single tiles -> archives (a viewer open meanwhile needs a reload)
+    pack_archives(DIR, man["levels"], ch)
     man["version"] = MANIFEST_VERSION
-    man["build"] += "-c"   # (cache busting)
-    # the manifest switches the viewer over; the old files go after it
+    man["build"] += "-a"   # (cache busting)
     tmp = man_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(man, separators=(",", ":")))
     tmp.replace(man_path)
     for f in old:
-        (DIR / f).unlink()
-    if todo:
-        print(f"{NAME}: {len(todo)} tiles, {before / 1e9:.2f} GB -> {after / 1e9:.2f} GB ({after / before:.1%}) in {time.time() - t0:.0f} s")
-    print(f"{NAME}: manifest -> version {MANIFEST_VERSION}, {man_path.stat().st_size / 1e3:.0f} kB")
+        (DIR / f).unlink(missing_ok=True)
+    files = sum(1 for _ in DIR.rglob("*.vxa"))
+    print(f"{NAME}: manifest -> version {MANIFEST_VERSION} ({man_path.stat().st_size / 1e3:.0f} kB), {files} archive files")
 
 
 def roads():

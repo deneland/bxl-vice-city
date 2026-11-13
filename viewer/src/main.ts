@@ -1,5 +1,6 @@
 import { config, dataUrl } from './config';
-import { levelTiles } from './tileFormat';
+import { levelTiles, tileCache } from './tileFormat';
+import { deviceTier } from './tier';
 import { H, brusselsInstant, brusselsNow, weekday } from './clock';
 import { DynamicResolution } from './dynres';
 import { PlaceIndex } from './places';
@@ -101,7 +102,8 @@ async function main() {
   const renderer = new THREE.WebGPURenderer({ antialias: false, trackTimestamp: GPU_TIMING, forceWebGL: config.forceWebGL });  // FXAA in deferred.ts
   // Dynamic resolution: render at most MP megapixels (high-DPI screens would otherwise draw 4-8 MP every
   // frame), and lower the internal resolution while moving if frames get slow; raise it again when smooth.
-  const MP = config.megapixels * 1e6;
+  const tier = deviceTier();
+  const MP = tier.megapixels * 1e6;
   const res = new DynamicResolution(() => Math.min(devicePixelRatio, 2, Math.sqrt(MP / (innerWidth * innerHeight))),
     () => resize(), config.dynres);
   renderer.setPixelRatio(res.ratio);
@@ -111,7 +113,7 @@ async function main() {
   document.body.appendChild(renderer.domElement);
   await renderer.init();
   const backend = (renderer.backend as any).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
-  telemetry.setEnv({ backend, gpu: await gpuName(renderer), shadows: SHADOWS, gpuTiming: GPU_TIMING,
+  telemetry.setEnv({ backend, gpu: await gpuName(renderer), shadows: SHADOWS, gpuTiming: GPU_TIMING, tier: `${tier.name} (${tier.why})`,
     pixelRatio: renderer.getPixelRatio() });
 
   renderer.info.autoReset = false;
@@ -343,6 +345,27 @@ async function main() {
   timeInput.addEventListener('input', () => { live = false; setTime(Number(timeInput.value)); });
   liveBtn.addEventListener('click', () => { live = true; tick(); });
   setInterval(tick, 30e3);
+
+  // GPU context lost (the browser or OS took the GPU back, e.g. a phone under memory pressure): everything on
+  // the GPU is gone. Rebuilding it in place is not worth the complexity: reload at the same view and time.
+  // Twice within a minute: stop and say so (a reload loop helps nobody).
+  renderer.onDeviceLost = (info: { message?: string }) => {
+    console.warn('GPU context lost', info?.message ?? '');
+    const KEY = 'bxl-context-lost', last = Number(sessionStorage.getItem(KEY) ?? 0);
+    const msg = document.getElementById('lost')!;
+    msg.style.display = 'block';
+    if (Date.now() - last < 60_000) {
+      msg.innerHTML = 'The graphics card stopped drawing this page (twice in a minute).<br>' +
+        'Close other tabs or apps, then <a href="#" onclick="location.reload();return false">reload</a>.';
+      return;
+    }
+    try { sessionStorage.setItem(KEY, String(Date.now())); } catch { /* (private mode: no loop guard) */ }
+    const v = getView(), u = new URL(location.href);
+    u.searchParams.set('cam', [...v.pos, ...v.target].join(','));
+    if (!live) { u.searchParams.set('time', timeInput.value); u.searchParams.set('date', day); }
+    msg.textContent = 'The graphics card stopped drawing this page; reloading…';
+    setTimeout(() => location.replace(u.href), 800);
+  };
   const wPreset = config.weather;
   const updateWeather = async () => {
     try {
@@ -355,9 +378,11 @@ async function main() {
 
   // --- level-of-detail tiles ------------------------------------------------
   const ERR = config.err;           // max on-screen size of one voxel, px
-  const lod = new TileManager(dataUrl(`tiles/${ROI}`), CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer);
+  const lod = new TileManager(dataUrl(`tiles/${ROI}`), CH, manifest.levels, world, SHADOWS, config.lod ? ERR : 0, renderer,
+    tier.inflight, tier.workers, tier.atlasRows);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
-  lod.budgetFaces = config.budget * 1e6;  // resident faces, millions (the face atlas holds 33.5M: slack)
+  lod.cache = config.tileCache ? tileCache(ROI, manifest.build) : null;
+  lod.budgetFaces = Math.min(tier.budgetFaces, (tier.atlasRows * 4096) / 2);  // resident faces (the atlas holds twice that: slack)
   const t0 = performance.now();
   let loadMs = 0;
   const ready = new Promise<void>((resolve) => {
@@ -374,7 +399,7 @@ async function main() {
   if (config.traffic) ready.then(() => setTraffic(true));
 
   // --- CPU voxel access, walking, picking ---------------------------------
-  const vox = new Voxels(dataUrl(`tiles/${ROI}`), CH, L0, world, lod.query);
+  const vox = new Voxels(dataUrl(`tiles/${ROI}`), CH, L0, world, lod.query, lod.cache);
   const crosshair = document.getElementById('crosshair')!;
   const walkHint = document.getElementById('walk-hint')!;
   const walk = new Walk(camera, renderer.domElement, vox, (active) => {
@@ -477,7 +502,12 @@ async function main() {
 
   // --- input ---------------------------------------------------------------
   let snapshotRequested = false;
+  // the default view stays clean: frame and tile statistics behind D, the controls behind ? (or the button)
+  const toggleHelp = () => document.body.classList.toggle('help');
+  document.getElementById('help-btn')!.addEventListener('click', toggleHelp);
   window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if ((e.key === 'd' || e.key === 'D') && !walk.active) document.body.classList.toggle('debug');   // (in walk mode D steps right)
+    if (e.key === '?') toggleHelp();
     if ((e.key === 'h' || e.key === 'H') && !walk.active) setView(home);
     if (e.key === 'l' || e.key === 'L') setMode(viewMode.value === 0);
     if ((e.key === 'p' || e.key === 'P') && TELEMETRY) snapshotRequested = true;
@@ -721,7 +751,7 @@ async function main() {
     renderer, scene, cityScene, deferred, camera, controls, ready, setView, getView, home, frameHooks, gpuHooks, lod, vox, walk, inspector,
     setTime, setTilt, toggleWalk, setTraffic, get traffic() { return traffic; }, get agents() { return agents; }, get peds() { return peds; }, get transit() { return transit; }, get city() { return city; }, get noise() { return noise; }, setNoise, setSound, agentTime,
     whenIdle: () => lod.whenIdle(), prof,
-    info: () => ({ backend, ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
+    info: () => ({ backend, tier: tier.name, budget: lod.budgetFaces, atlasRows: lod.atlas.rows, errScale: +lod.errScale.toFixed(2), ...lod.stats, loadMs, rendered, cityRenders, shadowRenders, gpuMs,
       drawCalls: renderer.info.render.drawCalls, triangles: renderer.info.render.triangles }),
   };
 }
@@ -729,6 +759,7 @@ async function main() {
 main().catch((e) => {
   const msg = `error: ${e?.message ?? e}`;
   hud.textContent = msg + '\n(WebGL/WebGPU may be disabled in this browser)';
+  hud.classList.add('error');
   telemetry.error('main', String(e?.stack ?? e));
   console.error(e);
 });

@@ -19,7 +19,8 @@ export class Voxels {
   private pending = new Map<number, Promise<Tile | null>>();
   private clock = 0;
 
-  constructor(private base: string, private ch: number, level: LevelInfo, private world: THREE.Object3D, private query = '') {
+  constructor(private base: string, private ch: number, level: LevelInfo, private world: THREE.Object3D, private query = '',
+    private cache: string | null = null) {
     this.vs = level.voxelSize;
     [this.nx, this.ny, this.nz] = level.size;
     for (const t of level.tiles) this.infos.set(this.key(t.tx, t.ty), t);
@@ -60,7 +61,7 @@ export class Voxels {
     if (!info) return Promise.resolve(null);
     let p = this.pending.get(k);
     if (!p) {
-      p = fetchTile(`${this.base}/${info.file}${this.query}`).then((raw) => {
+      p = fetchTile({ url: new URL(`${this.base}/${info.file}${this.query}`, location.href).href, off: info.off, len: info.len, cache: this.cache }).then((raw) => {
         const ch = this.ch, occ = new Uint8Array(ch * ch * this.nz), photo = new Uint8Array(ch * ch);
         for (let o = 0; o < raw.length; o += 8) {
           if (raw[o + 7] & FLAG_APRON) continue;
