@@ -375,6 +375,7 @@ async function main() {
     tier.inflight, tier.workers, tier.atlasRows);
   lod.query = manifest.build ? `?v=${manifest.build}` : '';
   lod.cache = config.tileCache ? tileCache(ROI, manifest.build) : null;
+  lod.errScale = tier.detail;
   lod.budgetFaces = Math.min(tier.budgetFaces, (tier.atlasRows * ATLAS_W) / 2);  // resident faces (the atlas holds twice that: slack)
   const t0 = performance.now();
   let loadMs = 0;

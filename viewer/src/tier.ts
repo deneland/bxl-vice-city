@@ -13,6 +13,8 @@ interface Tier {
   megapixels: number;    // render resolution cap
   workers: number;       // mesher workers
   inflight: number;      // tiles fetched / meshed at once
+  detail: number;        // starting level-of-detail scale (lod.ts errScale): phones start coarser, so they do not
+                         // first load full detail and then drop it (it still adapts from there)
 }
 
 /** the largest texture this device's WebGL2 supports (a throwaway context; 0: no WebGL2) */
@@ -38,7 +40,7 @@ export function deviceTier(): Tier {
   const why = forced ? `?tier=${forced}` : reasons.join(', ') || 'desktop';
   return low
     ? { name: 'low', why, atlasRows: 4096, budgetFaces: (config.budget ?? 5) * 1e6, megapixels: config.megapixels ?? 1.5,
-        workers: Math.max(2, Math.min(3, cores - 1)), inflight: 8 }
+        workers: Math.max(2, Math.min(3, cores - 1)), inflight: 8, detail: 2 }
     : { name: 'high', why, atlasRows: 8192, budgetFaces: (config.budget ?? 16) * 1e6, megapixels: config.megapixels ?? 3.5,
-        workers: Math.max(2, Math.min(8, cores - 1)), inflight: 16 };
+        workers: Math.max(2, Math.min(8, cores - 1)), inflight: 16, detail: 1 };
 }
