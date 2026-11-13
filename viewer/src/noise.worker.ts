@@ -1,33 +1,29 @@
-// Noise map worker: the equivalent continuous level (Leq, dB(A)) of the traffic at every 4 m cell of the
-// ground plan, over the whole region.
+// Noise map worker: the equivalent continuous level (Leq, dB(A)) at every 4 m cell of the ground plan, over
+// the whole region.
 //
-//  sources     energy (J) the simulated vehicles emitted in each cell, per kind (road / tram / rail)
-//  observed    seconds each area was inside the simulated zone around the focus (32 m cells): vehicles
-//              only exist near where you look
-//  estimate    elsewhere, streets of the same kind emit like the observed ones: per kind and road class
-//              (lanes.json rank), the mean power per cell of the observed cells. A cell's power is its
-//              measured energy plus that estimate for a prior time T0, divided by (observed time + T0): an
-//              unobserved street gets its class mean, a long-watched one what was measured there (the way
-//              official noise maps are made: typical flows per street type, measured where available)
+//  streets     every street, track and rail line emits the typical power of its kind and class at this
+//              hour (noisemap.ts streetPower: W per 4 m cell of lane), wherever it is
+//  events      horns, tram bells and sirens of the simulation where you watch: their energy per cell,
+//              averaged over the time the area was simulated (observed; 32 m cells), damped by T0 so a
+//              single horn does not light up a street for minutes
 //  spreading   point sources in the open, received intensity P / (2π r²) (hemisphere over the ground):
 //              the 1/r² kernel as a sum of Gaussians one octave apart (a pyramid: sum 2×2 down, blur,
 //              add back up), scaled once against the exact kernel. No screening by buildings yet.
 //
 // in:  { type: 'init', w, h, cell, db: [min, max] }   grid size in cells, cell size (m), range of the bytes
 //      { type: 'lanes', pts: Float32Array [east, north, kind, rank]... }   points every ~2 m along the lanes
-//      { type: 'add', src: Float32Array [east, north, joules, kind]..., focus: [east, north], radius, dt }
-//      { type: 'compute', prior: Float64Array | null }  ->  { type: 'map', data: Uint8Array (w × h; 0: no level, else dB) }
-//            prior: W per cell by kind × class from a calibration run (bench/noisecal.mjs), NaN where unknown
-//      { type: 'rates' }  ->  { type: 'rates', e, t }   energy and observed time per kind × class (calibration)
+//      { type: 'add', src: Float32Array [east, north, joules]..., focus: [east, north], radius, dt }
+//      { type: 'compute', streets: Float64Array (W per cell by kind × class) }
+//        ->  { type: 'map', data: Uint8Array (w × h; 0: no level, else dB) }
 
 let DB_MIN = 40, DB_MAX = 85;   // byte 1..255 covers this range (set by noisemap.ts)
 const OBS = 32;          // m: cells of the observation-time grid
-const T0 = 60;           // s: prior weight of the street-type estimate in observed cells
+const T0 = 60;           // s: an event's energy is spread over at least this much time
 const KINDS = 3;         // road, tram, rail (roads.ts KIND)
 const RANKS = 16;        // road classes per kind (lane rank, clamped)
 
 let W = 0, H = 0, CELL = 4;
-let src: Float64Array[] = [];                 // per kind: J per cell
+let src = new Float64Array(0);                // event energy (J) per cell
 let cls = new Int8Array(0);                   // per kind × cell: lane class (rank) there, -1: no lane of that kind
 let obs = new Float32Array(0), OW = 0, OH = 0;
 let calib = 1;           // pyramid output × calib = intensity per joule (exact at the calibration distances)
@@ -101,47 +97,11 @@ function calibrate() {
 const obsAt = (i: number, j: number) =>
   obs[Math.min(OH - 1, Math.floor((j * CELL) / OBS)) * OW + Math.min(OW - 1, Math.floor((i * CELL) / OBS))];
 
-/** energy (J) and observed cell-seconds by kind and class */
-function classSums() {
-  const e = new Float64Array(KINDS * RANKS), t = new Float64Array(KINDS * RANKS);
-  for (let k = 0; k < KINDS; k++) {
-    const s = src[k], c = k * W * H;
-    for (let j = 0; j < H; j++)
-      for (let i = 0; i < W; i++) {
-        const r = cls[c + j * W + i];
-        if (r < 0) continue;
-        const o = obsAt(i, j);
-        if (o <= 0) continue;
-        e[k * RANKS + r] += s[j * W + i]; t[k * RANKS + r] += o;
-      }
-  }
-  return { e, t };
-}
-
-/** mean power per cell (W) by kind and class: the calibrated prior where there is one, else from the cells
- *  observed so far (NaN: unknown) */
-function classRates(prior: Float64Array | null) {
-  const { e, t } = classSums();
-  const rate = new Float64Array(KINDS * RANKS).fill(NaN);
-  for (let x = 0; x < rate.length; x++) rate[x] = prior && !Number.isNaN(prior[x]) ? prior[x] : t[x] > 0 ? e[x] / t[x] : NaN;
-  // a class never observed: the nearest observed class of the same kind
-  for (let k = 0; k < KINDS; k++)
-    for (let r = 0; r < RANKS; r++) {
-      if (!Number.isNaN(rate[k * RANKS + r])) continue;
-      for (let d = 1; d < RANKS; d++) {
-        const a = rate[k * RANKS + r - d], b = rate[k * RANKS + r + d];
-        if (r - d >= 0 && !Number.isNaN(a)) { rate[k * RANKS + r] = a; break; }
-        if (r + d < RANKS && !Number.isNaN(b)) { rate[k * RANKS + r] = b; break; }
-      }
-    }
-  return rate;
-}
-
 self.onmessage = (e: MessageEvent) => {
   const m = e.data;
   if (m.type === 'init') {
     W = m.w; H = m.h; CELL = m.cell; [DB_MIN, DB_MAX] = m.db;
-    src = Array.from({ length: KINDS }, () => new Float64Array(W * H));
+    src = new Float64Array(W * H);
     cls = new Int8Array(KINDS * W * H).fill(-1);
     OW = Math.ceil((W * CELL) / OBS); OH = Math.ceil((H * CELL) / OBS);
     obs = new Float32Array(OW * OH);
@@ -154,14 +114,11 @@ self.onmessage = (e: MessageEvent) => {
       const x = kind * W * H + j * W + i, r = Math.max(0, Math.min(RANKS - 1, a[k + 3]));
       if (r > cls[x]) cls[x] = r;   // (several lanes in a cell: the highest class)
     }
-  } else if (m.type === 'rates') {
-    const { e, t } = classSums();
-    (self as unknown as Worker).postMessage({ type: 'rates', e, t, kinds: KINDS, ranks: RANKS, cell: CELL });
   } else if (m.type === 'add') {
     const a: Float32Array = m.src;
-    for (let k = 0; k + 3 < a.length; k += 4) {
-      const i = Math.floor(a[k] / CELL), j = Math.floor(a[k + 1] / CELL), kind = a[k + 3];
-      if (i >= 0 && j >= 0 && i < W && j < H && kind >= 0 && kind < KINDS) src[kind][j * W + i] += a[k + 2];
+    for (let k = 0; k + 2 < a.length; k += 3) {
+      const i = Math.floor(a[k] / CELL), j = Math.floor(a[k + 1] / CELL);
+      if (i >= 0 && j >= 0 && i < W && j < H) src[j * W + i] += a[k + 2];
     }
     // observed: every 32 m cell whose centre is within the radius of the focus
     const [fx, fy] = m.focus as [number, number], R = m.radius as number;
@@ -173,18 +130,16 @@ self.onmessage = (e: MessageEvent) => {
         if (dx * dx + dy * dy < R * R) obs[j * OW + i] += m.dt;
       }
   } else if (m.type === 'compute') {
-    // power per cell: measured where observed, the street-type estimate elsewhere (blended by T0)
-    const rate = classRates(m.prior ?? null), P = new Float64Array(W * H);
-    for (let j = 0; j < H; j++)
-      for (let i = 0; i < W; i++) {
-        const o = obsAt(i, j), x = j * W + i;
-        let p = 0;
-        for (let k = 0; k < KINDS; k++) {
-          const r = cls[k * W * H + x], est = r >= 0 ? rate[k * RANKS + r] : NaN;
-          p += Number.isNaN(est) ? (o > 0 ? src[k][x] / (o + T0) : 0) : (src[k][x] + est * T0) / (o + T0);
-        }
-        P[x] = p;
+    // power per cell: the streets there, plus the events seen there (averaged over the observed time)
+    const streets: Float64Array = m.streets, P = new Float64Array(W * H);
+    for (let x = 0; x < W * H; x++) {
+      let p = src[x] > 0 ? src[x] / (obsAt(x % W, Math.floor(x / W)) + T0) : 0;
+      for (let k = 0; k < KINDS; k++) {
+        const r = cls[k * W * H + x];
+        if (r >= 0) p += streets[k * RANKS + r];
       }
+      P[x] = p;
+    }
     const r = spread(P, W, H, CELL), out = new Uint8Array(W * H);
     const k = calib / 1e-12;   // intensity re 1 pW/m²
     for (let x = 0; x < W * H; x++) {

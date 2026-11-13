@@ -107,10 +107,10 @@ npm run deploy                    # build, and make the gh-pages branch that bui
 git push -f origin gh-pages       # publish it
 ```
 
-When only the app changed, the new site commit builds on the previous one and the push uploads just the
-changed files (a few hundred kB). When the data changed (a new pipeline build), `gh-pages` starts afresh
-with a single commit (the push uploads the whole site, ~0.4 GB; hence the `-f`) and the old version is
-pruned locally, so old data never piles up in the history. Once, on GitHub: Settings > Pages > Deploy from
+Normally the new site commit builds on the previous one and the push uploads just the changed files (a few
+hundred kB when only the app changed). After a new pipeline build (more than 20 MB of files replaced),
+`gh-pages` starts afresh with a single commit (the push uploads the whole site, ~0.4 GB; hence the `-f`)
+and the old version is pruned locally, so old data never piles up in the history. Once, on GitHub: Settings > Pages > Deploy from
 a branch > `gh-pages`, `/ (root)`. Pushing `main` (the code) is separate.
 
 Any static host that supports HTTP range requests works. The data can also live on another host than the
@@ -125,8 +125,6 @@ Performance comes first: an average laptop (Intel iGPU, Firefox) must run it smo
   camera scenarios in headless Chromium, compared with `bench/baseline.json`
 - `npm run sessions`: summary of real sessions; the viewer posts telemetry to the dev server
   (`data/metrics/sessions.jsonl`)
-- `npm run noisecal`: runs the simulation headless at a few hours of the day and writes the noise levels
-  per street type that the noise map starts from (`public/noise/<roi>.json`)
 
 Measure on finished builds only.
 
@@ -158,5 +156,3 @@ What follows from these licences when publishing a built city (not the code):
   modified: the LiDAR is voxelised, filtered and recoloured; the timetable is clipped and simulated.
 - **Weather.** A commercial deployment needs an Open-Meteo API subscription; otherwise switch live
   weather off (`weather=clear`).
-- `viewer/public/noise/schaerbeek.json` (the only data file in the repository) is the simulation's own
-  output: traffic noise per street class, derived from the OpenStreetMap road network (ODbL).

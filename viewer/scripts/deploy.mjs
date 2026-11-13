@@ -21,22 +21,31 @@ try {
   git(['--work-tree', DIST, 'add', '--all', '--force', '.'], env);
   const tree = git(['write-tree'], env);
   const source = git(['rev-parse', '--short', 'HEAD']);
-  // Git push only skips files GitHub already has through shared history. So when only the app changed, the
-  // new site commit builds on the previous one (the push sends just the changed files; history grows by
-  // that much). When the data changed (a new pipeline build: the tiles all differ, a full upload anyway),
-  // it starts afresh, so old data never piles up in the history.
+  // Git push only skips files GitHub already has through shared history. So normally the new site commit
+  // builds on the previous one: the push sends just the changed files, and the history keeps the old
+  // versions of what changed. When that would keep a lot (a new pipeline build: the tiles all differ, a full
+  // upload anyway), it starts afresh, so old data never piles up in the history.
+  const KEEP_MAX = 20e6;   // bytes of replaced or removed files the history may keep
   let previous = '';
   try { previous = git(['rev-parse', '--verify', '--quiet', 'refs/heads/gh-pages']); } catch { /* first deploy */ }
-  const data = (t) => git(['ls-tree', t]).split('\n').filter((l) => !/\t(assets|index\.html|\.nojekyll)$/.test(l)).join('\n');
-  const sameData = previous !== '' && data(tree) === data(`${previous}^{tree}`);
-  const commit = git(['commit-tree', tree, ...(sameData ? ['-p', previous] : []), '-m', `site built from ${source}`]);
+  let replaced = 0;
+  if (previous) {
+    const now = new Map(git(['ls-tree', '-r', tree]).split('\n').map((l) => [l.split('\t')[1], l.split('\t')[0].split(' ')[2]]));
+    for (const l of git(['ls-tree', '-r', '-l', previous]).split('\n')) {
+      const [meta, path] = l.split('\t'), [, , blob, size] = meta.split(/\s+/);
+      if (now.get(path) !== blob) replaced += Number(size);
+    }
+  }
+  const chain = previous !== '' && replaced < KEEP_MAX;
+  const commit = git(['commit-tree', tree, ...(chain ? ['-p', previous] : []), '-m', `site built from ${source}`]);
   git(['update-ref', 'refs/heads/gh-pages', commit]);
   const files = git(['ls-tree', '-r', '--name-only', commit]).split('\n').length;
-  if (!sameData) {   // (the previous site and its data: no longer referenced, pruned locally)
+  if (!chain) {   // (the previous site and its data: no longer referenced, pruned locally)
     git(['reflog', 'expire', '--expire=now', 'refs/heads/gh-pages']);   // (only this branch's log)
     git(['gc', '--prune=now', '--quiet']);
   }
-  console.log(sameData ? 'data unchanged: the push sends only the app' : 'new data: the push sends the whole site');
+  console.log(chain ? `builds on the previous site: the push sends only what changed (${(replaced / 1e6).toFixed(1)} MB of files replaced)`
+    : 'new data: the push sends the whole site');
   console.log(`gh-pages -> ${commit.slice(0, 7)} (built from ${source}, ${files} files). Publish with: git push -f origin gh-pages`);
 } finally {
   rmSync(tmp, { recursive: true, force: true });

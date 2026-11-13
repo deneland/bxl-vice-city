@@ -276,7 +276,6 @@ async function main() {
         noise = new NoiseMap([L0.size[0] * VS, L0.size[1] * VS], () => { dirty = true; });
         noise.visible = noiseWanted;
         noise.setLanes(n.lanes);
-        noise.loadPrior(dataUrl(`noise/${ROI}.json`));   // street-type levels from a calibration run (bench/noisecal.mjs)
         city = new CitySound(traffic, noise);
         if (soundWanted) city.setSound(true);
       } catch (e) {   // (whatever failed: traffic stays off, and T can try again)

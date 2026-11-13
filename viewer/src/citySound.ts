@@ -1,4 +1,4 @@
-// The city's sounds from the simulation: what each vehicle emits (for the ear and the noise map), and the
+// The city's sounds from the simulation: what each vehicle emits (for the ear; sirens also for the noise map), and the
 // events (a horn when stuck behind something that is not a red light, a tram's bell when it pulls away and
 // now and then to warn, a bus's air hiss when it kneels at a stop). Runs while traffic runs; the noise map
 // always gets the energy, the audio engine (audio.ts) only exists once sound is switched on.
@@ -11,10 +11,12 @@ import * as THREE from 'three/webgpu';
 
 const TICK = 0.1;            // s between updates of sources and events
 const VOICES = 10;           // vehicles placed individually
-const HONK_AFTER = 3;        // s stuck (not at a light) before a horn becomes likely
-const HONK_RATE = 0.06;      // horns per second per stuck car (× aggressiveness)
-const HONK_COOLDOWN = 25;    // s between a car's horns
-const WARN_RATE = 1 / 150;   // tram warning bells per second per moving tram
+// horns are rare: only after a long wait that is not a red light, and never in quick succession
+const HONK_AFTER = 6;        // s stuck (not at a light) before a horn becomes possible
+const HONK_RATE = 0.04;      // horns per second per stuck car after that (× aggressiveness)
+const HONK_COOLDOWN = 120;   // s between a car's horns
+const HONK_GAP = 15;         // s between any two horns in the city
+const WARN_RATE = 1 / 400;   // tram warning bells per second per moving tram
 const C = 343;               // m/s, speed of sound
 const CITY_FLOOR = 0.06;     // bed amplitude of the unsimulated city around (same scale as voices)
 const LW = { horn: 112, bell: 106, hiss: 100 };   // dB(A) sound power of the events
@@ -26,6 +28,7 @@ export class CitySound {
   private acc = 0;
   private time = 0;
   private nextHonk = new WeakMap<Vehicle, number>();
+  private lastHonk = -Infinity;
   private pos = new THREE.Vector3();
   /** listener in the traffic group's frame, its view direction and up */
   readonly ear = new THREE.Vector3();
@@ -55,7 +58,7 @@ export class CitySound {
 
   /** a one-shot: energy into the noise map; heard if sound is on */
   private event(kind: keyof typeof LW, p: THREE.Vector3, buf: AudioBuffer | undefined, rate: number) {
-    this.noise.emit(p.x, p.z, LW[kind], DUR[kind], kind === 'bell' ? KIND.tram : KIND.road);
+    this.noise.emit(p.x, p.z, LW[kind], DUR[kind]);
     if (!buf || !this.audio?.enabled) return;
     const g = lwGain(LW[kind]);
     if (g * REF_DIST / Math.max(REF_DIST, p.distanceTo(this.ear)) < 0.002) return;   // (inaudible)
@@ -77,11 +80,13 @@ export class CitySound {
     for (const v of this.traffic.vehicles) {
       this.traffic.positionOf(v, p);
       const lw = vehicleLw(v.t.name, v.v, !!v.siren);
-      this.noise.emit(p.x, p.z, lw, step, v.kind);
+      if (v.siren) this.noise.emit(p.x, p.z, lw, step);   // (the map has the regular traffic per street type)
       // events
       if (v.kind === KIND.road && !v.transit && !v.siren && v.t.name !== 'bike' && v.stuck > HONK_AFTER
-        && Math.random() < HONK_RATE * v.ag * step && (this.nextHonk.get(v) ?? 0) < this.time) {
+        && this.time - this.lastHonk > HONK_GAP && Math.random() < HONK_RATE * v.ag * step
+        && (this.nextHonk.get(v) ?? 0) < this.time) {
         this.nextHonk.set(v, this.time + HONK_COOLDOWN);
+        this.lastHonk = this.time;
         const horns = a?.snd.horns;
         this.event('horn', p, horns?.[Math.floor(Math.random() * horns.length)], 0.92 + Math.random() * 0.18);
       }

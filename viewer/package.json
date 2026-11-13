@@ -9,7 +9,6 @@
     "check": "tsc --noEmit",
     "bench": "node bench/bench.mjs",
     "sessions": "node scripts/sessions.mjs",
-    "noisecal": "node bench/noisecal.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs"
   },
   "dependencies": {
