@@ -71,6 +71,13 @@ The data files (`viewer/public/`: tiles, roads, timetable, ...) can live on anot
 build with `VITE_DATA_URL=https://.../` or open the page with `?data=https://.../` (the host must allow
 cross-origin requests).
 
+## Publishing
+
+The site is static: the app and the data files, no server code. `npm run deploy` (in `viewer/`) builds it and
+puts it on the `gh-pages` branch as a single commit replacing the previous one; `git push -f origin gh-pages`
+publishes it (GitHub Pages: deploy from the `gh-pages` branch). The tiles are read with HTTP range requests,
+so any static host that supports them works; the data can also live on another host (`VITE_DATA_URL`).
+
 ## Measuring
 
 Performance comes first: an average laptop (Intel iGPU, Firefox) must run it smoothly.
